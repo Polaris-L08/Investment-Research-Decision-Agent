@@ -7521,3 +7521,1601 @@ START → LLM → Router ───────→ LLM
 ---
 
 
+
+
+
+## Lesson 8：Investment Decision Schema
+
+这一课会把 Phase 2 前面学到的东西真正收束起来。
+
+我们之前已经有：
+
+```text
+ResearchSummary
+InvestmentDecision
+Recommendation Enum
+InvestmentHorizon Enum
+Structured Output
+Validation
+Failure State
+Retry
+```
+
+现在的问题是：
+
+> `InvestmentDecision` 虽然已经定义出来了，但当前 LLM 实际产生的仍然只是 `ResearchSummary`。
+
+也就是说目前：
+
+```text
+LLM
+ ↓
+ResearchSummary
+```
+
+而我们真正的投资 Agent 最终需要：
+
+```text
+Research
+ ↓
+Investment Decision
+ ↓
+Recommendation
+Horizon
+Thesis
+```
+
+---
+
+### 1. 本课目标
+
+Lesson 8 完成后，我们希望建立这样的结构：
+
+```text
+                    ┌── recommendation
+                    │
+LLM → InvestmentDecision
+                    │
+                    ├── investment_horizon
+                    │
+                    └── investment_thesis
+```
+
+其中：
+
+#### Recommendation
+
+只能是：
+
+```text
+Strong Buy
+Buy
+Hold
+Reduce
+Sell
+```
+
+#### Investment Horizon
+
+只能是：
+
+```text
+Short Term
+Medium Term
+Long Term
+```
+
+#### Investment Thesis
+
+必须是：
+
+```text
+str
+```
+
+并且整个对象由：
+
+```text
+Pydantic
++
+Enum
++
+Structured Output
+```
+
+共同约束。
+
+---
+
+### 2. 先回顾当前模型
+
+你现在的 `models.py` 应该已经包含：
+
+```python
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
+
+class Recommendation(str, Enum):
+    STRONG_BUY = "Strong Buy"
+    BUY = "Buy"
+    HOLD = "Hold"
+    REDUCE = "Reduce"
+    SELL = "Sell"
+
+
+class InvestmentHorizon(str, Enum):
+    SHORT_TERM = "Short Term"
+    MEDIUM_TERM = "Medium Term"
+    LONG_TERM = "Long Term"
+
+
+class ResearchSummary(BaseModel):
+    summary: str = Field(
+        description="A concise summary of the investment research."
+    )
+
+    key_factors: list[str] = Field(
+        description="The key factors that materially affect the investment analysis."
+    )
+
+
+class InvestmentDecision(BaseModel):
+    recommendation: Recommendation = Field(
+        description="The investment recommendation."
+    )
+
+    investment_horizon: InvestmentHorizon = Field(
+        description="The expected investment horizon."
+    )
+
+    investment_thesis: str = Field(
+        description="The concise investment thesis supporting the recommendation."
+    )
+```
+
+这里已经没有问题。
+
+Lesson 8 的重点不是重新定义模型，而是：
+
+> **让这个模型真正成为 LLM Structured Output 的目标。**
+
+---
+
+### 3. 当前的问题
+
+你目前的 `graph.py` 应该类似：
+
+```python
+structured_llm = llm.with_structured_output(ResearchSummary)
+```
+
+这意味着：
+
+```text
+LLM
+ ↓
+ResearchSummary
+```
+
+所以即使我们有：
+
+```python
+InvestmentDecision
+```
+
+LLM 也不会生成它。
+
+---
+
+### 4. 为什么不能直接替换掉 `ResearchSummary`
+
+这里有一个非常重要的架构问题。
+
+我们现在的 LLM Prompt 是：
+
+```text
+Analyze the following investment research request.
+```
+
+它实际上是在做：
+
+> Research
+
+而：
+
+```text
+InvestmentDecision
+```
+
+是在做：
+
+> Decision
+
+这两个阶段在最终架构中应该是不同的职责。
+
+未来我们的 Graph 会是：
+
+```text
+Research
+   ↓
+Valuation
+   ↓
+Risk
+   ↓
+Investment Decision
+   ↓
+Report
+```
+
+所以 Lesson 8 **不要简单地把原来的 `ResearchSummary` 删除**。
+
+我们要建立第二个 Structured LLM。
+
+---
+
+### 5. 两种 Structured Output
+
+因此现在我们有：
+
+```text
+structured_research_llm
+        ↓
+ResearchSummary
+```
+
+以及：
+
+```text
+structured_decision_llm
+        ↓
+InvestmentDecision
+```
+
+这是非常重要的 Agent 架构概念：
+
+> **不同业务职责应该有不同的 Schema。**
+
+---
+
+### 6. 修改 `graph.py`
+
+现在：
+
+```python
+structured_llm = llm.with_structured_output(ResearchSummary)
+```
+
+为了避免混淆，我们将它重命名：
+
+```python
+structured_research_llm = llm.with_structured_output(
+    ResearchSummary
+)
+```
+
+然后增加：
+
+```python
+structured_decision_llm = llm.with_structured_output(
+    InvestmentDecision
+)
+```
+
+因此顶部：
+
+```python
+from app.graph.models import (
+    InvestmentDecision,
+    InvestmentHorizon,
+    Recommendation,
+    ResearchSummary,
+)
+```
+
+不需要修改。
+
+---
+
+### 7. 为什么要两个 Runnable
+
+现在：
+
+```text
+structured_research_llm
+```
+
+的契约是：
+
+```text
+Input → ResearchSummary
+```
+
+而：
+
+```text
+structured_decision_llm
+```
+
+的契约是：
+
+```text
+Input → InvestmentDecision
+```
+
+它们不是同一个东西。
+
+这为未来多 Agent 架构打基础：
+
+```text
+Company Research Agent
+       ↓
+ResearchSummary
+
+Financial Research Agent
+       ↓
+ResearchSummary
+
+Risk Agent
+       ↓
+RiskAnalysis
+
+Decision Agent
+       ↓
+InvestmentDecision
+```
+
+---
+
+### 8. Lesson 8 的核心：Decision Node
+
+新增一个 Node：
+
+```python
+def investment_decision_node(state: GraphState) -> GraphState:
+    ...
+```
+
+它的职责是：
+
+```text
+GraphState
+    ↓
+读取 research_summary
+    ↓
+Decision Prompt
+    ↓
+structured_decision_llm
+    ↓
+InvestmentDecision
+    ↓
+GraphState
+```
+
+---
+
+### 9. Decision Prompt
+
+增加：
+
+```python
+decision_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an investment decision assistant. "
+            "Make a structured investment decision based on the "
+            "provided research summary. "
+            "Use only the allowed recommendation and investment "
+            "horizon values.",
+        ),
+        (
+            "human",
+            "Make an investment decision for the following company.\n\n"
+            "Ticker: {ticker}\n"
+            "User request: {user_query}\n\n"
+            "Research summary:\n"
+            "{research_summary}\n\n"
+            "Key factors:\n"
+            "{key_factors}",
+        ),
+    ]
+)
+```
+
+这里第一次出现了一个重要变化：
+
+原来的：
+
+```text
+Research Prompt
+```
+
+现在变成：
+
+```text
+Decision Prompt
+```
+
+---
+
+### 10. Decision Node
+
+完整写法：
+
+```python
+def investment_decision_node(state: GraphState) -> GraphState:
+    prompt_value = decision_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+            "research_summary": state["research_summary"].summary,
+            "key_factors": ", ".join(
+                state["research_summary"].key_factors
+            ),
+        }
+    )
+
+    try:
+        response = structured_decision_llm.invoke(prompt_value)
+    except Exception as exc:
+        return {
+            "llm_error": str(exc),
+        }
+
+    return {
+        "investment_decision": response,
+        "llm_error": "",
+    }
+```
+
+---
+
+### 11. 这里有一个重要设计问题
+
+现在我们有两个 LLM Node：
+
+```text
+llm_node
+```
+
+和：
+
+```text
+investment_decision_node
+```
+
+而 `llm_error` 是共享字段。
+
+这意味着：
+
+```text
+Research LLM
+    ↓
+llm_error
+
+Decision LLM
+    ↓
+llm_error
+```
+
+目前可以接受。
+
+但是我们必须理解：
+
+> `llm_error` 现在表示“最近一次 LLM 操作的错误”。
+
+未来 Phase 12 Error Recovery 时，我们可能会把它进一步拆成：
+
+```text
+research_error
+decision_error
+valuation_error
+risk_error
+```
+
+或者更通用的 structured error object。
+
+**现在不要重构。**
+
+---
+
+### 12. Graph 顺序
+
+我们现在希望：
+
+```text
+initialize
+   ↓
+research LLM
+   ↓
+research routing
+   ↓
+research plan
+   ↓
+investment decision
+   ↓
+prepare output
+```
+
+不过这里有一个教学上的问题：
+
+我们的 `create_research_plan` 目前只是一个 Mock research planning node。
+
+所以 Lesson 8 先不要把整个 Phase 5 的多 Agent 架构提前做出来。
+
+当前简单链路：
+
+```text
+initialize_state
+      ↓
+llm_node
+      ↓
+route_after_llm
+      ↓
+create_research_plan
+      ↓
+investment_decision_node
+      ↓
+prepare_output
+```
+
+---
+
+### 13. Decision Node 也需要 Failure Handling
+
+这一点非常重要。
+
+我们已经有：
+
+```text
+Research LLM
+    ↓
+Failure
+    ↓
+Retry
+```
+
+Decision LLM 不能突然没有错误处理。
+
+所以最简单的做法是：
+
+> 当前 Lesson 8 先让 Decision Node 使用同一套基础错误 State，但**暂时不复制第二套 Retry Loop**。
+
+也就是说：
+
+```text
+Research LLM
+    ↓
+Retry
+    ↓
+Research Success
+    ↓
+Decision LLM
+    ↓
+Success / Failure
+```
+
+如果 Decision LLM 失败：
+
+```text
+investment_decision_node
+        ↓
+llm_error
+        ↓
+failure branch
+```
+
+这样我们保持本课范围可控。
+
+---
+
+### 14. 但这里出现一个重要问题
+
+当前：
+
+```python
+route_after_llm()
+```
+
+是专门针对：
+
+```text
+llm_node
+```
+
+设计的。
+
+如果直接：
+
+```text
+investment_decision_node
+        ↓
+route_after_llm
+```
+
+那么它虽然 technically 可以工作，但语义不够清晰。
+
+所以我们新增：
+
+```python
+def route_after_decision(state: GraphState) -> str:
+    if state["llm_error"]:
+        return "llm_failure"
+
+    return "continue"
+```
+
+然后：
+
+```text
+investment_decision_node
+        ↓
+route_after_decision
+        ├── continue
+        ↓
+ prepare_output
+
+        └── llm_failure
+               ↓
+       handle_llm_failure
+```
+
+---
+
+### 15. 修改 `OutputState`
+
+现在我们的 `OutputState` 仍然从：
+
+```text
+recommendation
+investment_horizon
+investment_thesis
+```
+
+这些字段读取。
+
+但 Lesson 8 的目标是让：
+
+```text
+InvestmentDecision
+```
+
+成为这些字段的**真正来源**。
+
+因此修改：
+
+```python
+def prepare_output(state: GraphState) -> OutputState:
+    decision = state["investment_decision"]
+
+    return {
+        "ticker": state["ticker"],
+        "recommendation": decision.recommendation,
+        "investment_horizon": decision.investment_horizon,
+        "current_price": state["current_price"],
+        "target_price": state["target_price"],
+        "investment_thesis": decision.investment_thesis,
+        "failure_reason": state["failure_reason"],
+    }
+```
+
+这一步非常重要。
+
+以前：
+
+```text
+GraphState.recommendation
+GraphState.investment_horizon
+GraphState.investment_thesis
+```
+
+实际上是独立字段。
+
+现在：
+
+```text
+InvestmentDecision
+        ↓
+recommendation
+investment_horizon
+investment_thesis
+        ↓
+OutputState
+```
+
+我们开始建立**单一事实来源**。
+
+---
+
+### 16. 为什么这是一个重要改进
+
+之前存在潜在的不一致：
+
+```text
+recommendation = Hold
+
+investment_decision.recommendation = Buy
+```
+
+到底哪个是真的？
+
+这是典型的：
+
+> Duplicate State
+
+Lesson 8 开始解决它。
+
+最终我们希望：
+
+```text
+InvestmentDecision
+        ↓
+    Single Source
+        ↓
+OutputState
+```
+
+而不是：
+
+```text
+recommendation ─────┐
+investment_horizon ─┼→ Output
+investment_thesis ──┤
+InvestmentDecision ─┘
+```
+
+---
+
+### 17. 一个重要的迁移问题
+
+但是当前 `GraphState` 仍然保留：
+
+```python
+recommendation: Recommendation
+investment_horizon: InvestmentHorizon
+investment_thesis: str
+```
+
+**暂时不要删除。**
+
+原因：
+
+这是一个渐进式迁移。
+
+现在：
+
+```text
+旧字段
++
+InvestmentDecision
+```
+
+Lesson 8 先建立：
+
+```text
+InvestmentDecision → Output
+```
+
+以后等 Decision Agent 完全稳定，我们再清理旧字段。
+
+这正是我们项目一直遵循的：
+
+> **不频繁重构，先让新路径跑通。**
+
+---
+
+### 18. `investment_decision_node` 的测试
+
+在：
+
+```text
+tests/test_graph.py
+```
+
+增加：
+
+```python
+from app.graph.models import (
+    InvestmentDecision,
+    InvestmentHorizon,
+    Recommendation,
+    ResearchSummary,
+)
+```
+
+测试：
+
+```python
+def test_investment_decision_node_returns_structured_decision():
+    fake_decision = InvestmentDecision(
+        recommendation=Recommendation.BUY,
+        investment_horizon=InvestmentHorizon.LONG_TERM,
+        investment_thesis=(
+            "Strong business fundamentals support a long-term position."
+        ),
+    )
+
+    fake_structured_decision_llm = MagicMock()
+    fake_structured_decision_llm.invoke.return_value = fake_decision
+
+    state = {
+        "user_query": "Analyze Apple as a long-term investment",
+        "ticker": "AAPL",
+        "research_summary": ResearchSummary(
+            summary="Strong business fundamentals.",
+            key_factors=[
+                "Revenue growth",
+                "Profitability",
+            ],
+        ),
+        "llm_error": "",
+    }
+
+    with patch(
+        "app.graph.graph.structured_decision_llm",
+        fake_structured_decision_llm,
+    ):
+        result = investment_decision_node(state)
+
+    fake_structured_decision_llm.invoke.assert_called_once()
+
+    assert result["investment_decision"] == fake_decision
+    assert (
+        result["investment_decision"].recommendation
+        == Recommendation.BUY
+    )
+    assert (
+        result["investment_decision"].investment_horizon
+        == InvestmentHorizon.LONG_TERM
+    )
+```
+
+---
+
+### 19. 测试 Decision Prompt
+
+再增加一个非常有价值的测试：
+
+```python
+def test_decision_prompt_injects_research_context():
+    prompt_value = decision_prompt.invoke(
+        {
+            "ticker": "AAPL",
+            "user_query": "Evaluate Apple as a long-term investment.",
+            "research_summary": "Strong business fundamentals.",
+            "key_factors": "Revenue growth, Profitability",
+        }
+    )
+
+    prompt_text = "\n".join(
+        message.content
+        for message in prompt_value.messages
+    )
+
+    assert "AAPL" in prompt_text
+    assert "Strong business fundamentals." in prompt_text
+    assert "Revenue growth, Profitability" in prompt_text
+```
+
+这保证：
+
+```text
+ResearchSummary
+       ↓
+Prompt
+```
+
+没有断掉。
+
+---
+
+### 20. 测试 Output Mapping
+
+这个测试尤其重要，因为我们刚才做了：
+
+```text
+InvestmentDecision
+       ↓
+OutputState
+```
+
+测试：
+
+```python
+def test_prepare_output_uses_investment_decision():
+    state = {
+        "ticker": "AAPL",
+        "current_price": 200.0,
+        "target_price": 250.0,
+        "investment_decision": InvestmentDecision(
+            recommendation=Recommendation.BUY,
+            investment_horizon=InvestmentHorizon.LONG_TERM,
+            investment_thesis="Strong long-term fundamentals.",
+        ),
+        "failure_reason": "",
+    }
+
+    result = prepare_output(state)
+
+    assert result["ticker"] == "AAPL"
+    assert result["recommendation"] == Recommendation.BUY
+    assert result["investment_horizon"] == InvestmentHorizon.LONG_TERM
+    assert result["investment_thesis"] == (
+        "Strong long-term fundamentals."
+    )
+    assert result["failure_reason"] == ""
+```
+
+---
+
+### 21. 最重要的 Graph Integration Test
+
+我们还需要验证：
+
+```text
+Research
+ ↓
+Decision
+ ↓
+Output
+```
+
+可以正常运行。
+
+测试：
+
+```python
+def test_graph_produces_investment_decision_output():
+    fake_research = ResearchSummary(
+        summary="Strong business fundamentals.",
+        key_factors=[
+            "Revenue growth",
+            "Profitability",
+        ],
+    )
+
+    fake_decision = InvestmentDecision(
+        recommendation=Recommendation.BUY,
+        investment_horizon=InvestmentHorizon.LONG_TERM,
+        investment_thesis="Strong long-term fundamentals.",
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = fake_research
+
+    fake_structured_decision_llm = MagicMock()
+    fake_structured_decision_llm.invoke.return_value = fake_decision
+
+    with (
+        patch(
+            "app.graph.graph.structured_research_llm",
+            fake_structured_llm,
+        ),
+        patch(
+            "app.graph.graph.structured_decision_llm",
+            fake_structured_decision_llm,
+        ),
+    ):
+        result = graph.invoke(
+            {
+                "user_query": "Analyze Apple as a long-term investment",
+                "ticker": "AAPL",
+            }
+        )
+
+    assert result["ticker"] == "AAPL"
+    assert result["recommendation"] == Recommendation.BUY
+    assert result["investment_horizon"] == (
+        InvestmentHorizon.LONG_TERM
+    )
+    assert result["investment_thesis"] == (
+        "Strong long-term fundamentals."
+    )
+    assert result["failure_reason"] == ""
+```
+
+---
+
+### 22. 注意一个测试迁移点
+
+你现有测试中如果还有：
+
+```python
+patch(
+    "app.graph.graph.structured_llm",
+    ...
+)
+```
+
+需要根据我们新的命名修改成：
+
+```python
+patch(
+    "app.graph.graph.structured_research_llm",
+    ...
+)
+```
+
+因为我们已经明确区分：
+
+```text
+structured_research_llm
+structured_decision_llm
+```
+
+这是**有意义的命名变化**，不是为了重构而重构。
+
+---
+
+### 23. 当前 Graph 的目标结构
+
+Lesson 8 完成后：
+
+```text
+START
+  ↓
+initialize_state
+  ↓
+llm_node
+  ↓
+route_after_llm
+  │
+  ├── retry ───────────────┐
+  │                        │
+  │                        ↓
+  │                     llm_node
+  │
+  ├── llm_failure
+  │       ↓
+  │  handle_llm_failure
+  │       ↓
+  │ prepare_failure_output
+  │       ↓
+  │      END
+  │
+  └── continue
+          ↓
+ create_research_plan
+          ↓
+ investment_decision_node
+          ↓
+ route_after_decision
+       │         │
+       │         └── llm_failure
+       │                 ↓
+       │            handle_llm_failure
+       │                 ↓
+       │         prepare_failure_output
+       │
+       └── continue
+               ↓
+        prepare_output
+               ↓
+              END
+```
+
+---
+
+### 24. 一个需要特别理解的架构演进
+
+Phase 2 到这里，我们实际上完成了：
+
+```text
+Lesson 1
+LLM Node
+```
+
+↓
+
+```text
+Lesson 2
+Prompt + LLM
+```
+
+↓
+
+```text
+Lesson 3
+Pydantic Structured Output
+```
+
+↓
+
+```text
+Lesson 4
+Structured Output → GraphState
+```
+
+↓
+
+```text
+Lesson 5
+Enum / Domain Validation
+```
+
+↓
+
+```text
+Lesson 6
+Failure State
+```
+
+↓
+
+```text
+Lesson 7
+Retry / Recovery
+```
+
+↓
+
+```text
+Lesson 8
+Business Decision Schema
+```
+
+最终：
+
+```text
+LLM
+ ↓
+Structured Schema
+ ↓
+Validated Business Object
+ ↓
+Graph State
+ ↓
+Retry / Failure Recovery
+ ↓
+Investment Decision
+ ↓
+Output
+```
+
+这才是 Phase 2 真正想建立的基础。
+
+---
+
+### 25. Lesson 8 Acceptance Criteria
+
+完成以后：
+
+#### Investment Decision
+
+* [ ] `InvestmentDecision` 成为真正的 Structured Output 目标
+* [ ] `Recommendation` 使用 Enum
+* [ ] `InvestmentHorizon` 使用 Enum
+* [ ] `investment_thesis` 为字符串
+* [ ] LLM 输出直接得到 `InvestmentDecision`
+
+#### Prompt
+
+* [ ] 有独立 `decision_prompt`
+* [ ] Prompt 包含 ticker
+* [ ] Prompt 包含 user query
+* [ ] Prompt 包含 research summary
+* [ ] Prompt 包含 key factors
+
+#### Graph
+
+* [ ] `investment_decision_node` 存在
+* [ ] Research → Decision 链路建立
+* [ ] Decision 有独立 routing
+* [ ] Decision failure 可以进入已有 failure branch
+
+#### Output
+
+* [ ] `prepare_output()` 从 `InvestmentDecision` 获取 recommendation
+* [ ] `prepare_output()` 从 `InvestmentDecision` 获取 horizon
+* [ ] `prepare_output()` 从 `InvestmentDecision` 获取 thesis
+* [ ] 不再让 Output 同时依赖两套不同的决策来源
+
+#### Tests
+
+* [ ] Decision Node 测试通过
+* [ ] Decision Prompt 测试通过
+* [ ] Output Mapping 测试通过
+* [ ] Graph Integration 测试通过
+* [ ] Phase 1 + Phase 2 所有既有测试全部通过
+
+---
+
+### 26. 一个重要提醒
+
+这一课**不要接真实行情、财务数据、Yahoo Finance、Alpha Vantage 等外部工具**。
+
+现在仍然严格遵循：
+
+```text
+Phase 2
+LLM Reliability
+```
+
+而：
+
+```text
+Phase 3
+Tool Calling
+```
+
+才开始接工具。
+
+因此现在：
+
+```text
+current_price = 0.0
+target_price = 0.0
+```
+
+仍然是正常的。
+
+我们还没有进入真正的估值计算。
+
+---
+
+### 现在开始实施 Lesson 8
+
+建议按照这个顺序修改：
+
+```text
+1. models.py
+   ↓
+   确认 InvestmentDecision
+
+2. graph.py
+   ↓
+   structured_research_llm
+   structured_decision_llm
+   decision_prompt
+   investment_decision_node
+   route_after_decision
+   prepare_output
+
+3. Graph topology
+   ↓
+   Research → Decision → Output
+
+4. tests/test_graph.py
+   ↓
+   Decision Node
+   Decision Prompt
+   Output Mapping
+   Integration
+
+5. pytest -q
+```
+
+需要注意的是，上面的代码修改中没有进行 Graph topology 的修改。
+
+---
+
+
+## Lesson 8 验收结论
+
+根据你反馈的测试结果，**Lesson 8 通过**。
+
+当前 Phase 2 已经完成了几个非常关键的能力：
+
+### 1. Structured Output
+
+已经从：
+
+```python
+llm.invoke(...)
+```
+
+逐步演进到了：
+
+```python
+structured_research_llm.invoke(...)
+```
+
+以及：
+
+```python
+structured_decision_llm.invoke(...)
+```
+
+因此现在 LLM 输出不再只是普通字符串，而是经过 Pydantic Schema 约束的业务对象。
+
+---
+
+### 2. 业务枚举约束
+
+最终推荐已经不是任意字符串，而是：
+
+```text
+Strong Buy
+Buy
+Hold
+Reduce
+Sell
+```
+
+投资周期也被约束为：
+
+```text
+Short Term
+Medium Term
+Long Term
+```
+
+这是后面投资决策 Agent 非常重要的基础。
+
+---
+
+### 3. Research 与 Decision 已经分层
+
+现在有两个不同的业务对象：
+
+```text
+ResearchSummary
+        ↓
+InvestmentDecision
+```
+
+也就是说：
+
+> **研究结论 ≠ 投资决策**
+
+这是一个很重要的架构边界。
+
+Research Agent 后面负责回答：
+
+> “我们发现了什么？”
+
+Decision Agent 负责回答：
+
+> “基于这些研究，应该形成什么投资判断？”
+
+后面的 Multi-Agent Architecture 会继续沿着这个边界扩展。
+
+---
+
+### 4. Decision 已经真正进入 Graph
+
+你补充的：
+
+```python
+builder.add_node("investment_decision_node", investment_decision_node)
+```
+
+以及：
+
+```python
+builder.add_edge("create_research_plan", "investment_decision_node")
+```
+
+使 `InvestmentDecision` 不再只是一个 Pydantic Model，而成为真正的 Graph execution node。
+
+这是 Lesson 8 最重要的验收点之一。
+
+---
+
+### 5. Decision Failure 已经进入统一 Failure Path
+
+你现在的：
+
+```python
+builder.add_conditional_edges(
+    "investment_decision_node",
+    route_after_decision,
+    {
+        "continue": "prepare_output",
+        "llm_failure": "handle_llm_failure",
+    }
+)
+```
+
+形成：
+
+```text
+Decision LLM Failure
+        ↓
+handle_llm_failure
+        ↓
+prepare_failure_output
+        ↓
+END
+```
+
+这也验证了前面 Lesson 6 学到的一个重要原则：
+
+> **失败状态必须真正进入可观测的 Output Path，而不能停留在 Graph 内部。**
+
+---
+
+## Phase 2 到这里可以正式收尾
+
+现在可以把 Phase 2 的学习成果总结成：
+
+```text
+Phase 2 — LLM + Structured Output
+
+InputState
+    ↓
+initialize_state
+    ↓
+Prompt
+    ↓
+Research LLM
+    ↓
+ResearchSummary
+    ↓
+Research Plan
+    ↓
+Decision Prompt
+    ↓
+Decision LLM
+    ↓
+InvestmentDecision
+    ↓
+OutputState
+```
+
+同时已经具备：
+
+```text
+                    ┌── retry ──┐
+                    ↓            │
+initialize → LLM → route ────────┘
+                    │
+                    ├── failure → failure output
+                    │
+                    ↓
+             research plan
+                    ↓
+          investment decision
+                    ↓
+                  route
+                 /     \
+                /       \
+          failure       success
+             ↓             ↓
+       failure output   final output
+```
+
+因此 **Phase 2 CLOSED**。
+
+---
+
+## Phase 2 最重要的几个知识点
+
+这一阶段不是简单学习“怎么调用 LLM”，真正需要掌握的是下面这些。
+
+### 知识点 1：LLM 是 Graph Node 的执行能力
+
+LangGraph 本身不负责产生投资研究内容。
+
+它负责：
+
+```text
+State
+ ↓
+Node
+ ↓
+LLM
+ ↓
+State Update
+```
+
+所以：
+
+> LangGraph 是 orchestration layer，LLM 是 node 内部的 reasoning capability。
+
+---
+
+### 知识点 2：Structured Output 是 Agent 系统的重要边界
+
+普通：
+
+```python
+response.content
+```
+
+意味着：
+
+```text
+LLM → String
+```
+
+Structured Output：
+
+```python
+response = structured_llm.invoke(...)
+```
+
+意味着：
+
+```text
+LLM
+ ↓
+Pydantic Schema
+ ↓
+Validated Business Object
+```
+
+后者才能可靠地进入后续 Graph。
+
+---
+
+### 知识点 3：Pydantic Schema 不只是数据结构
+
+例如：
+
+```python
+class InvestmentDecision(BaseModel):
+    recommendation: Recommendation
+    investment_horizon: InvestmentHorizon
+    investment_thesis: str
+```
+
+实际上是在定义：
+
+> **Decision Agent 的 Contract**
+
+后面无论是 Report Agent、FastAPI，还是 Evaluation，都可以依赖这个 Contract。
+
+---
+
+### 知识点 4：Graph Topology 本身就是业务逻辑
+
+你刚刚发现的问题非常典型：
+
+即使我们已经定义：
+
+```python
+InvestmentDecision
+investment_decision_node
+route_after_decision
+```
+
+如果 Graph 没有：
+
+```python
+create_research_plan → investment_decision_node
+```
+
+那么这些代码实际上都不会执行。
+
+所以在 LangGraph 中必须同时关注：
+
+```text
+State Schema
++
+Node
++
+Edge
++
+Conditional Edge
+```
+
+四者共同决定真正的 Agent 行为。
+
+---
+
+## Phase 2 最终验收标准
+
+| 项目                       | 状态       |
+|----------------------------|------------|
+| ChatOpenAI 接入            | ✅         |
+| Prompt Template            | ✅         |
+| LLM Node                   | ✅         |
+| Pydantic Structured Output | ✅         |
+| ResearchSummary            | ✅         |
+| InvestmentDecision         | ✅         |
+| Recommendation Enum        | ✅         |
+| InvestmentHorizon Enum     | ✅         |
+| Graph State 集成           | ✅         |
+| Structured Output Failure  | ✅         |
+| Retry                      | ✅         |
+| Conditional Routing        | ✅         |
+| Decision Node              | ✅         |
+| Decision Failure Path      | ✅         |
+| OutputState                | ✅         |
+| Graph Integration Test     | ✅         |
+| Phase 2                    | **CLOSED** |
+
+---

@@ -20,8 +20,9 @@ llm = ChatOpenAI(
     temperature=0,
 )
 
-structured_llm = llm.with_structured_output(ResearchSummary)
+structured_research_llm  = llm.with_structured_output(ResearchSummary)
 
+structured_decision_llm = llm.with_structured_output(InvestmentDecision)
 
 llm_prompt = ChatPromptTemplate.from_messages(
     [
@@ -35,6 +36,29 @@ llm_prompt = ChatPromptTemplate.from_messages(
             "Analyze the following investment research request.\n\n"
             "Ticker: {ticker}\n"
             "User request: {user_query}",
+        ),
+    ]
+)
+
+decision_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an investment decision assistant. "
+            "Make a structured investment decision based on the "
+            "provided research summary. "
+            "Use only the allowed recommendation and investment "
+            "horizon values.",
+        ),
+        (
+            "human",
+            "Make an investment decision for the following company.\n\n"
+            "Ticker: {ticker}\n"
+            "User request: {user_query}\n\n"
+            "Research summary:\n"
+            "{research_summary}\n\n"
+            "Key factors:\n"
+            "{key_factors}",
         ),
     ]
 )
@@ -81,7 +105,7 @@ def llm_node(state: GraphState) -> GraphState:
     )
 
     try:
-        response = structured_llm.invoke(prompt_value)
+        response = structured_research_llm.invoke(prompt_value)
     except Exception as exc:
         return {
             "llm_error": str(exc),
@@ -89,6 +113,31 @@ def llm_node(state: GraphState) -> GraphState:
 
     return {
         "research_summary": response,
+        "llm_error": "",
+    }
+
+
+def investment_decision_node(state: GraphState) -> GraphState:
+    prompt_value = decision_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+            "research_summary": state["research_summary"].summary,
+            "key_factors": ", ".join(
+                state["research_summary"].key_factors
+            ),
+        }
+    )
+
+    try:
+        response = structured_decision_llm.invoke(prompt_value)
+    except Exception as exc:
+        return {
+            "llm_error": str(exc),
+        }
+
+    return {
+        "investment_decision": response,
         "llm_error": "",
     }
 
@@ -101,6 +150,13 @@ def route_after_llm(state: GraphState) -> str:
         return "retry"
 
     return "llm_failure"
+
+
+def route_after_decision(state: GraphState) -> str:
+    if state["llm_error"]:
+        return "llm_failure"
+
+    return "continue"
 
 
 def handle_llm_failure(state: GraphState) -> GraphState:
@@ -132,13 +188,15 @@ def create_research_plan(state: GraphState) -> GraphState:
 
 
 def prepare_output(state: GraphState) -> OutputState:
+    decision = state["investment_decision"]
+
     return {
         "ticker": state["ticker"],
-        "recommendation": state["recommendation"],
-        "investment_horizon": state["investment_horizon"],
+        "recommendation": decision.recommendation,
+        "investment_horizon": decision.investment_horizon,
         "current_price": state["current_price"],
         "target_price": state["target_price"],
-        "investment_thesis": state["investment_thesis"],
+        "investment_thesis": decision.investment_thesis,
         "failure_reason": state["failure_reason"],
     }
 
@@ -166,6 +224,7 @@ builder.add_node("llm_node", llm_node)
 builder.add_node("retry_llm", retry_llm)
 builder.add_node("handle_llm_failure", handle_llm_failure)
 builder.add_node("create_research_plan", create_research_plan)
+builder.add_node("investment_decision_node", investment_decision_node)
 builder.add_node("prepare_output", prepare_output)
 builder.add_node("prepare_failure_output", prepare_failure_output)
 
@@ -181,8 +240,17 @@ builder.add_conditional_edges(
         "llm_failure": "handle_llm_failure",
     },
 )
+
+builder.add_conditional_edges(
+    "investment_decision_node",
+    route_after_decision,
+    {
+        "continue": "prepare_output",
+        "llm_failure": "handle_llm_failure",
+    }
+)
 builder.add_edge("retry_llm", "llm_node")
-builder.add_edge("create_research_plan", "prepare_output")
+builder.add_edge("create_research_plan", "investment_decision_node")
 builder.add_edge("handle_llm_failure", "prepare_failure_output")
 builder.add_edge("prepare_output", END)
 builder.add_edge("prepare_failure_output", END)
