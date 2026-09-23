@@ -46,6 +46,8 @@ class GraphState(TypedDict):
     investment_horizon: InvestmentHorizon
     investment_thesis: str
 
+    llm_response: str
+
 class OutputState(TypedDict):
     ticker: str
     recommendation: Recommendation

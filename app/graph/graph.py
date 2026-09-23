@@ -1,6 +1,42 @@
+import os
+
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from app.graph.models import ResearchSummary
 from app.graph.state import GraphState, InputState, OutputState
+
+
+load_dotenv()
+
+
+llm = ChatOpenAI(
+    model=os.getenv("LLM_MODEL"),
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL"),
+    temperature=0,
+)
+
+structured_llm = llm.with_structured_output(ResearchSummary)
+
+
+llm_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an investment research assistant. "
+            "Provide concise and factual research guidance.",
+        ),
+        (
+            "human",
+            "Analyze the following investment research request.\n\n"
+            "Ticker: {ticker}\n"
+            "User request: {user_query}",
+        ),
+    ]
+)
 
 
 def initialize_state(state: InputState) -> GraphState:
@@ -19,6 +55,22 @@ def initialize_state(state: InputState) -> GraphState:
         "recommendation": "Hold",
         "investment_horizon": "Long Term",
         "investment_thesis": "",
+        "llm_response": "",
+    }
+
+
+def llm_node(state: GraphState) -> GraphState:
+    prompt_value = llm_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+        }
+    )
+
+    response = structured_llm.invoke(prompt_value)
+
+    return {
+        "llm_response": response.summary,
     }
 
 
@@ -53,11 +105,13 @@ builder = StateGraph(
 )
 
 builder.add_node("initialize_state", initialize_state)
+builder.add_node("llm_node", llm_node)
 builder.add_node("create_research_plan", create_research_plan)
 builder.add_node("prepare_output", prepare_output)
 
 builder.add_edge(START, "initialize_state")
-builder.add_edge("initialize_state", "create_research_plan")
+builder.add_edge("initialize_state", "llm_node")
+builder.add_edge("llm_node", "create_research_plan")
 builder.add_edge("create_research_plan", "prepare_output")
 builder.add_edge("prepare_output", END)
 
