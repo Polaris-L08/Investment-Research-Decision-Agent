@@ -40,6 +40,7 @@ class GraphState(TypedDict):
 
     llm_error: str
     failure_reason: str
+    retry_count: int
 
 class OutputState(TypedDict):
     ticker: str

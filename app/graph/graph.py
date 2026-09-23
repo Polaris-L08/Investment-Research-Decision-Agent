@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from app.graph.models import ResearchSummary, InvestmentDecision, Recommendation, InvestmentHorizon
 from app.graph.state import GraphState, InputState, OutputState
 
+MAX_LLM_RETRIES = 2
 
 load_dotenv()
 
@@ -67,6 +68,7 @@ def initialize_state(state: InputState) -> GraphState:
         ),
         "llm_error": "",
         "failure_reason": "",
+        "retry_count": 0,
     }
 
 
@@ -92,10 +94,13 @@ def llm_node(state: GraphState) -> GraphState:
 
 
 def route_after_llm(state: GraphState) -> str:
-    if state["llm_error"]:
-        return "llm_failure"
+    if not state["llm_error"]:
+        return "continue"
 
-    return "continue"
+    if state["retry_count"] < MAX_LLM_RETRIES:
+        return "retry"
+
+    return "llm_failure"
 
 
 def handle_llm_failure(state: GraphState) -> GraphState:
@@ -103,6 +108,13 @@ def handle_llm_failure(state: GraphState) -> GraphState:
         "failure_reason": (
             f"LLM structured output failed: {state['llm_error']}"
         ),
+    }
+
+
+def retry_llm(state: GraphState) -> GraphState:
+    return {
+        "retry_count": state["retry_count"] + 1,
+        "llm_error": "",
     }
 
 
@@ -151,6 +163,7 @@ builder = StateGraph(
 
 builder.add_node("initialize_state", initialize_state)
 builder.add_node("llm_node", llm_node)
+builder.add_node("retry_llm", retry_llm)
 builder.add_node("handle_llm_failure", handle_llm_failure)
 builder.add_node("create_research_plan", create_research_plan)
 builder.add_node("prepare_output", prepare_output)
@@ -164,9 +177,11 @@ builder.add_conditional_edges(
     route_after_llm,
     {
         "continue": "create_research_plan",
+        "retry": "retry_llm",
         "llm_failure": "handle_llm_failure",
     },
 )
+builder.add_edge("retry_llm", "llm_node")
 builder.add_edge("create_research_plan", "prepare_output")
 builder.add_edge("handle_llm_failure", "prepare_failure_output")
 builder.add_edge("prepare_output", END)

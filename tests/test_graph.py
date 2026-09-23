@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from app.graph.graph import graph, llm_node
+from app.graph.graph import graph, llm_node, retry_llm, MAX_LLM_RETRIES
 from app.graph.models import ResearchSummary
 
 
@@ -177,3 +177,89 @@ def test_route_after_llm_continues_without_error():
     }
 
     assert route_after_llm(state) == "continue"
+
+
+def test_route_after_llm_retries_when_retries_remain():
+    state = {
+        "llm_error": "Invalid structured output",
+        "retry_count": 0,
+    }
+
+    assert route_after_llm(state) == "retry"
+
+
+def test_retry_llm_increments_retry_count_and_clears_error():
+    state = {
+        "retry_count": 0,
+        "llm_error": "Invalid structured output",
+    }
+
+    result = retry_llm(state)
+
+    assert result["retry_count"] == 1
+    assert result["llm_error"] == ""
+
+
+from unittest.mock import MagicMock, patch
+
+from app.graph.models import ResearchSummary
+
+
+def test_graph_retries_after_llm_failure_and_then_succeeds():
+    fake_response = ResearchSummary(
+        summary="Recovered after retry.",
+        key_factors=[
+            "Revenue growth",
+            "Profitability",
+        ],
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.side_effect = [
+        ValueError("First attempt failed"),
+        fake_response,
+    ]
+
+    with patch(
+        "app.graph.graph.structured_llm",
+        fake_structured_llm,
+    ):
+        result = graph.invoke(
+            {
+                "user_query": "Analyze Apple as a long-term investment",
+                "ticker": "AAPL",
+            }
+        )
+
+    assert fake_structured_llm.invoke.call_count == 2
+
+    assert result["ticker"] == "AAPL"
+    assert result["failure_reason"] == ""
+
+
+def test_graph_stops_after_max_llm_retries():
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.side_effect = ValueError(
+        "Persistent structured output failure"
+    )
+
+    with patch(
+        "app.graph.graph.structured_llm",
+        fake_structured_llm,
+    ):
+        result = graph.invoke(
+            {
+                "user_query": "Analyze Apple as a long-term investment",
+                "ticker": "AAPL",
+            }
+        )
+
+    assert fake_structured_llm.invoke.call_count == (
+        MAX_LLM_RETRIES + 1
+    )
+
+    assert result["ticker"] == "AAPL"
+    assert result["failure_reason"] != ""
+    assert "Persistent structured output failure" in (
+        result["failure_reason"]
+    )

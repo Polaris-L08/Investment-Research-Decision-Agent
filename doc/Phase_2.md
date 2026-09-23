@@ -6319,3 +6319,1205 @@ Invalid Structured Output
 当前方案是 在`OutputState`中添加`failure_reason` 字段，
 
 **后面 Phase 9/12 做 checkpoint、error recovery 时，我们可以进一步把成功/失败结果建模得更严格**。
+
+
+## Lesson 7：Retry / Recovery Basics
+
+### 1. 本课目标
+
+本课我们只解决一个问题：
+
+> **当 LLM Structured Output 失败时，Graph 如何进行有限次数的自动恢复？**
+
+我们不会一次把所有错误处理机制都做完。
+
+暂时不涉及：
+
+* checkpoint
+* human-in-the-loop
+* exponential backoff
+* distributed retry
+* provider fallback
+* circuit breaker
+* observability
+
+这些以后再做。
+
+本课只建立最基础、最重要的：
+
+```text
+Retry Count
+Retry Routing
+Retry Limit
+```
+
+---
+
+### 2. 为什么 Retry 不是简单的 `while`
+
+最容易想到的是：
+
+```python
+while failed:
+    call_llm()
+```
+
+但是 Agent 系统里这是危险的。
+
+如果模型持续失败：
+
+```text
+fail
+ ↓
+retry
+ ↓
+fail
+ ↓
+retry
+ ↓
+fail
+ ↓
+retry
+ ↓
+...
+```
+
+Graph 可能无限运行。
+
+因此必须有：
+
+```text
+最大重试次数
+```
+
+例如：
+
+```text
+max_retries = 2
+```
+
+那么：
+
+```text
+第一次失败
+    ↓
+Retry #1
+
+第二次失败
+    ↓
+Retry #2
+
+第三次失败
+    ↓
+Stop
+```
+
+---
+
+### 3. 先定义 Retry State
+
+打开：
+
+```text
+app/graph/state.py
+```
+
+在 `GraphState` 中增加：
+
+```python
+retry_count: int
+```
+
+因此相关部分：
+
+```python
+class GraphState(TypedDict):
+    ...
+    llm_error: str
+    failure_reason: str
+    retry_count: int
+```
+
+---
+
+### 4. 初始化 Retry Count
+
+打开：
+
+```text
+app/graph/graph.py
+```
+
+在 `initialize_state()` 中增加：
+
+```python
+"retry_count": 0,
+```
+
+所以初始化状态现在包含：
+
+```python
+"llm_error": "",
+"failure_reason": "",
+"retry_count": 0,
+```
+
+这里的定义非常明确：
+
+> `retry_count` 表示已经发生过多少次 Retry。
+
+因此初始状态：
+
+```text
+retry_count = 0
+```
+
+不是：
+
+```text
+retry_count = 1
+```
+
+---
+
+### 5. 定义最大 Retry 次数
+
+在 `graph.py` 顶部增加：
+
+```python
+MAX_LLM_RETRIES = 2
+```
+
+即：
+
+```python
+MAX_LLM_RETRIES = 2
+```
+
+这意味着：
+
+```text
+最多自动重新调用两次 LLM。
+```
+
+注意：
+
+> `MAX_LLM_RETRIES` 是 Retry 次数，不是总调用次数。
+
+因此最坏情况下：
+
+```text
+第一次正常调用
++
+Retry #1
++
+Retry #2
+=
+总共 3 次 LLM 调用
+```
+
+---
+
+### 6. 修改 `llm_node`
+
+当前：
+
+```python
+def llm_node(state: GraphState) -> GraphState:
+    prompt_value = llm_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+        }
+    )
+
+    try:
+        response = structured_llm.invoke(prompt_value)
+    except Exception as exc:
+        return {
+            "llm_error": str(exc),
+        }
+
+    return {
+        "research_summary": response,
+        "llm_error": "",
+    }
+```
+
+现在修改为：
+
+```python
+def llm_node(state: GraphState) -> GraphState:
+    prompt_value = llm_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+        }
+    )
+
+    try:
+        response = structured_llm.invoke(prompt_value)
+    except Exception as exc:
+        return {
+            "llm_error": str(exc),
+        }
+
+    return {
+        "research_summary": response,
+        "llm_error": "",
+    }
+```
+
+**注意：这里实际上不需要修改。**
+
+这是一个很重要的设计点：
+
+> Retry 不应该由 `llm_node()` 自己决定。
+
+`llm_node` 的职责仍然只是：
+
+```text
+调用 LLM
+ ↓
+成功 → 返回结果
+失败 → 返回错误
+```
+
+而：
+
+```text
+“要不要再试一次？”
+```
+
+属于 Graph routing 层。
+
+所以我们让 `llm_node` 保持单一职责。
+
+---
+
+### 7. 修改 Routing
+
+之前：
+
+```python
+def route_after_llm(state: GraphState) -> str:
+    if state["llm_error"]:
+        return "llm_failure"
+
+    return "continue"
+```
+
+现在变成：
+
+```python
+def route_after_llm(state: GraphState) -> str:
+    if not state["llm_error"]:
+        return "continue"
+
+    if state["retry_count"] < MAX_LLM_RETRIES:
+        return "retry"
+
+    return "llm_failure"
+```
+
+这段代码非常值得理解。
+
+---
+
+### 8. Routing 逻辑
+
+#### 情况 A：成功
+
+```text
+llm_error == ""
+```
+
+直接：
+
+```text
+continue
+```
+
+---
+
+#### 情况 B：失败，但还可以 Retry
+
+例如：
+
+```text
+retry_count = 0
+MAX_LLM_RETRIES = 2
+```
+
+那么：
+
+```text
+0 < 2
+```
+
+所以：
+
+```text
+retry
+```
+
+---
+
+第二次：
+
+```text
+retry_count = 1
+```
+
+仍然：
+
+```text
+1 < 2
+```
+
+所以：
+
+```text
+retry
+```
+
+---
+
+#### 情况 C：超过 Retry Limit
+
+```text
+retry_count = 2
+```
+
+此时：
+
+```text
+2 < 2
+```
+
+为 False。
+
+所以：
+
+```text
+llm_failure
+```
+
+最终进入 Failure Branch。
+
+---
+
+### 9. 增加 Retry Node
+
+现在我们需要一个非常简单的 Node：
+
+```python
+def retry_llm(state: GraphState) -> GraphState:
+    return {
+        "retry_count": state["retry_count"] + 1,
+        "llm_error": "",
+    }
+```
+
+这里非常重要。
+
+Retry Node **不调用 LLM**。
+
+它只做：
+
+```text
+retry_count + 1
+```
+
+并清除：
+
+```text
+llm_error
+```
+
+为什么清除？
+
+因为我们马上会再次进入：
+
+```text
+llm_node
+```
+
+如果不清除：
+
+```text
+llm_error = "previous error"
+```
+
+那么即使新的 LLM 调用成功，在 routing 前也可能残留旧错误。
+
+所以：
+
+```python
+"llm_error": ""
+```
+
+表示：
+
+> 开始新一轮尝试。
+
+---
+
+### 10. Graph 结构
+
+现在我们希望：
+
+```text
+                       ┌──────────────┐
+                       │              │
+                       │    retry     │
+                       │      ↓       │
+initialize → llm → route ─────┘
+              │
+              ├── continue
+              │      ↓
+              │ research_plan
+              │      ↓
+              │ prepare_output
+              │
+              └── failure
+                     ↓
+                 failure handler
+```
+
+这里有一个非常重要的 LangGraph 概念：
+
+> **Graph 中允许出现循环。**
+
+之前我们主要学习：
+
+```text
+A → B → C
+```
+
+现在出现：
+
+```text
+A → B → C → B
+```
+
+这就是 Agent workflow 非常核心的能力。
+
+---
+
+### 11. 修改 Graph Builder
+
+原来的：
+
+```python
+builder.add_conditional_edges(
+    "llm_node",
+    route_after_llm,
+    {
+        "continue": "create_research_plan",
+        "llm_failure": "handle_llm_failure",
+    },
+)
+```
+
+修改为：
+
+```python
+builder.add_conditional_edges(
+    "llm_node",
+    route_after_llm,
+    {
+        "continue": "create_research_plan",
+        "retry": "retry_llm",
+        "llm_failure": "handle_llm_failure",
+    },
+)
+```
+
+然后注册 Node：
+
+```python
+builder.add_node("retry_llm", retry_llm)
+```
+
+最后：
+
+```python
+builder.add_edge("retry_llm", "llm_node")
+```
+
+于是：
+
+```text
+retry_llm
+    ↓
+llm_node
+```
+
+形成循环。
+
+---
+
+### 12. 当前完整 Graph
+
+现在：
+
+```text
+START
+  ↓
+initialize_state
+  ↓
+llm_node
+  ↓
+route_after_llm
+  │
+  ├── continue
+  │      ↓
+  │ create_research_plan
+  │      ↓
+  │ prepare_output
+  │      ↓
+  │     END
+  │
+  ├── retry
+  │      ↓
+  │ retry_llm
+  │      ↓
+  │   llm_node ───────┐
+  │                   │
+  │                   └── route_after_llm
+  │
+  └── llm_failure
+         ↓
+  handle_llm_failure
+         ↓
+  prepare_failure_output
+         ↓
+        END
+```
+
+这已经是一个真正的：
+
+> **Retry Loop**
+
+---
+
+### 13. 一个非常重要的问题：为什么不是在 `llm_node` 里面重试？
+
+例如：
+
+```python
+def llm_node(...):
+    for _ in range(3):
+        try:
+            ...
+        except:
+            ...
+```
+
+这当然也能实现 Retry。
+
+但是在 LangGraph 中，我们更希望：
+
+```text
+Node
+ ↓
+State
+ ↓
+Routing
+ ↓
+Node
+```
+
+因为这样 Retry 是**显式的 Graph topology**。
+
+好处是以后可以：
+
+```text
+Retry
+ ↓
+Timeout
+ ↓
+Fallback Model
+ ↓
+Human Review
+```
+
+而不是把所有逻辑塞进一个巨大 Node。
+
+---
+
+### 14. Lesson 7 测试一：Routing
+
+先测试最基础的逻辑。
+
+在：
+
+```text
+tests/test_graph.py
+```
+
+增加：
+
+```python
+from app.graph.graph import MAX_LLM_RETRIES, route_after_llm
+```
+
+然后：
+
+```python
+def test_route_after_llm_retries_when_retries_remain():
+    state = {
+        "llm_error": "Invalid structured output",
+        "retry_count": 0,
+    }
+
+    assert route_after_llm(state) == "retry"
+```
+
+再测试：
+
+```python
+def test_route_after_llm_fails_when_retry_limit_is_reached():
+    state = {
+        "llm_error": "Invalid structured output",
+        "retry_count": MAX_LLM_RETRIES,
+    }
+
+    assert route_after_llm(state) == "llm_failure"
+```
+
+---
+
+### 15. Lesson 7 测试二：Retry Node
+
+增加：
+
+```python
+from app.graph.graph import retry_llm
+```
+
+测试：
+
+```python
+def test_retry_llm_increments_retry_count_and_clears_error():
+    state = {
+        "retry_count": 0,
+        "llm_error": "Invalid structured output",
+    }
+
+    result = retry_llm(state)
+
+    assert result["retry_count"] == 1
+    assert result["llm_error"] == ""
+```
+
+再测一次：
+
+```python
+def test_retry_llm_increments_existing_retry_count():
+    state = {
+        "retry_count": 1,
+        "llm_error": "Another structured output error",
+    }
+
+    result = retry_llm(state)
+
+    assert result["retry_count"] == 2
+    assert result["llm_error"] == ""
+```
+
+---
+
+### 16. 最重要的测试：失败一次，第二次成功
+
+我们真正要验证的是：
+
+```text
+第一次 LLM
+    ↓
+失败
+    ↓
+Retry
+    ↓
+第二次 LLM
+    ↓
+成功
+    ↓
+正常 Output
+```
+
+测试：
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.graph.models import ResearchSummary
+
+
+def test_graph_retries_after_llm_failure_and_then_succeeds():
+    fake_response = ResearchSummary(
+        summary="Recovered after retry.",
+        key_factors=[
+            "Revenue growth",
+            "Profitability",
+        ],
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.side_effect = [
+        ValueError("First attempt failed"),
+        fake_response,
+    ]
+
+    with patch(
+        "app.graph.graph.structured_llm",
+        fake_structured_llm,
+    ):
+        result = graph.invoke(
+            {
+                "user_query": "Analyze Apple as a long-term investment",
+                "ticker": "AAPL",
+            }
+        )
+
+    assert fake_structured_llm.invoke.call_count == 2
+
+    assert result["ticker"] == "AAPL"
+    assert result["failure_reason"] == ""
+```
+
+这个测试非常重要。
+
+它证明的不只是：
+
+```text
+retry_llm()
+```
+
+正确。
+
+而是整个 Graph：
+
+```text
+Failure
+ ↓
+Routing
+ ↓
+Retry
+ ↓
+LLM
+ ↓
+Success
+```
+
+真的跑通了。
+
+---
+
+### 17. 最重要的测试：一直失败，最终停止
+
+再测试：
+
+```text
+第一次失败
+ ↓
+Retry #1
+ ↓
+第二次失败
+ ↓
+Retry #2
+ ↓
+第三次失败
+ ↓
+Failure
+```
+
+测试：
+
+```python
+def test_graph_stops_after_max_llm_retries():
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.side_effect = ValueError(
+        "Persistent structured output failure"
+    )
+
+    with patch(
+        "app.graph.graph.structured_llm",
+        fake_structured_llm,
+    ):
+        result = graph.invoke(
+            {
+                "user_query": "Analyze Apple as a long-term investment",
+                "ticker": "AAPL",
+            }
+        )
+
+    assert fake_structured_llm.invoke.call_count == (
+        MAX_LLM_RETRIES + 1
+    )
+
+    assert result["ticker"] == "AAPL"
+    assert result["failure_reason"] != ""
+    assert "Persistent structured output failure" in (
+        result["failure_reason"]
+    )
+```
+
+为什么是：
+
+```python
+MAX_LLM_RETRIES + 1
+```
+
+而不是：
+
+```python
+MAX_LLM_RETRIES
+```
+
+因为：
+
+```text
+MAX_LLM_RETRIES
+```
+
+表示：
+
+> **额外重试多少次。**
+
+第一次调用并不是 Retry。
+
+例如：
+
+```text
+MAX_LLM_RETRIES = 2
+```
+
+实际调用：
+
+```text
+Call #1 → 原始调用
+Call #2 → Retry #1
+Call #3 → Retry #2
+```
+
+所以：
+
+```text
+总调用次数 = 3
+```
+
+---
+
+### 18. 这也是为什么 Retry Count 从 0 开始
+
+整个过程：
+
+```text
+初始
+retry_count = 0
+
+第一次失败
+retry_count = 0
+       ↓
+route → retry
+       ↓
+retry_llm
+       ↓
+retry_count = 1
+
+第二次失败
+retry_count = 1
+       ↓
+route → retry
+       ↓
+retry_count = 2
+
+第三次失败
+retry_count = 2
+       ↓
+2 < 2 → False
+       ↓
+failure
+```
+
+这个模型非常清晰。
+
+---
+
+### 19. 一个小但重要的设计原则
+
+当前：
+
+```python
+retry_llm()
+```
+
+只做：
+
+```text
+retry_count += 1
+llm_error = ""
+```
+
+不要在这里：
+
+```text
+重新构造 Prompt
+修改 User Query
+修改 Research Plan
+修改模型
+```
+
+因为现在 Lesson 7 的职责只有：
+
+> **Retry orchestration**
+
+而不是：
+
+> Prompt repair / fallback strategy。
+
+后面的 Lesson 7/后续课程如果需要，我们再增加：
+
+```text
+Retry with modified prompt
+Fallback model
+```
+
+目前保持简单。
+
+---
+
+### 20. 当前 `GraphState` 的职责越来越清晰
+
+现在我们有：
+
+```text
+research_summary
+investment_decision
+llm_error
+failure_reason
+retry_count
+```
+
+可以把它们理解成：
+
+| State 字段              | 职责               |
+| --------------------- | ---------------- |
+| `research_summary`    | 成功产生的业务数据        |
+| `investment_decision` | 投资决策业务数据         |
+| `llm_error`           | 当前 LLM 尝试的错误     |
+| `failure_reason`      | Graph 最终失败原因     |
+| `retry_count`         | 当前已经进行的 Retry 次数 |
+
+尤其注意：
+
+```text
+llm_error
+```
+
+和：
+
+```text
+failure_reason
+```
+
+仍然不是一个东西。
+
+例如：
+
+```text
+第一次调用失败
+llm_error = "timeout"
+
+Retry
+ ↓
+第二次成功
+```
+
+最终：
+
+```text
+failure_reason = ""
+```
+
+因为整个 Graph 最终成功了。
+
+而：
+
+```text
+第三次仍失败
+```
+
+最终：
+
+```text
+failure_reason = "timeout"
+```
+
+---
+
+### 21. 一个非常值得理解的 Agent 思维
+
+现在我们可以看到：
+
+```text
+一次 LLM 调用失败
+```
+
+并不一定意味着：
+
+```text
+整个 Agent 失败
+```
+
+这两者是不同层级：
+
+```text
+LLM Attempt
+     ↓
+    fail
+     ↓
+Recovery
+     ↓
+   success
+     ↓
+Agent Success
+```
+
+所以：
+
+> **局部失败 ≠ 全局失败。**
+
+这正是 Retry / Recovery 的意义。
+
+---
+
+### 22. Lesson 7 Acceptance Criteria
+
+完成后运行：
+
+```bash
+pytest -q
+```
+
+必须满足：
+
+#### Retry State
+
+* [ ] `GraphState` 有 `retry_count`
+* [ ] 初始化为 `0`
+* [ ] 定义 `MAX_LLM_RETRIES = 2`
+
+#### Routing
+
+* [ ] 成功 → `continue`
+* [ ] 失败且还有次数 → `retry`
+* [ ] 达到上限 → `llm_failure`
+
+#### Retry Node
+
+* [ ] `retry_llm()` 存在
+* [ ] `retry_count + 1`
+* [ ] 清除 `llm_error`
+* [ ] 不直接调用 LLM
+
+#### Graph
+
+* [ ] 存在 Retry Loop
+* [ ] `retry_llm → llm_node`
+* [ ] Retry 成功可以回到正常路径
+* [ ] 持续失败最终进入 Failure Branch
+
+#### Tests
+
+至少验证：
+
+```text
+正常成功
+第一次失败 → 第二次成功
+持续失败 → 达到最大 Retry 后停止
+Routing
+Retry Counter
+```
+
+并且：
+
+```text
+Phase 1
++
+Lesson 1
++
+Lesson 2
++
+Lesson 3
++
+Lesson 4
++
+Lesson 5
++
+Lesson 6
+```
+
+全部 regression tests 通过。
+
+---
+
+### 23. 本课真正需要掌握的核心
+
+到 Lesson 6，我们是：
+
+```text
+LLM
+ ↓
+Failure
+ ↓
+Failure State
+```
+
+现在 Lesson 7：
+
+```text
+LLM
+ ↓
+Failure
+ ↓
+State
+ ↓
+Routing
+ ↓
+Retry
+ ↓
+LLM
+```
+
+所以我们第一次真正把 **State + Conditional Edge + Loop** 三个 LangGraph 核心能力组合起来了。
+
+最终形成：
+
+```text
+                ┌──────────────┐
+                │              │
+                │    Retry     │
+                │              ↓
+START → LLM → Router ───────→ LLM
+          │
+          │ success
+          ↓
+       Continue
+          │
+          ↓
+        Output
+
+          │
+          │ retry exhausted
+          ↓
+        Failure
+```
+
+这已经不是简单的 DAG，而是一个具有**状态驱动恢复能力**的 Agent Workflow。
+
+---
+
+
