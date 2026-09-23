@@ -5,7 +5,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from app.graph.models import ResearchSummary
+from app.graph.models import ResearchSummary, InvestmentDecision, Recommendation, InvestmentHorizon
 from app.graph.state import GraphState, InputState, OutputState
 
 
@@ -52,10 +52,19 @@ def initialize_state(state: InputState) -> GraphState:
         "current_price": 0.0,
         "target_price": 0.0,
         "risk_factors": [],
-        "recommendation": "Hold",
-        "investment_horizon": "Long Term",
+        "recommendation": Recommendation.HOLD,
+        "investment_horizon": InvestmentHorizon.LONG_TERM,
         "investment_thesis": "",
         "llm_response": "",
+        "research_summary": ResearchSummary(
+            summary="",
+            key_factors=[],
+        ),
+        "investment_decision": InvestmentDecision(
+            recommendation=Recommendation.HOLD,
+            investment_horizon=InvestmentHorizon.LONG_TERM,
+            investment_thesis="",
+        )
     }
 
 
@@ -70,7 +79,7 @@ def llm_node(state: GraphState) -> GraphState:
     response = structured_llm.invoke(prompt_value)
 
     return {
-        "llm_response": response.summary,
+        "research_summary": response,
     }
 
 

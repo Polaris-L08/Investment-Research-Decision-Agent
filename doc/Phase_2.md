@@ -3236,3 +3236,1931 @@ Pydantic Model
 这一课会真正解决一个重要问题：
 
 > 现在 Pydantic 对象已经产生了，**如何让它进入 LangGraph 的 State，而不是又被压缩回一个字符串？**
+
+
+## Lesson 4：LLM → Structured Graph State
+
+这一课是 Phase 2 中非常关键的一步：我们不再满足于“LLM 能输出 Pydantic 对象”，而是让**结构化结果真正成为 LangGraph State 的一部分**。
+
+### 一、先看我们现在的问题
+
+Lesson 3 已经完成：
+
+```text
+Prompt
+  ↓
+Structured LLM
+  ↓
+ResearchSummary
+```
+
+目前 `llm_node()` 最后却还是：
+
+```python
+return {
+    "llm_response": response.summary,
+}
+```
+
+也就是说：
+
+```text
+ResearchSummary
+    │
+    ├── summary
+    └── key_factors
+           ↓
+      只取 summary
+           ↓
+     llm_response: str
+```
+
+**Pydantic 结构又被我们丢掉了。**
+
+这不是我们最终想要的。
+
+---
+
+### 二、Lesson 4 的目标
+
+我们要把：
+
+```text
+ResearchSummary
+```
+
+直接放进：
+
+```text
+GraphState
+```
+
+最终变成：
+
+```text
+GraphState
+├── ...
+└── research_summary
+      ├── summary
+      └── key_factors
+```
+
+完整链路：
+
+```text
+InputState
+    ↓
+initialize_state
+    ↓
+Prompt
+    ↓
+Structured LLM
+    ↓
+ResearchSummary
+    ↓
+GraphState.research_summary
+    ↓
+后续 Node
+```
+
+这一步完成之后，后面的 Agent 就可以直接读取：
+
+```python
+state["research_summary"]
+```
+
+而不是解析字符串。
+
+---
+
+### 三、第一件事情：修改 `GraphState`
+
+打开：
+
+```text
+app/graph/state.py
+```
+
+现在你应该已经有：
+
+```python
+class GraphState(TypedDict):
+    ...
+    llm_response: str
+```
+
+我们这次增加：
+
+```python
+research_summary: ResearchSummary
+```
+
+但是这里有一个非常重要的问题：
+
+> `GraphState` 怎么引用 `ResearchSummary`？
+
+所以首先：
+
+```python
+from app.graph.models import ResearchSummary
+```
+
+然后：
+
+```python
+class GraphState(TypedDict):
+    ...
+    research_summary: ResearchSummary
+```
+
+---
+
+### 四、完整的 `state.py`
+
+为了避免遗漏，当前版本建议整理成：
+
+```python
+from typing import Literal, TypedDict
+
+from app.graph.models import ResearchSummary
+
+
+Recommendation = Literal[
+    "Strong Buy",
+    "Buy",
+    "Hold",
+    "Reduce",
+    "Sell",
+]
+
+InvestmentHorizon = Literal[
+    "Short Term",
+    "Medium Term",
+    "Long Term",
+]
+
+
+class InputState(TypedDict):
+    user_query: str
+    ticker: str
+
+
+class GraphState(TypedDict):
+    user_query: str
+    ticker: str
+
+    research_plan: list[str]
+
+    company_research: str
+    financial_research: str
+    market_research: str
+    industry_research: str
+
+    valuation_summary: str
+
+    current_price: float
+    target_price: float
+
+    risk_factors: list[str]
+
+    recommendation: Recommendation
+    investment_horizon: InvestmentHorizon
+    investment_thesis: str
+
+    llm_response: str
+    research_summary: ResearchSummary
+
+
+class OutputState(TypedDict):
+    ticker: str
+    recommendation: Recommendation
+    investment_horizon: InvestmentHorizon
+    current_price: float
+    target_price: float
+    investment_thesis: str
+```
+
+这里暂时**保留 `llm_response: str`**。
+
+但注意：
+
+> Lesson 4 开始，`llm_response` 已经不是我们的核心数据了。
+
+真正的结构化结果是：
+
+```python
+research_summary: ResearchSummary
+```
+
+---
+
+### 五、为什么 `ResearchSummary` 应该进入 State？
+
+这是 LangGraph 项目中一个非常重要的设计原则。
+
+假设：
+
+```text
+llm_node
+```
+
+得到：
+
+```python
+ResearchSummary(
+    summary="Strong fundamentals",
+    key_factors=[
+        "Revenue growth",
+        "High margins",
+        "Strong balance sheet",
+    ],
+)
+```
+
+下一节点：
+
+```text
+risk_node
+```
+
+可能需要：
+
+```python
+state["research_summary"].key_factors
+```
+
+再下一节点：
+
+```text
+decision_node
+```
+
+可能需要：
+
+```python
+state["research_summary"].summary
+```
+
+所以：
+
+```text
+LLM Output
+     ↓
+Graph State
+     ↓
+Multiple Nodes
+```
+
+而不是：
+
+```text
+LLM Output
+     ↓
+字符串
+     ↓
+后面重新解析
+```
+
+---
+
+### 六、第二件事情：初始化 State
+
+现在 `initialize_state()` 必须给：
+
+```python
+research_summary
+```
+
+提供初始值。
+
+但是我们遇到了一个问题：
+
+```python
+ResearchSummary
+```
+
+需要：
+
+```python
+summary
+key_factors
+```
+
+所以初始化：
+
+```python
+ResearchSummary(
+    summary="",
+    key_factors=[],
+)
+```
+
+即可。
+
+修改：
+
+```python
+def initialize_state(state: InputState) -> GraphState:
+    return {
+        ...
+        "research_summary": ResearchSummary(
+            summary="",
+            key_factors=[],
+        ),
+    }
+```
+
+---
+
+### 七、这里再次复习 Phase 1 的一个关键概念
+
+你之前已经学过：
+
+> TypedDict 不会自动创建默认值。
+
+所以：
+
+```python
+class GraphState(TypedDict):
+    research_summary: ResearchSummary
+```
+
+**不会**自动产生：
+
+```python
+research_summary = ResearchSummary(...)
+```
+
+必须由：
+
+```text
+initialize_state
+```
+
+显式初始化。
+
+这就是我们 Phase 1 专门建立 `initialize_state` 的原因。
+
+---
+
+### 八、第三件事情：修改 `llm_node`
+
+Lesson 3：
+
+```python
+response = structured_llm.invoke(prompt_value)
+
+return {
+    "llm_response": response.summary,
+}
+```
+
+Lesson 4：
+
+```python
+response = structured_llm.invoke(prompt_value)
+
+return {
+    "research_summary": response,
+}
+```
+
+这一步非常关键。
+
+因为：
+
+```python
+response
+```
+
+本身就是：
+
+```python
+ResearchSummary
+```
+
+所以我们不需要：
+
+```python
+response.summary
+```
+
+而是直接：
+
+```python
+"research_summary": response
+```
+
+---
+
+### 九、完整 `llm_node`
+
+现在：
+
+```python
+def llm_node(state: GraphState) -> GraphState:
+    prompt_value = llm_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+        }
+    )
+
+    response = structured_llm.invoke(prompt_value)
+
+    return {
+        "research_summary": response,
+    }
+```
+
+注意这里体现了一个非常重要的 State 设计原则：
+
+> **Node 返回它负责更新的字段。**
+
+Lesson 3：
+
+```text
+structured_llm
+      ↓
+llm_response
+```
+
+Lesson 4：
+
+```text
+structured_llm
+      ↓
+research_summary
+```
+
+以后我们会有：
+
+```text
+Company Research Node
+      ↓
+company_research
+
+Financial Research Node
+      ↓
+financial_research
+
+Valuation Node
+      ↓
+valuation_summary
+
+Risk Node
+      ↓
+risk_factors
+```
+
+这就是 State 的模块化。
+
+---
+
+### 十、第四件事情：现在 `llm_response` 还要不要？
+
+这是一个值得讨论的设计问题。
+
+现在：
+
+```python
+llm_response: str
+```
+
+实际上已经失去了核心意义。
+
+但我建议：
+
+**本课暂时保留它。**
+
+原因不是它以后一定有用，而是我们现在正在学习从：
+
+```text
+String Output
+```
+
+迁移到：
+
+```text
+Structured Output
+```
+
+保留它一课，可以让迁移过程非常清楚：
+
+```text
+Lesson 3:
+
+ResearchSummary
+      ↓
+summary
+      ↓
+llm_response
+
+
+Lesson 4:
+
+ResearchSummary
+      ↓
+research_summary
+```
+
+到后面的 Lesson 5，我们再处理：
+
+```text
+Schema Validation
+```
+
+届时可以正式清理不再需要的字段。
+
+这比现在顺手大改 State 更适合我们的学习节奏。
+
+---
+
+### 十一、完整 `graph.py`
+
+当前 Lesson 4 可以整理成：
+
+```python
+import os
+
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, START, StateGraph
+
+from app.graph.models import ResearchSummary
+from app.graph.state import GraphState, InputState, OutputState
+
+
+load_dotenv()
+
+
+llm = ChatOpenAI(
+    model=os.getenv("LLM_MODEL"),
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL"),
+    temperature=0,
+)
+
+
+structured_llm = llm.with_structured_output(ResearchSummary)
+
+
+llm_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an investment research assistant. "
+            "Provide concise and factual research guidance.",
+        ),
+        (
+            "human",
+            "Analyze the following investment research request.\n\n"
+            "Ticker: {ticker}\n"
+            "User request: {user_query}",
+        ),
+    ]
+)
+
+
+def initialize_state(state: InputState) -> GraphState:
+    return {
+        "user_query": state["user_query"],
+        "ticker": state["ticker"],
+        "research_plan": [],
+        "company_research": "",
+        "financial_research": "",
+        "market_research": "",
+        "industry_research": "",
+        "valuation_summary": "",
+        "current_price": 0.0,
+        "target_price": 0.0,
+        "risk_factors": [],
+        "recommendation": "Hold",
+        "investment_horizon": "Long Term",
+        "investment_thesis": "",
+        "llm_response": "",
+        "research_summary": ResearchSummary(
+            summary="",
+            key_factors=[],
+        ),
+    }
+
+
+def llm_node(state: GraphState) -> GraphState:
+    prompt_value = llm_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+        }
+    )
+
+    response = structured_llm.invoke(prompt_value)
+
+    return {
+        "research_summary": response,
+    }
+
+
+def create_research_plan(state: GraphState) -> GraphState:
+    return {
+        "research_plan": [
+            "Analyze company fundamentals",
+            "Review financial performance",
+            "Analyze market conditions",
+            "Analyze industry conditions",
+            "Perform valuation analysis",
+            "Identify major risks",
+        ],
+    }
+
+
+def prepare_output(state: GraphState) -> OutputState:
+    return {
+        "ticker": state["ticker"],
+        "recommendation": state["recommendation"],
+        "investment_horizon": state["investment_horizon"],
+        "current_price": state["current_price"],
+        "target_price": state["target_price"],
+        "investment_thesis": state["investment_thesis"],
+    }
+
+
+builder = StateGraph(
+    GraphState,
+    input_schema=InputState,
+    output_schema=OutputState,
+)
+
+builder.add_node("initialize_state", initialize_state)
+builder.add_node("llm_node", llm_node)
+builder.add_node("create_research_plan", create_research_plan)
+builder.add_node("prepare_output", prepare_output)
+
+builder.add_edge(START, "initialize_state")
+builder.add_edge("initialize_state", "llm_node")
+builder.add_edge("llm_node", "create_research_plan")
+builder.add_edge("create_research_plan", "prepare_output")
+builder.add_edge("prepare_output", END)
+
+graph = builder.compile()
+```
+
+---
+
+### 十二、测试也要跟着改变
+
+Lesson 3 的测试：
+
+```python
+assert result["llm_response"] == ...
+```
+
+现在我们应该测试：
+
+```python
+assert result["research_summary"] == ...
+```
+
+但这里有一个细节：
+
+我们的最终：
+
+```python
+graph.invoke(...)
+```
+
+返回的是：
+
+```python
+OutputState
+```
+
+而 `OutputState` 目前没有：
+
+```python
+research_summary
+```
+
+所以：
+
+```python
+graph.invoke(...)
+```
+
+的最终结果**看不到**这个内部字段。
+
+这正好再次体现：
+
+```text
+InputState
+     ↓
+GraphState
+     ↓
+OutputState
+```
+
+三者不是一回事。
+
+---
+
+### 十三、所以 Lesson 4 的核心测试应该直接测试 `llm_node`
+
+我们已经有：
+
+```python
+fake_structured_llm = MagicMock()
+```
+
+现在只需要把断言从：
+
+```python
+assert result["llm_response"] == ...
+```
+
+改成：
+
+```python
+assert result["research_summary"] == fake_response
+```
+
+完整测试：
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.graph.graph import llm_node
+from app.graph.models import ResearchSummary
+
+
+def test_llm_node_writes_structured_output_to_state():
+    fake_response = ResearchSummary(
+        summary="Strong business fundamentals.",
+        key_factors=[
+            "Revenue growth",
+            "Profitability",
+            "Competitive position",
+        ],
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = fake_response
+
+    state = {
+        "user_query": "Analyze Apple as a long-term investment",
+        "ticker": "AAPL",
+        "research_plan": [],
+        "company_research": "",
+        "financial_research": "",
+        "market_research": "",
+        "industry_research": "",
+        "valuation_summary": "",
+        "current_price": 0.0,
+        "target_price": 0.0,
+        "risk_factors": [],
+        "recommendation": "Hold",
+        "investment_horizon": "Long Term",
+        "investment_thesis": "",
+        "llm_response": "",
+        "research_summary": ResearchSummary(
+            summary="",
+            key_factors=[],
+        ),
+    }
+
+    with patch(
+        "app.graph.graph.structured_llm",
+        fake_structured_llm,
+    ):
+        result = llm_node(state)
+
+    fake_structured_llm.invoke.assert_called_once()
+
+    assert result["research_summary"] == fake_response
+    assert result["research_summary"].summary == (
+        "Strong business fundamentals."
+    )
+    assert result["research_summary"].key_factors == [
+        "Revenue growth",
+        "Profitability",
+        "Competitive position",
+    ]
+```
+
+---
+
+### 十四、这里出现一个非常重要的 LangGraph State 原则
+
+注意：
+
+```python
+return {
+    "research_summary": response,
+}
+```
+
+而不是：
+
+```python
+return {
+    "research_summary": response.model_dump(),
+}
+```
+
+也不是：
+
+```python
+return {
+    "research_summary": response.json(),
+}
+```
+
+我们现在**直接把 Pydantic 对象放进 State**。
+
+为什么？
+
+因为当前 State 定义就是：
+
+```python
+research_summary: ResearchSummary
+```
+
+所以：
+
+```text
+State
+    ↓
+ResearchSummary
+```
+
+类型是匹配的。
+
+---
+
+### 十五、这和以后持久化有什么关系？
+
+你可能会想到：
+
+> Pydantic 对象直接放 State，以后 checkpoint 能保存吗？
+
+这是后面 Phase 9 才需要深入讨论的问题。
+
+现在我们先建立一个原则：
+
+```text
+GraphState 是应用内部的数据契约。
+```
+
+在当前阶段，我们首先关心：
+
+```text
+类型正确
+↓
+Node 之间可以可靠传递
+↓
+后续节点可以直接使用
+```
+
+到了 Checkpoint/Persistence 阶段，我们再专门讨论：
+
+```text
+serialization
+deserialization
+checkpoint
+storage
+```
+
+所以现在**不要为了未来的持久化提前把 Pydantic 转成 dict/string**。
+
+---
+
+### 十六、还有一个非常重要的概念：State 是“共享数据契约”
+
+现在我们的数据流开始变得清晰：
+
+```text
+                    ┌──────────────────────┐
+                    │      GraphState      │
+                    │                      │
+Input ─────────────►│ ticker               │
+                    │ user_query           │
+                    │                      │
+LLM ──────────────►│ research_summary     │
+                    │                      │
+Research Planner ─►│ research_plan        │
+                    │                      │
+Valuation ────────►│ valuation_summary     │
+                    │                      │
+Risk ─────────────►│ risk_factors         │
+                    │                      │
+Decision ─────────►│ recommendation        │
+                    │ investment_horizon    │
+                    │ investment_thesis     │
+                    └──────────────────────┘
+```
+
+这实际上已经开始接近我们最终的 Investment Decision Agent 架构。
+
+---
+
+### 十七、为什么这一课对后面的 Multi-Agent 很重要？
+
+未来我们会有：
+
+```text
+                    Supervisor
+                        │
+        ┌───────────────┼───────────────┐
+        ↓               ↓               ↓
+Company Agent     Financial Agent   Market Agent
+        │               │               │
+        └───────────────┼───────────────┘
+                        ↓
+                     State
+                        ↓
+                  Valuation Agent
+                        ↓
+                    Risk Agent
+                        ↓
+                 Decision Agent
+```
+
+每个 Agent 都不能随便返回一坨字符串。
+
+我们最终希望：
+
+```text
+Company Agent
+    ↓
+CompanyResearch
+
+Financial Agent
+    ↓
+FinancialResearch
+
+Valuation Agent
+    ↓
+ValuationResult
+
+Risk Agent
+    ↓
+RiskAnalysis
+
+Decision Agent
+    ↓
+InvestmentDecision
+```
+
+然后这些结构化对象进入 Graph State。
+
+**Lesson 4 正是在建立这个模式。**
+
+---
+
+### 十八、现在运行测试
+
+执行：
+
+```bash
+pytest -v
+```
+
+这一次重点看：
+
+```text
+test_research_summary_model
+```
+
+以及：
+
+```text
+test_llm_node_writes_structured_output_to_state
+```
+
+同时确保之前所有测试仍然通过。
+
+---
+
+### 十九、本课验收标准
+
+Lesson 4 完成的标准：
+
+* [ ] `ResearchSummary` 成为 `GraphState` 字段
+* [ ] `initialize_state()` 初始化 `ResearchSummary`
+* [ ] `llm_node()` 返回完整的 `ResearchSummary`
+* [ ] 没有把结构化对象重新转换成字符串
+* [ ] Mock 的 Structured LLM 返回 `ResearchSummary`
+* [ ] 测试验证 `summary`
+* [ ] 测试验证 `key_factors`
+* [ ] 原有测试全部通过
+* [ ] `OutputState` 暂时保持不变
+
+最终链路：
+
+```text
+InputState
+    ↓
+initialize_state
+    ↓
+Prompt Template
+    ↓
+Structured LLM
+    ↓
+ResearchSummary
+    ↓
+GraphState.research_summary
+    ↓
+后续 Nodes
+```
+
+---
+
+### 本课你真正需要掌握的三个概念
+
+#### ① Structured Output 不应该马上变回字符串
+
+错误思路：
+
+```text
+LLM
+ ↓
+Pydantic
+ ↓
+String
+```
+
+正确方向：
+
+```text
+LLM
+ ↓
+Pydantic
+ ↓
+GraphState
+```
+
+#### ② GraphState 是 Node 之间的数据契约
+
+```text
+Node A
+ ↓
+State
+ ↓
+Node B
+```
+
+而不是：
+
+```text
+Node A
+ ↓
+Node B 直接互相调用
+```
+
+#### ③ Node 只返回自己负责更新的 State 字段
+
+本课：
+
+```python
+return {
+    "research_summary": response,
+}
+```
+
+不要顺手返回整个 State。
+
+---
+
+
+## Lesson 5：Enum / Schema Validation
+
+这一课非常关键：前面 Lesson 3/4 已经解决了“LLM 输出必须符合结构”的问题，但现在还存在一个更深层的问题：
+
+> **结构正确 ≠ 业务语义正确。**
+
+例如：
+
+```text
+recommendation = "Maybe Buy"
+```
+
+它可能完全是一个合法的字符串，但对我们的投资系统来说是非法值。
+
+所以这一课要把约束从：
+
+```text
+str
+```
+
+提升为：
+
+```text
+有限、明确、可验证的业务值集合
+```
+
+### 1. 本课目标
+
+本课完成以后，我们希望得到这样的数据模型：
+
+```text
+ResearchSummary
+    ├── summary: str
+    └── key_factors: list[str]
+
+InvestmentDecision
+    ├── recommendation: Strong Buy | Buy | Hold | Reduce | Sell
+    ├── investment_horizon: Short Term | Medium Term | Long Term
+    └── investment_thesis: str
+```
+
+其中：
+
+#### Recommendation
+
+只允许：
+
+```text
+Strong Buy
+Buy
+Hold
+Reduce
+Sell
+```
+
+#### Investment Horizon
+
+只允许：
+
+```text
+Short Term
+Medium Term
+Long Term
+```
+
+而不是：
+
+```text
+recommendation: str
+investment_horizon: str
+```
+
+---
+
+### 2. 为什么不能继续使用 `str`
+
+假设我们现在写：
+
+```python
+class InvestmentDecision(BaseModel):
+    recommendation: str
+    investment_horizon: str
+    investment_thesis: str
+```
+
+那么下面这些全部可能通过：
+
+```python
+InvestmentDecision(
+    recommendation="Strong Buy",
+    investment_horizon="Long Term",
+    investment_thesis="..."
+)
+```
+
+也可能：
+
+```python
+InvestmentDecision(
+    recommendation="Maybe Buy",
+    investment_horizon="Forever",
+    investment_thesis="..."
+)
+```
+
+甚至：
+
+```python
+InvestmentDecision(
+    recommendation="banana",
+    investment_horizon="unknown",
+    investment_thesis="..."
+)
+```
+
+从 Pydantic 的角度，它们都是 `str`。
+
+但是从**投资业务领域模型**的角度，它们显然不是同一种情况。
+
+所以我们需要：
+
+> Schema 不仅描述数据长什么样，还要描述数据允许取什么值。
+
+---
+
+### 3. Enum 是什么
+
+Python 的 `Enum` 可以理解成：
+
+> **一个字段只能从预先定义好的有限集合中选择。**
+
+例如：
+
+```python
+from enum import Enum
+
+class Recommendation(str, Enum):
+    STRONG_BUY = "Strong Buy"
+    BUY = "Buy"
+    HOLD = "Hold"
+    REDUCE = "Reduce"
+    SELL = "Sell"
+```
+
+那么：
+
+```python
+Recommendation.BUY
+```
+
+对应的实际值是：
+
+```text
+"Buy"
+```
+
+而：
+
+```python
+Recommendation("Buy")
+```
+
+是合法的。
+
+但是：
+
+```python
+Recommendation("Maybe Buy")
+```
+
+会失败。
+
+这就是我们想要的**业务层 validation**。
+
+---
+
+### 4. 为什么使用 `str, Enum`
+
+我们这里使用：
+
+```python
+class Recommendation(str, Enum):
+```
+
+而不是：
+
+```python
+class Recommendation(Enum):
+```
+
+原因是我们的系统最终还需要：
+
+* JSON
+* Pydantic
+* Structured Output
+* API
+* Report
+* LangGraph State
+
+这些地方都非常依赖字符串形式。
+
+因此：
+
+```python
+class Recommendation(str, Enum):
+```
+
+非常适合作为 API / LLM / Pydantic 之间的业务枚举。
+
+---
+
+### 5. 第一处修改：`models.py`
+
+打开：
+
+```text
+app/graph/models.py
+```
+
+现在我们把投资决策模型加入进去。
+
+完整文件修改为：
+
+```python
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
+
+class Recommendation(str, Enum):
+    STRONG_BUY = "Strong Buy"
+    BUY = "Buy"
+    HOLD = "Hold"
+    REDUCE = "Reduce"
+    SELL = "Sell"
+
+
+class InvestmentHorizon(str, Enum):
+    SHORT_TERM = "Short Term"
+    MEDIUM_TERM = "Medium Term"
+    LONG_TERM = "Long Term"
+
+
+class ResearchSummary(BaseModel):
+    summary: str = Field(
+        description="A concise summary of the investment research."
+    )
+
+    key_factors: list[str] = Field(
+        description="The key factors that materially affect the investment analysis."
+    )
+
+
+class InvestmentDecision(BaseModel):
+    recommendation: Recommendation = Field(
+        description="The investment recommendation."
+    )
+
+    investment_horizon: InvestmentHorizon = Field(
+        description="The expected investment horizon."
+    )
+
+    investment_thesis: str = Field(
+        description="The concise investment thesis supporting the recommendation."
+    )
+```
+
+---
+
+### 6. 这里发生了什么？
+
+现在：
+
+```python
+recommendation: Recommendation
+```
+
+已经不再是：
+
+```python
+recommendation: str
+```
+
+而是：
+
+```text
+Recommendation
+```
+
+它的合法值只有：
+
+```text
+Strong Buy
+Buy
+Hold
+Reduce
+Sell
+```
+
+同理：
+
+```python
+investment_horizon: InvestmentHorizon
+```
+
+只有：
+
+```text
+Short Term
+Medium Term
+Long Term
+```
+
+---
+
+### 7. 第二处修改：`state.py`
+
+现在 GraphState 中已经存在：
+
+```python
+recommendation: Recommendation
+investment_horizon: InvestmentHorizon
+```
+
+但之前这两个类型是直接从 `typing.Literal` 定义的。
+
+我们现在把业务枚举统一放到 `models.py`。
+
+打开：
+
+```text
+app/graph/state.py
+```
+
+完整修改为：
+
+```python
+from typing import TypedDict
+
+from app.graph.models import (
+    InvestmentDecision,
+    InvestmentHorizon,
+    Recommendation,
+    ResearchSummary,
+)
+
+
+class InputState(TypedDict):
+    user_query: str
+    ticker: str
+
+
+class GraphState(TypedDict):
+    user_query: str
+    ticker: str
+    research_plan: list[str]
+    company_research: str
+    financial_research: str
+    market_research: str
+    industry_research: str
+    valuation_summary: str
+    current_price: float
+    target_price: float
+    risk_factors: list[str]
+    recommendation: Recommendation
+    investment_horizon: InvestmentHorizon
+    investment_thesis: str
+    llm_response: str
+    research_summary: ResearchSummary
+    investment_decision: InvestmentDecision
+
+
+class OutputState(TypedDict):
+    ticker: str
+    recommendation: Recommendation
+    investment_horizon: InvestmentHorizon
+    current_price: float
+    target_price: float
+    investment_thesis: str
+```
+
+这里有一个重要变化：
+
+```python
+investment_decision: InvestmentDecision
+```
+
+我们开始让最终投资决策成为一个**结构化业务对象**。
+
+---
+
+### 8. 修改 `initialize_state`
+
+打开：
+
+```text
+app/graph/graph.py
+```
+
+在：
+
+```python
+"research_summary": ResearchSummary(
+    summary="",
+    key_factors=[],
+),
+```
+
+下面增加：
+
+```python
+"investment_decision": InvestmentDecision(
+    recommendation=Recommendation.HOLD,
+    investment_horizon=InvestmentHorizon.LONG_TERM,
+    investment_thesis="",
+),
+```
+
+因此需要修改 import：
+
+```python
+from app.graph.models import (
+    InvestmentDecision,
+    InvestmentHorizon,
+    Recommendation,
+    ResearchSummary,
+)
+```
+
+---
+
+### 9. 完整的 `initialize_state`
+
+为了避免局部修改遗漏，你现在的函数应该是：
+
+```python
+def initialize_state(state: InputState) -> GraphState:
+    return {
+        "user_query": state["user_query"],
+        "ticker": state["ticker"],
+        "research_plan": [],
+        "company_research": "",
+        "financial_research": "",
+        "market_research": "",
+        "industry_research": "",
+        "valuation_summary": "",
+        "current_price": 0.0,
+        "target_price": 0.0,
+        "risk_factors": [],
+        "recommendation": Recommendation.HOLD,
+        "investment_horizon": InvestmentHorizon.LONG_TERM,
+        "investment_thesis": "",
+        "llm_response": "",
+        "research_summary": ResearchSummary(
+            summary="",
+            key_factors=[],
+        ),
+        "investment_decision": InvestmentDecision(
+            recommendation=Recommendation.HOLD,
+            investment_horizon=InvestmentHorizon.LONG_TERM,
+            investment_thesis="",
+        ),
+    }
+```
+
+---
+
+### 10. 为什么这里使用 `Recommendation.HOLD`
+
+注意我们没有写：
+
+```python
+"recommendation": "Hold"
+```
+
+而是：
+
+```python
+"recommendation": Recommendation.HOLD
+```
+
+这是为了让内部业务状态从一开始就使用类型安全的值。
+
+也就是说：
+
+```text
+GraphState
+   ↓
+Recommendation Enum
+   ↓
+Pydantic
+   ↓
+Structured Output
+```
+
+而不是整个系统到处都是裸字符串。
+
+---
+
+### 11. 一个非常重要的细节
+
+这里需要区分：
+
+```python
+Recommendation.HOLD
+```
+
+和：
+
+```python
+"Hold"
+```
+
+前者是：
+
+```text
+Recommendation Enum member
+```
+
+后者是：
+
+```text
+str
+```
+
+但是由于：
+
+```python
+class Recommendation(str, Enum)
+```
+
+它在很多序列化场景中可以表现为对应字符串：
+
+```text
+"Hold"
+```
+
+这正是我们需要的效果：
+
+> **内部有强约束，外部容易序列化。**
+
+---
+
+### 12. Lesson 5 的核心测试
+
+现在创建/修改：
+
+```text
+tests/test_models.py
+```
+
+完整内容：
+
+```python
+import pytest
+from pydantic import ValidationError
+
+from app.graph.models import (
+    InvestmentDecision,
+    InvestmentHorizon,
+    Recommendation,
+)
+
+
+def test_recommendation_accepts_valid_values():
+    decision = InvestmentDecision(
+        recommendation=Recommendation.BUY,
+        investment_horizon=InvestmentHorizon.LONG_TERM,
+        investment_thesis="Strong long-term business fundamentals.",
+    )
+
+    assert decision.recommendation == Recommendation.BUY
+    assert decision.investment_horizon == InvestmentHorizon.LONG_TERM
+
+
+def test_recommendation_rejects_invalid_value():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            recommendation="Maybe Buy",
+            investment_horizon=InvestmentHorizon.LONG_TERM,
+            investment_thesis="Test thesis.",
+        )
+
+
+def test_investment_horizon_rejects_invalid_value():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            recommendation=Recommendation.HOLD,
+            investment_horizon="Forever",
+            investment_thesis="Test thesis.",
+        )
+
+
+def test_all_recommendation_values_are_defined():
+    assert {item.value for item in Recommendation} == {
+        "Strong Buy",
+        "Buy",
+        "Hold",
+        "Reduce",
+        "Sell",
+    }
+
+
+def test_all_investment_horizon_values_are_defined():
+    assert {item.value for item in InvestmentHorizon} == {
+        "Short Term",
+        "Medium Term",
+        "Long Term",
+    }
+```
+
+---
+
+### 13. 再增加一个 Graph State 测试
+
+创建：
+
+```text
+tests/test_graph_state.py
+```
+
+内容：
+
+```python
+from app.graph.graph import initialize_state
+from app.graph.models import InvestmentHorizon, Recommendation
+
+
+def test_initialize_state_uses_valid_business_enums():
+    state = initialize_state(
+        {
+            "user_query": "Analyze Apple as a long-term investment",
+            "ticker": "AAPL",
+        }
+    )
+
+    assert state["recommendation"] == Recommendation.HOLD
+    assert state["investment_horizon"] == InvestmentHorizon.LONG_TERM
+```
+
+这个测试和前面的 Pydantic 测试关注点不同。
+
+前面的测试：
+
+```text
+Pydantic 是否拒绝非法业务值？
+```
+
+这个测试：
+
+```text
+Graph 初始化出来的 State 是否使用合法业务值？
+```
+
+这两个都重要。
+
+---
+
+### 14. 运行测试
+
+在项目根目录：
+
+```bash
+pytest -q
+```
+
+本课应该至少覆盖：
+
+```text
+tests/test_models.py
+tests/test_graph_state.py
+```
+
+以及之前 Phase 2 的所有测试。
+
+---
+
+### 15. 本课 Acceptance Criteria
+
+Lesson 5 通过的标准：
+
+#### Schema
+
+* [ ] `Recommendation` 是 `str, Enum`
+* [ ] 包含五个值：
+
+  * [ ] `Strong Buy`
+  * [ ] `Buy`
+  * [ ] `Hold`
+  * [ ] `Reduce`
+  * [ ] `Sell`
+* [ ] `InvestmentHorizon` 是 `str, Enum`
+* [ ] 包含：
+
+  * [ ] `Short Term`
+  * [ ] `Medium Term`
+  * [ ] `Long Term`
+
+#### Pydantic
+
+* [ ] `InvestmentDecision` 使用 Enum
+* [ ] 非法 recommendation 会触发 `ValidationError`
+* [ ] 非法 investment horizon 会触发 `ValidationError`
+
+#### GraphState
+
+* [ ] `GraphState` 使用 Enum 类型
+* [ ] `investment_decision` 已进入 GraphState
+* [ ] `initialize_state()` 使用合法默认值
+* [ ] 没有重新引入裸字符串作为业务状态的默认值
+
+#### Regression
+
+* [ ] Lesson 1–4 测试全部通过
+* [ ] 没有破坏 `ResearchSummary`
+* [ ] `OutputState` 的外部接口暂时保持不变
+
+---
+
+### 16. 本课最重要的概念
+
+这一课真正要理解的不是 Python Enum 语法，而是：
+
+```text
+LLM 输出
+    ↓
+结构约束
+    ↓
+业务值约束
+    ↓
+Graph State
+```
+
+前面的 Lesson 3：
+
+```text
+Pydantic
+```
+
+解决：
+
+> **数据结构是什么？**
+
+例如：
+
+```json
+{
+  "summary": "...",
+  "key_factors": ["...", "..."]
+}
+```
+
+Lesson 5 的 Enum 解决：
+
+> **字段允许出现哪些业务值？**
+
+例如：
+
+```text
+recommendation
+        ↓
+┌─────────────────┐
+│ Strong Buy      │
+│ Buy             │
+│ Hold            │
+│ Reduce          │
+│ Sell            │
+└─────────────────┘
+```
+
+这就是从：
+
+```text
+Schema Validation
+```
+
+进一步进入：
+
+```text
+Domain Validation
+```
+
+---
+
+### 17. 为什么这对后面的 Investment Decision 极其重要
+
+我们的最终投资决策节点以后会产生类似：
+
+```python
+InvestmentDecision(
+    recommendation=Recommendation.BUY,
+    investment_horizon=InvestmentHorizon.LONG_TERM,
+    investment_thesis="..."
+)
+```
+
+然后后面的节点可以安全地假设：
+
+```python
+decision.recommendation
+```
+
+只可能是五种合法状态之一。
+
+这样我们以后做：
+
+```text
+Decision
+   ↓
+Risk
+   ↓
+Report
+   ↓
+API
+```
+
+时，就不会出现：
+
+```text
+"buy"
+"BUY"
+"Buy"
+"Strongly Buy"
+"Maybe Buy"
+"Potential Buy"
+```
+
+这种 LLM 自由发挥导致的业务状态污染。
+
+**这就是 Structured Output 真正的价值：不是让 JSON 看起来漂亮，而是让 Agent 的输出逐渐变成可以被程序可靠消费的业务对象。**
+
+---

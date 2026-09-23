@@ -75,3 +75,57 @@ def test_llm_node_uses_structured_output():
     fake_structured_llm.invoke.assert_called_once()
 
     assert result["llm_response"] == "Strong business fundamentals."
+
+
+def test_llm_node_writes_structured_output_to_state():
+    fake_response = ResearchSummary(
+        summary="Strong business fundamentals.",
+        key_factors=[
+            "Revenue growth",
+            "Profitability",
+            "Competitive position",
+        ],
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = fake_response
+
+    state = {
+        "user_query": "Analyze Apple as a long-term investment",
+        "ticker": "AAPL",
+        "research_plan": [],
+        "company_research": "",
+        "financial_research": "",
+        "market_research": "",
+        "industry_research": "",
+        "valuation_summary": "",
+        "current_price": 0.0,
+        "target_price": 0.0,
+        "risk_factors": [],
+        "recommendation": "Hold",
+        "investment_horizon": "Long Term",
+        "investment_thesis": "",
+        "llm_response": "",
+        "research_summary": ResearchSummary(
+            summary="",
+            key_factors=[],
+        ),
+    }
+
+    with patch(
+        "app.graph.graph.structured_llm",
+        fake_structured_llm,
+    ):
+        result = llm_node(state)
+
+    fake_structured_llm.invoke.assert_called_once()
+
+    assert result["research_summary"] == fake_response
+    assert result["research_summary"].summary == (
+        "Strong business fundamentals."
+    )
+    assert result["research_summary"].key_factors == [
+        "Revenue growth",
+        "Profitability",
+        "Competitive position",
+    ]

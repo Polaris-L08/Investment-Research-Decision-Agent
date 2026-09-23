@@ -1,19 +1,7 @@
-from typing import Literal, TypedDict
+from typing import TypedDict
 
+from app.graph.models import ResearchSummary, Recommendation, InvestmentHorizon, InvestmentDecision
 
-Recommendation = Literal[
-    "Strong Buy",
-    "Buy",
-    "Hold",
-    "Reduce",
-    "Sell",
-]
-
-InvestmentHorizon = Literal[
-    "Short Term",
-    "Medium Term",
-    "Long Term",
-]
 
 class InputState(TypedDict):
     user_query: str
@@ -47,6 +35,8 @@ class GraphState(TypedDict):
     investment_thesis: str
 
     llm_response: str
+    research_summary: ResearchSummary
+    investment_decision: InvestmentDecision
 
 class OutputState(TypedDict):
     ticker: str
