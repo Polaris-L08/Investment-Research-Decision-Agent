@@ -1,0 +1,23 @@
+[project]
+name = "Investment-Research-Decision-agent"
+version = "0.1.0"
+description = "Investment Research and Decision Agent built with LangGraph"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph",
+    "pydantic>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
