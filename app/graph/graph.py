@@ -64,7 +64,9 @@ def initialize_state(state: InputState) -> GraphState:
             recommendation=Recommendation.HOLD,
             investment_horizon=InvestmentHorizon.LONG_TERM,
             investment_thesis="",
-        )
+        ),
+        "llm_error": "",
+        "failure_reason": "",
     }
 
 
@@ -76,10 +78,31 @@ def llm_node(state: GraphState) -> GraphState:
         }
     )
 
-    response = structured_llm.invoke(prompt_value)
+    try:
+        response = structured_llm.invoke(prompt_value)
+    except Exception as exc:
+        return {
+            "llm_error": str(exc),
+        }
 
     return {
         "research_summary": response,
+        "llm_error": "",
+    }
+
+
+def route_after_llm(state: GraphState) -> str:
+    if state["llm_error"]:
+        return "llm_failure"
+
+    return "continue"
+
+
+def handle_llm_failure(state: GraphState) -> GraphState:
+    return {
+        "failure_reason": (
+            f"LLM structured output failed: {state['llm_error']}"
+        ),
     }
 
 
@@ -104,6 +127,19 @@ def prepare_output(state: GraphState) -> OutputState:
         "current_price": state["current_price"],
         "target_price": state["target_price"],
         "investment_thesis": state["investment_thesis"],
+        "failure_reason": state["failure_reason"],
+    }
+
+
+def prepare_failure_output(state: GraphState) -> OutputState:
+    return {
+        "ticker": state["ticker"],
+        "recommendation": state["recommendation"],
+        "investment_horizon": state["investment_horizon"],
+        "current_price": state["current_price"],
+        "target_price": state["target_price"],
+        "investment_thesis": state["investment_thesis"],
+        "failure_reason": state["failure_reason"],
     }
 
 
@@ -115,13 +151,25 @@ builder = StateGraph(
 
 builder.add_node("initialize_state", initialize_state)
 builder.add_node("llm_node", llm_node)
+builder.add_node("handle_llm_failure", handle_llm_failure)
 builder.add_node("create_research_plan", create_research_plan)
 builder.add_node("prepare_output", prepare_output)
+builder.add_node("prepare_failure_output", prepare_failure_output)
 
 builder.add_edge(START, "initialize_state")
 builder.add_edge("initialize_state", "llm_node")
-builder.add_edge("llm_node", "create_research_plan")
+
+builder.add_conditional_edges(
+    "llm_node",
+    route_after_llm,
+    {
+        "continue": "create_research_plan",
+        "llm_failure": "handle_llm_failure",
+    },
+)
 builder.add_edge("create_research_plan", "prepare_output")
+builder.add_edge("handle_llm_failure", "prepare_failure_output")
 builder.add_edge("prepare_output", END)
+builder.add_edge("prepare_failure_output", END)
 
 graph = builder.compile()

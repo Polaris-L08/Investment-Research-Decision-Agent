@@ -38,6 +38,9 @@ class GraphState(TypedDict):
     research_summary: ResearchSummary
     investment_decision: InvestmentDecision
 
+    llm_error: str
+    failure_reason: str
+
 class OutputState(TypedDict):
     ticker: str
     recommendation: Recommendation
@@ -45,3 +48,4 @@ class OutputState(TypedDict):
     current_price: float
     target_price: float
     investment_thesis: str
+    failure_reason: str

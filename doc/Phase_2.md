@@ -5164,3 +5164,1158 @@ API
 **这就是 Structured Output 真正的价值：不是让 JSON 看起来漂亮，而是让 Agent 的输出逐渐变成可以被程序可靠消费的业务对象。**
 
 ---
+
+
+## Lesson 6：Invalid Output Handling
+
+这一课开始进入 Agent 工程中非常重要的一层：
+
+> **LLM 输出不可靠时，系统不能直接崩溃，也不能悄悄吞掉错误。**
+
+我们这次先处理最基础的一类：
+
+```text
+Structured Output Validation Failure
+```
+
+### 1. 本课目标
+
+目前我们的链路是：
+
+```text
+Prompt
+  ↓
+Structured LLM
+  ↓
+Pydantic
+  ↓
+GraphState
+```
+
+正常情况下：
+
+```text
+LLM
+ ↓
+InvestmentDecision
+ ↓
+GraphState
+```
+
+但是如果模型返回了非法业务值：
+
+```text
+recommendation = "Maybe Buy"
+```
+
+或者结构不完整：
+
+```text
+{
+    "recommendation": "Buy"
+}
+```
+
+Structured Output / Pydantic 可能抛出异常。
+
+目前我们的代码：
+
+```python
+response = structured_llm.invoke(prompt_value)
+```
+
+如果这里异常，整个 Graph invocation 会直接失败。
+
+这在教学 Demo 中可以接受，但在真正的 Agent 中不够。
+
+---
+
+### 2. 先明确：我们现在不做 Retry
+
+这一点很重要。
+
+Lesson 6 只解决：
+
+> **如何识别并明确记录 Invalid Output。**
+
+暂时**不自动重试**。
+
+Retry 属于下一课：
+
+> **Lesson 7 — Retry / Recovery Basics**
+
+所以本课的目标不是：
+
+```text
+Invalid Output
+    ↓
+Retry
+    ↓
+成功
+```
+
+而是：
+
+```text
+Invalid Output
+    ↓
+识别
+    ↓
+记录 failure state
+    ↓
+让系统知道“这次没有得到可信结果”
+```
+
+---
+
+### 3. 为什么不能 `except Exception: pass`
+
+千万不要写：
+
+```python
+try:
+    response = structured_llm.invoke(prompt_value)
+except Exception:
+    pass
+```
+
+这样会产生非常危险的情况：
+
+```text
+LLM 出错
+   ↓
+异常被吞掉
+   ↓
+Graph 继续运行
+   ↓
+后面的节点拿到空数据
+   ↓
+最终可能生成一个看起来正常的投资结论
+```
+
+这就是 Agent 系统里非常典型的：
+
+> **Silent Failure**
+
+我们明确禁止这种模式。
+
+---
+
+### 4. 先定义 Failure State
+
+打开：
+
+```text
+app/graph/state.py
+```
+
+在 `GraphState` 中增加：
+
+```python
+llm_error: str
+```
+
+因此这一部分变成：
+
+```python
+class GraphState(TypedDict):
+    user_query: str
+    ticker: str
+    research_plan: list[str]
+    company_research: str
+    financial_research: str
+    market_research: str
+    industry_research: str
+    valuation_summary: str
+    current_price: float
+    target_price: float
+    risk_factors: list[str]
+    recommendation: Recommendation
+    investment_horizon: InvestmentHorizon
+    investment_thesis: str
+    llm_response: str
+    research_summary: ResearchSummary
+    investment_decision: InvestmentDecision
+    llm_error: str
+```
+
+---
+
+### 5. 初始化 Failure State
+
+打开：
+
+```text
+app/graph/graph.py
+```
+
+在 `initialize_state()` 中增加：
+
+```python
+"llm_error": "",
+```
+
+所以最后这一部分：
+
+```python
+"investment_decision": InvestmentDecision(
+    recommendation=Recommendation.HOLD,
+    investment_horizon=InvestmentHorizon.LONG_TERM,
+    investment_thesis="",
+),
+"llm_error": "",
+```
+
+这里的设计非常重要：
+
+```text
+"" = 没有错误
+```
+
+而不是：
+
+```text
+None
+```
+
+我们现在保持整个 State 的简单性。
+
+---
+
+### 6. 修改 `llm_node`
+
+现在的：
+
+```python
+def llm_node(state: GraphState) -> GraphState:
+    prompt_value = llm_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+        }
+    )
+
+    response = structured_llm.invoke(prompt_value)
+
+    return {
+        "research_summary": response,
+    }
+```
+
+改成：
+
+```python
+def llm_node(state: GraphState) -> GraphState:
+    prompt_value = llm_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+        }
+    )
+
+    try:
+        response = structured_llm.invoke(prompt_value)
+    except Exception as exc:
+        return {
+            "llm_error": str(exc),
+        }
+
+    return {
+        "research_summary": response,
+        "llm_error": "",
+    }
+```
+
+---
+
+### 7. 这里有一个重要原则
+
+我们现在捕获异常：
+
+```python
+except Exception as exc:
+```
+
+然后：
+
+```python
+return {
+    "llm_error": str(exc),
+}
+```
+
+注意：
+
+> **这不是“吞异常”。**
+
+因为错误被转换成了 Graph State 中明确存在的 failure information。
+
+区别是：
+
+#### 错误做法
+
+```python
+except Exception:
+    pass
+```
+
+结果：
+
+```text
+Error → Nothing
+```
+
+#### 我们现在的做法
+
+```python
+except Exception as exc:
+    return {
+        "llm_error": str(exc),
+    }
+```
+
+结果：
+
+```text
+Error → Explicit Failure State
+```
+
+这为后面的 conditional routing 铺路。
+
+---
+
+### 8. 但是这里有一个架构问题
+
+现在：
+
+```text
+initialize_state
+       ↓
+    llm_node
+       ↓
+create_research_plan
+       ↓
+prepare_output
+```
+
+如果 `llm_node` 失败：
+
+```text
+llm_node
+   ↓
+llm_error = "..."
+   ↓
+create_research_plan
+```
+
+Graph 还是继续向下执行。
+
+这不是我们最终想要的。
+
+因此我们需要：
+
+```text
+llm_node
+   ↓
+检查 llm_error
+   ↓
+ ┌───────────────┐
+ │               │
+成功            失败
+ ↓               ↓
+research       failure
+```
+
+这就是 **Conditional Routing**。
+
+---
+
+### 9. 增加 Failure Node
+
+在 `graph.py` 增加：
+
+```python
+def handle_llm_failure(state: GraphState) -> GraphState:
+    return {
+        "investment_thesis": (
+            f"LLM processing failed: {state['llm_error']}"
+        ),
+    }
+```
+
+但这里有一个教学上的问题：
+
+我们其实不应该把技术错误直接写进最终投资 thesis。
+
+所以更好的设计是增加：
+
+```python
+failure_reason: str
+```
+
+因此我们再做一步。
+
+---
+
+### 10. 增加 `failure_reason`
+
+修改 `GraphState`：
+
+```python
+failure_reason: str
+```
+
+最终相关部分：
+
+```python
+class GraphState(TypedDict):
+    ...
+    investment_decision: InvestmentDecision
+    llm_error: str
+    failure_reason: str
+```
+
+然后初始化：
+
+```python
+"llm_error": "",
+"failure_reason": "",
+```
+
+这样：
+
+```text
+llm_error
+```
+
+表示：
+
+> LLM 调用层面的错误。
+
+而：
+
+```text
+failure_reason
+```
+
+表示：
+
+> Graph 层面最终认为这次执行失败的原因。
+
+这是两个不同层级的概念。
+
+---
+
+### 11. Failure Node
+
+现在定义：
+
+```python
+def handle_llm_failure(state: GraphState) -> GraphState:
+    return {
+        "failure_reason": (
+            f"LLM structured output failed: {state['llm_error']}"
+        ),
+    }
+```
+
+---
+
+### 12. Conditional Routing Function
+
+继续增加：
+
+```python
+def route_after_llm(state: GraphState) -> str:
+    if state["llm_error"]:
+        return "llm_failure"
+
+    return "continue"
+```
+
+这个函数非常简单，但它体现了 LangGraph 的核心思想：
+
+```text
+State
+ ↓
+Decision
+ ↓
+Edge
+```
+
+也就是：
+
+```text
+Graph 不只是执行固定流程
+```
+
+而是：
+
+```text
+Graph 根据 State 决定下一步走哪条路径
+```
+
+---
+
+### 13. 修改 Graph
+
+原来：
+
+```python
+builder.add_edge("llm_node", "create_research_plan")
+```
+
+现在删除它。
+
+改成：
+
+```python
+builder.add_conditional_edges(
+    "llm_node",
+    route_after_llm,
+    {
+        "continue": "create_research_plan",
+        "llm_failure": "handle_llm_failure",
+    },
+)
+```
+
+然后增加：
+
+```python
+builder.add_node("handle_llm_failure", handle_llm_failure)
+```
+
+最后：
+
+```python
+builder.add_edge("handle_llm_failure", END)
+```
+
+---
+
+### 14. 现在整个 Graph
+
+变成：
+
+```text
+START
+  ↓
+initialize_state
+  ↓
+llm_node
+  ↓
+route_after_llm
+  │
+  ├── continue
+  │      ↓
+  │ create_research_plan
+  │      ↓
+  │ prepare_output
+  │      ↓
+  │     END
+  │
+  └── llm_failure
+         ↓
+  handle_llm_failure
+         ↓
+        END
+```
+
+这就是一个真正的 **failure branch**。
+
+---
+
+### 15. 一个非常重要的 LangGraph 概念
+
+注意：
+
+```python
+route_after_llm(state)
+```
+
+并不是 Node。
+
+它是：
+
+> **Routing Function**
+
+它的职责不是修改 State，而是决定：
+
+```text
+下一步去哪里
+```
+
+所以：
+
+```python
+def route_after_llm(state: GraphState) -> str:
+```
+
+返回：
+
+```text
+"continue"
+```
+
+或者：
+
+```text
+"llm_failure"
+```
+
+而不是：
+
+```python
+return {"llm_error": ...}
+```
+
+---
+
+### 16. 修改 `prepare_output`
+
+这里还有一个问题。
+
+如果最终 Graph 失败：
+
+```text
+handle_llm_failure
+    ↓
+END
+```
+
+那么：
+
+```text
+OutputState
+```
+
+没有被生成。
+
+因此：
+
+```python
+graph.invoke(...)
+```
+
+的输出可能不是我们正常路径下熟悉的 OutputState。
+
+这其实是合理的。
+
+因为：
+
+> **失败的 Graph execution 不应该伪装成成功的投资结果。**
+
+这是这一课非常重要的设计原则。
+
+---
+
+### 17. 完整 `graph.py`
+
+为了避免你局部修改出错，我建议直接把当前文件整理成下面这个版本：
+
+```python
+import os
+
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, START, StateGraph
+
+from app.graph.models import (
+    InvestmentDecision,
+    InvestmentHorizon,
+    Recommendation,
+    ResearchSummary,
+)
+from app.graph.state import GraphState, InputState, OutputState
+
+load_dotenv()
+
+llm = ChatOpenAI(
+    model=os.getenv("LLM_MODEL"),
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL"),
+    temperature=0,
+)
+
+structured_llm = llm.with_structured_output(ResearchSummary)
+
+llm_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an investment research assistant. "
+            "Provide concise and factual research guidance.",
+        ),
+        (
+            "human",
+            "Analyze the following investment research request.\n\n"
+            "Ticker: {ticker}\n"
+            "User request: {user_query}",
+        ),
+    ]
+)
+
+
+def initialize_state(state: InputState) -> GraphState:
+    return {
+        "user_query": state["user_query"],
+        "ticker": state["ticker"],
+        "research_plan": [],
+        "company_research": "",
+        "financial_research": "",
+        "market_research": "",
+        "industry_research": "",
+        "valuation_summary": "",
+        "current_price": 0.0,
+        "target_price": 0.0,
+        "risk_factors": [],
+        "recommendation": Recommendation.HOLD,
+        "investment_horizon": InvestmentHorizon.LONG_TERM,
+        "investment_thesis": "",
+        "llm_response": "",
+        "research_summary": ResearchSummary(
+            summary="",
+            key_factors=[],
+        ),
+        "investment_decision": InvestmentDecision(
+            recommendation=Recommendation.HOLD,
+            investment_horizon=InvestmentHorizon.LONG_TERM,
+            investment_thesis="",
+        ),
+        "llm_error": "",
+        "failure_reason": "",
+    }
+
+
+def llm_node(state: GraphState) -> GraphState:
+    prompt_value = llm_prompt.invoke(
+        {
+            "ticker": state["ticker"],
+            "user_query": state["user_query"],
+        }
+    )
+
+    try:
+        response = structured_llm.invoke(prompt_value)
+    except Exception as exc:
+        return {
+            "llm_error": str(exc),
+        }
+
+    return {
+        "research_summary": response,
+        "llm_error": "",
+    }
+
+
+def route_after_llm(state: GraphState) -> str:
+    if state["llm_error"]:
+        return "llm_failure"
+
+    return "continue"
+
+
+def handle_llm_failure(state: GraphState) -> GraphState:
+    return {
+        "failure_reason": (
+            f"LLM structured output failed: {state['llm_error']}"
+        ),
+    }
+
+
+def create_research_plan(state: GraphState) -> GraphState:
+    return {
+        "research_plan": [
+            "Analyze company fundamentals",
+            "Review financial performance",
+            "Analyze market conditions",
+            "Analyze industry conditions",
+            "Perform valuation analysis",
+            "Identify major risks",
+        ],
+    }
+
+
+def prepare_output(state: GraphState) -> OutputState:
+    return {
+        "ticker": state["ticker"],
+        "recommendation": state["recommendation"],
+        "investment_horizon": state["investment_horizon"],
+        "current_price": state["current_price"],
+        "target_price": state["target_price"],
+        "investment_thesis": state["investment_thesis"],
+    }
+
+
+builder = StateGraph(
+    GraphState,
+    input_schema=InputState,
+    output_schema=OutputState,
+)
+
+builder.add_node("initialize_state", initialize_state)
+builder.add_node("llm_node", llm_node)
+builder.add_node("handle_llm_failure", handle_llm_failure)
+builder.add_node("create_research_plan", create_research_plan)
+builder.add_node("prepare_output", prepare_output)
+
+builder.add_edge(START, "initialize_state")
+builder.add_edge("initialize_state", "llm_node")
+
+builder.add_conditional_edges(
+    "llm_node",
+    route_after_llm,
+    {
+        "continue": "create_research_plan",
+        "llm_failure": "handle_llm_failure",
+    },
+)
+
+builder.add_edge("create_research_plan", "prepare_output")
+builder.add_edge("prepare_output", END)
+builder.add_edge("handle_llm_failure", END)
+
+graph = builder.compile()
+```
+
+---
+
+### 18. 测试：正常路径
+
+原来的正常测试仍然需要保留。
+
+例如：
+
+```python
+def test_graph_calls_llm_with_formatted_prompt():
+    ...
+```
+
+它的意义是：
+
+```text
+LLM 成功
+ ↓
+正常继续
+ ↓
+OutputState 正常产生
+```
+
+---
+
+### 19. 新增失败测试
+
+打开：
+
+```text
+tests/test_graph.py
+```
+
+增加：
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.graph.graph import graph
+
+
+def test_graph_routes_to_failure_when_structured_llm_fails():
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.side_effect = ValueError(
+        "Invalid structured output"
+    )
+
+    with patch(
+        "app.graph.graph.structured_llm",
+        fake_structured_llm,
+    ):
+        result = graph.invoke(
+            {
+                "user_query": "Analyze Apple as a long-term investment",
+                "ticker": "AAPL",
+            }
+        )
+
+    fake_structured_llm.invoke.assert_called_once()
+
+    assert "failure_reason" in result
+    assert "Invalid structured output" in result["failure_reason"]
+```
+
+---
+
+### 20. 这里测试的不是 Exception
+
+注意我们没有：
+
+```python
+with pytest.raises(ValueError):
+```
+
+为什么？
+
+因为我们的设计目标已经改变了：
+
+```text
+LLM Exception
+     ↓
+llm_node 捕获
+     ↓
+Graph Failure State
+     ↓
+Failure Node
+     ↓
+END
+```
+
+所以从 Graph 调用者角度：
+
+```python
+graph.invoke(...)
+```
+
+**不应该因为这个特定的、已处理的 LLM failure 直接抛异常。**
+
+调用者得到的是：
+
+```python
+{
+    "failure_reason": "..."
+}
+```
+
+这就是：
+
+> **Explicit Failure State**
+
+---
+
+### 21. 再增加一个 Node 单元测试
+
+我们还应该直接测试：
+
+```python
+route_after_llm()
+```
+
+新增：
+
+```python
+from app.graph.graph import route_after_llm
+
+
+def test_route_after_llm_returns_failure_on_error():
+    state = {
+        "llm_error": "Invalid structured output",
+    }
+
+    assert route_after_llm(state) == "llm_failure"
+
+
+def test_route_after_llm_continues_without_error():
+    state = {
+        "llm_error": "",
+    }
+
+    assert route_after_llm(state) == "continue"
+```
+
+这里虽然 `state` 是一个简化 dictionary，但对于这个纯 routing function 来说已经足够。
+
+---
+
+### 22. 一个需要你特别注意的问题
+
+你当前的：
+
+```python
+GraphState
+```
+
+是完整 TypedDict。
+
+但是：
+
+```python
+route_after_llm()
+```
+
+只读取：
+
+```python
+state["llm_error"]
+```
+
+所以单元测试没有必要构造几十个无关字段。
+
+这和我们之前讲过的：
+
+> **测试应该针对被测试对象的实际责任范围。**
+
+是一致的。
+
+---
+
+### 23. 运行全部测试
+
+执行：
+
+```bash
+pytest -q
+```
+
+这次测试重点应该包括：
+
+```text
+Lesson 3
+Lesson 4
+Lesson 5
+Lesson 6
+```
+
+尤其关注：
+
+```text
+正常 LLM 路径
+失败 LLM 路径
+routing function
+```
+
+---
+
+### 24. Lesson 6 Acceptance Criteria
+
+本课通过需要满足：
+
+#### Failure State
+
+* [ ] `GraphState` 有 `llm_error`
+* [ ] `GraphState` 有 `failure_reason`
+* [ ] 初始化时二者都是空字符串
+
+#### LLM Node
+
+* [ ] `structured_llm.invoke()` 异常会被捕获
+* [ ] 异常信息进入 `llm_error`
+* [ ] 没有 `except Exception: pass`
+* [ ] 正常情况下 `llm_error == ""`
+
+#### Routing
+
+* [ ] `route_after_llm()` 存在
+* [ ] 有错误 → `llm_failure`
+* [ ] 没有错误 → `continue`
+
+#### Failure Node
+
+* [ ] `handle_llm_failure()` 存在
+* [ ] 会生成 `failure_reason`
+* [ ] failure path 最终进入 `END`
+
+#### Tests
+
+* [ ] 正常路径测试通过
+* [ ] structured LLM failure 测试通过
+* [ ] routing 测试通过
+* [ ] Lesson 1–5 全部 regression tests 通过
+
+---
+
+### 25. 本课真正要掌握的架构
+
+现在我们的 Graph 已经从：
+
+```text
+A → B → C → D
+```
+
+开始变成：
+
+```text
+          ┌→ C → D
+A → B ────┤
+          └→ Failure → END
+```
+
+而判断依据不是某个全局变量，也不是 `if` 写在业务流程外面，而是：
+
+```text
+GraphState
+    ↓
+Routing Function
+    ↓
+Conditional Edge
+```
+
+这是 LangGraph 非常核心的模式。
+
+---
+
+### 26. 更重要的是：失败也是 State
+
+这一课可以把一个思想真正建立起来：
+
+```text
+成功 ≠ 唯一状态
+```
+
+我们的 Agent 实际上存在：
+
+```text
+Success State
+Failure State
+```
+
+甚至后面还会出现：
+
+```text
+Partial Success
+Retryable Failure
+Non-Retryable Failure
+Human Review Required
+Tool Failure
+Timeout
+Missing Data
+```
+
+所以最终的生产级 Agent 不应该只有：
+
+```text
+Happy Path
+```
+
+而应该设计成：
+
+```text
+                  ┌─ Success
+                  │
+Input → Agent ────┼─ Retry
+                  │
+                  ├─ Partial Result
+                  │
+                  ├─ Human Review
+                  │
+                  └─ Failure
+```
+
+我们现在只是从最基础的：
+
+```text
+Invalid Structured Output
+```
+
+开始。
+
+---
+
+### 额外说明
+
+`OutputState`中没有Failure字段，因此，上面的测试会失败。
+
+当前的failure信息只在GraphState中
+
+当前方案是 在`OutputState`中添加`failure_reason` 字段，
+
+**后面 Phase 9/12 做 checkpoint、error recovery 时，我们可以进一步把成功/失败结果建模得更严格**。

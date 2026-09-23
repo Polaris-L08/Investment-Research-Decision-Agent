@@ -33,6 +33,7 @@ def test_graph_calls_llm_with_formatted_prompt():
     assert "Analyze Apple as a long-term investment" in prompt_text
 
     assert result["ticker"] == "AAPL"
+    assert result["failure_reason"] == ""
 
 
 def test_llm_node_uses_structured_output():
@@ -129,3 +130,50 @@ def test_llm_node_writes_structured_output_to_state():
         "Profitability",
         "Competitive position",
     ]
+
+
+from unittest.mock import MagicMock, patch
+
+from app.graph.graph import graph
+
+
+def test_graph_routes_to_failure_when_structured_llm_fails():
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.side_effect = ValueError(
+        "Invalid structured output"
+    )
+
+    with patch(
+        "app.graph.graph.structured_llm",
+        fake_structured_llm,
+    ):
+        result = graph.invoke(
+            {
+                "user_query": "Analyze Apple as a long-term investment",
+                "ticker": "AAPL",
+            }
+        )
+
+    fake_structured_llm.invoke.assert_called_once()
+
+    assert "failure_reason" in result
+    assert "Invalid structured output" in result["failure_reason"]
+
+
+from app.graph.graph import route_after_llm
+
+
+def test_route_after_llm_returns_failure_on_error():
+    state = {
+        "llm_error": "Invalid structured output",
+    }
+
+    assert route_after_llm(state) == "llm_failure"
+
+
+def test_route_after_llm_continues_without_error():
+    state = {
+        "llm_error": "",
+    }
+
+    assert route_after_llm(state) == "continue"
