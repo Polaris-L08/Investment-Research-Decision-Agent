@@ -6,6 +6,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
 from app.graph.models import ResearchSummary, InvestmentDecision, Recommendation, InvestmentHorizon
+from app.graph.nodes.tool_node import get_stock_price_node
 from app.graph.state import GraphState, InputState, OutputState
 
 MAX_LLM_RETRIES = 2
@@ -74,7 +75,7 @@ def initialize_state(state: InputState) -> GraphState:
         "market_research": "",
         "industry_research": "",
         "valuation_summary": "",
-        "current_price": 0.0,
+        "current_price": None,
         "target_price": 0.0,
         "risk_factors": [],
         "recommendation": Recommendation.HOLD,
@@ -93,6 +94,7 @@ def initialize_state(state: InputState) -> GraphState:
         "llm_error": "",
         "failure_reason": "",
         "retry_count": 0,
+        "tool_error": None,
     }
 
 
@@ -223,6 +225,7 @@ builder.add_node("initialize_state", initialize_state)
 builder.add_node("llm_node", llm_node)
 builder.add_node("retry_llm", retry_llm)
 builder.add_node("handle_llm_failure", handle_llm_failure)
+builder.add_node("get_stock_price", get_stock_price_node)
 builder.add_node("create_research_plan", create_research_plan)
 builder.add_node("investment_decision_node", investment_decision_node)
 builder.add_node("prepare_output", prepare_output)

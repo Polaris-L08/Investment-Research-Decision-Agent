@@ -17,7 +17,12 @@ def get_stock_price(ticker: str) -> dict:
         "GOOGL": 180.0,
     }
 
+    if ticker not in mock_prices:
+        raise ValueError(
+            f"Stock price not found for ticker: {ticker}"
+        )
+
     return {
         "ticker": ticker,
-        "price": mock_prices.get(ticker, 100.0),
+        "price": mock_prices[ticker],
     }

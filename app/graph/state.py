@@ -23,8 +23,9 @@ class GraphState(TypedDict):
 
     # Valuation
     valuation_summary: str
-    current_price: float
+    current_price: float | None
     target_price: float
+    investment_thesis: str
 
     # Risk analysis
     risk_factors: list[str]
@@ -41,6 +42,7 @@ class GraphState(TypedDict):
     llm_error: str
     failure_reason: str
     retry_count: int
+    tool_error: str | None
 
 class OutputState(TypedDict):
     ticker: str

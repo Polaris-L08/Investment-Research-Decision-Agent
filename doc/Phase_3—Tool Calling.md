@@ -1771,3 +1771,2530 @@ python -m pytest tests/test_financial_tool.py -v
 ```
 
 
+## Lesson 3：LLM Tool Calling
+
+Lesson 1 是：
+
+```text
+Tool Definition
+```
+
+Lesson 2 是：
+
+```text
+Tool Schema
+```
+
+这一课开始真正把：
+
+```text
+LLM
+```
+
+和：
+
+```text
+Tool
+```
+
+连接起来。
+
+---
+
+### 一、这一课的核心目标
+
+到目前为止，架构是：
+
+```text
+Python
+  │
+  ▼
+LangChain Tool
+  │
+  ▼
+Tool Schema
+```
+
+但还没有 Agent。
+
+我们希望变成：
+
+```text
+User
+  │
+  ▼
+LLM
+  │
+  │ 判断需要调用 Tool
+  ▼
+Tool Call
+  │
+  ▼
+get_stock_price
+```
+
+注意：
+
+> **这一课先学习 LLM 如何“决定调用 Tool”，暂时不做完整的 Tool Calling Loop。**
+
+完整 Loop 是下一阶段的概念。
+
+---
+
+### 二、最重要的概念：`bind_tools()`
+
+LangChain 中非常关键的 API：
+
+```python
+llm.bind_tools(...)
+```
+
+它的作用不是：
+
+> “马上执行 Tool”。
+
+而是：
+
+> **把 Tool 的定义告诉 LLM，使 LLM 获得调用这些 Tool 的能力。**
+
+例如：
+
+```python
+llm_with_tools = llm.bind_tools(
+    [get_stock_price]
+)
+```
+
+此时：
+
+```text
+LLM
+ │
+ │ Tool Schema
+ ▼
+get_stock_price
+```
+
+LLM 就知道：
+
+```text
+我有一个叫 get_stock_price 的工具
+它需要 ticker 参数
+```
+
+---
+
+### 三、一个非常重要的区分
+
+这里很容易产生第一个误解。
+
+`bind_tools()`：
+
+```python
+llm_with_tools = llm.bind_tools(
+    [get_stock_price]
+)
+```
+
+**不会直接执行：**
+
+```python
+get_stock_price.invoke(...)
+```
+
+它只是告诉 LLM：
+
+```text
+你可以使用这个 Tool。
+```
+
+之后 LLM 返回的消息可能包含：
+
+```text
+tool_calls
+```
+
+例如逻辑上可能是：
+
+```json
+{
+  "name": "get_stock_price",
+  "args": {
+    "ticker": "AAPL"
+  }
+}
+```
+
+然后才由 Agent / Graph 执行 Tool。
+
+因此完整链路实际上是：
+
+```text
+                  Tool Schema
+                       │
+                       ▼
+User ──────▶ LLM ──────┐
+                       │
+                       │ tool_calls
+                       ▼
+                  Tool Executor
+                       │
+                       ▼
+                get_stock_price
+```
+
+---
+
+### 四、为什么我们这一课继续使用 Mock？
+
+因为现在我们要验证的是：
+
+```text
+LLM
+ ↓
+Tool Calling
+```
+
+而不是：
+
+```text
+LLM
+ ↓
+Tool Calling
+ ↓
+Yahoo Finance
+ ↓
+Network
+ ↓
+Authentication
+```
+
+如果直接接真实 Provider，一旦失败，我们无法判断到底是：
+
+- LLM 配置问题
+- Tool Schema 问题
+- Tool Calling 问题
+- 网络问题
+- Provider API 问题
+
+所以我们继续保持：
+
+```text
+Mock Tool
++
+真实 LLM
+```
+
+这正是本 Phase 的第一原则。
+
+---
+
+### 五、先不修改 Graph
+
+这是本课一个非常重要的教学设计。
+
+**暂时不要修改 `app/graph/`。**
+
+我们先单独验证：
+
+```text
+ChatOpenAI
+      +
+get_stock_price
+      ↓
+tool_calls
+```
+
+Graph 集成会在后面的 Lesson 逐步完成。
+
+这样每一步都只有一个变量。
+
+---
+
+### 六、新增 Tool Calling 测试
+
+建议新增：
+
+```text
+tests/test_tool_calling.py
+```
+
+完整内容：
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.tools.financial import get_stock_price
+
+
+def test_llm_can_call_stock_price_tool():
+    mock_response = MagicMock()
+
+    mock_response.tool_calls = [
+        {
+            "name": "get_stock_price",
+            "args": {
+                "ticker": "AAPL",
+            },
+            "id": "call_123",
+            "type": "tool_call",
+        }
+    ]
+
+    with patch(
+        "langchain_openai.ChatOpenAI.invoke",
+        return_value=mock_response,
+    ):
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model="test-model"
+        )
+
+        llm_with_tools = llm.bind_tools(
+            [get_stock_price]
+        )
+
+        result = llm_with_tools.invoke(
+            "What is the current stock price of AAPL?"
+        )
+
+        assert len(result.tool_calls) == 1
+
+        tool_call = result.tool_calls[0]
+
+        assert tool_call["name"] == "get_stock_price"
+        assert tool_call["args"]["ticker"] == "AAPL"
+```
+
+但是这里有一个**重要问题**。
+
+我们不能简单地这样测试：
+
+```python
+llm_with_tools.invoke(...)
+```
+
+然后期待：
+
+```text
+bind_tools()
+```
+
+一定会使用我们 patch 的 `ChatOpenAI.invoke`。
+
+原因是：
+
+```text
+llm
+ │
+ ▼
+bind_tools()
+ │
+ ▼
+RunnableBinding
+ │
+ ▼
+invoke()
+```
+
+所以我们需要理解 LangChain Runnable 的调用链。
+
+为了让 Lesson 3 保持教学上的清晰，我们先采用更稳定的方式：
+
+> **Mock LLM 返回一个包含 `tool_calls` 的 AIMessage，然后验证 Graph/Agent 层能够识别它。**
+
+---
+
+### 七、Lesson 3 第一阶段：理解 `AIMessage.tool_calls`
+
+这一步非常关键。
+
+在 LangChain 中，LLM 的 Tool Calling 输出通常不是普通字符串：
+
+```python
+"Please call get_stock_price"
+```
+
+而是结构化的：
+
+```text
+AIMessage
+    │
+    ├── content
+    │
+    └── tool_calls
+```
+
+例如：
+
+```python
+[
+    {
+        "name": "get_stock_price",
+        "args": {
+            "ticker": "AAPL"
+        },
+        "id": "call_123",
+        "type": "tool_call"
+    }
+]
+```
+
+这意味着：
+
+> **LLM 并不是自己执行 Python 函数。**
+
+它只是产生一个：
+
+```text
+Tool Call Request
+```
+
+真正执行：
+
+```python
+get_stock_price.invoke(...)
+```
+
+的是后面的 Tool execution layer。
+
+这对理解 Agent Architecture 非常重要。
+
+---
+
+### 八、我们现在创建一个最小 Tool Calling 示例
+
+新建：
+
+```text
+app/agents/
+```
+
+不过这里我建议**不要现在创建 `agents/` 目录**。
+
+因为目前还没有真正的 Agent。
+
+我们只增加测试：
+
+```text
+tests/test_tool_calling.py
+```
+
+然后使用一个 Mock LLM。
+
+完整测试：
+
+```python
+from langchain_core.messages import AIMessage
+
+from app.tools.financial import get_stock_price
+
+
+def test_llm_tool_call_structure():
+    response = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "get_stock_price",
+                "args": {
+                    "ticker": "AAPL",
+                },
+                "id": "call_123",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    assert len(response.tool_calls) == 1
+
+    tool_call = response.tool_calls[0]
+
+    assert tool_call["name"] == "get_stock_price"
+    assert tool_call["args"]["ticker"] == "AAPL"
+```
+
+---
+
+### 九、这个测试看起来是不是“没有 LLM”？
+
+是的。
+
+这是**故意的**。
+
+我们现在测试的是：
+
+```text
+Tool Call Message Contract
+```
+
+而不是：
+
+```text
+LLM Provider
+```
+
+这就是我们之前 Phase 2 学到的：
+
+> **先 Mock，再 Real Provider。**
+
+Phase 2 我们已经验证过：
+
+```text
+LLM
+ ↓
+Structured Output
+```
+
+所以这一课不应该同时引入：
+
+```text
+真实 OpenAI API
+```
+
+来验证基础数据结构。
+
+---
+
+### 十、但我们最终必须验证真实 LLM
+
+没错。
+
+因此 Lesson 3 会分成两个层次：
+
+#### Level 1 — Mock
+
+验证：
+
+```text
+AIMessage
+ ↓
+tool_calls
+ ↓
+Tool Call Schema
+```
+
+#### Level 2 — Real LLM
+
+验证：
+
+```text
+ChatOpenAI
+ ↓
+bind_tools()
+ ↓
+真实 LLM
+ ↓
+AIMessage.tool_calls
+```
+
+这两个测试解决的是不同问题。
+
+---
+
+### 十一、现在增加 Mock 测试
+
+创建：
+
+```text
+tests/test_tool_calling.py
+```
+
+完整代码：
+
+```python
+from langchain_core.messages import AIMessage
+
+from app.tools.financial import get_stock_price
+
+
+def test_llm_tool_call_structure():
+    response = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "get_stock_price",
+                "args": {
+                    "ticker": "AAPL",
+                },
+                "id": "call_123",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    assert len(response.tool_calls) == 1
+
+    tool_call = response.tool_calls[0]
+
+    assert tool_call["name"] == "get_stock_price"
+    assert tool_call["args"]["ticker"] == "AAPL"
+
+
+def test_tool_call_matches_registered_tool():
+    response = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "get_stock_price",
+                "args": {
+                    "ticker": "MSFT",
+                },
+                "id": "call_456",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    available_tools = {
+        get_stock_price.name: get_stock_price
+    }
+
+    tool_call = response.tool_calls[0]
+
+    assert tool_call["name"] in available_tools
+
+    tool = available_tools[tool_call["name"]]
+
+    result = tool.invoke(tool_call["args"])
+
+    assert result["ticker"] == "MSFT"
+    assert result["price"] == 450.0
+```
+
+现在这个测试已经开始形成真正的 Agent 思维：
+
+```text
+AIMessage
+   │
+   ▼
+tool_calls
+   │
+   ▼
+tool name
+   │
+   ▼
+find registered Tool
+   │
+   ▼
+tool.invoke(args)
+   │
+   ▼
+Tool Result
+```
+
+这实际上已经是一个极简 Tool Executor 的雏形。
+
+---
+
+### 十二、运行测试
+
+先运行：
+
+```bash
+python -m pytest tests/test_tool_calling.py -v
+```
+
+然后运行整个 Phase 3 当前测试：
+
+```bash
+python -m pytest tests -v
+```
+
+目前理论上应该：
+
+```text
+Lesson 1
+3 tests
+
++
+
+Lesson 2
+6 tests
+
++
+
+Lesson 3
+2 tests
+```
+
+总共：
+
+```text
+11 passed
+```
+
+如果你的项目中已有其他测试，则总数可能更多。
+
+---
+
+### 十三、现在再理解 `bind_tools()`
+
+完成 Mock 测试之后，我们才正式看真实 LLM：
+
+```python
+from langchain_openai import ChatOpenAI
+
+from app.tools.financial import get_stock_price
+
+
+llm = ChatOpenAI(
+    model="你的模型"
+)
+
+llm_with_tools = llm.bind_tools(
+    [get_stock_price]
+)
+```
+
+此时：
+
+```text
+llm
+```
+
+和：
+
+```text
+llm_with_tools
+```
+
+最大的区别是：
+
+```text
+llm
+    ↓
+只能生成普通 LLM Response
+
+llm_with_tools
+    ↓
+可以生成 Tool Call
+```
+
+---
+
+### 十四、真实 LLM 测试暂时不要加入自动测试套件
+
+这一点尤其重要。
+
+因为真实 LLM 测试具有：
+
+- API 成本
+- 网络依赖
+- Provider 可用性
+- 模型行为非确定性
+- Tool Calling 行为可能随模型版本变化
+
+因此我们不要把它放进：
+
+```text
+pytest tests/
+```
+
+的默认测试流程。
+
+后面可以建立：
+
+```text
+integration tests
+```
+
+或者使用明确的：
+
+```text
+pytest -m integration
+```
+
+但现在还没有必要。
+
+---
+
+### 十五、手工进行一次真实 Tool Calling
+
+如果你的 `.env` 已经配置好 Phase 2 使用的：
+
+```text
+OPENAI_API_KEY
+OPENAI_BASE_URL
+LLM_MODEL
+```
+
+可以建立一个临时脚本，例如：
+
+```text
+scripts/test_tool_calling.py
+```
+
+内容：
+
+```python
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+
+from app.tools.financial import get_stock_price
+
+
+load_dotenv()
+
+
+llm = ChatOpenAI()
+
+llm_with_tools = llm.bind_tools(
+    [get_stock_price]
+)
+
+
+response = llm_with_tools.invoke(
+    "What is the current stock price of AAPL?"
+)
+
+
+print("content:")
+print(response.content)
+
+print("\ntool_calls:")
+print(response.tool_calls)
+```
+
+运行：
+
+```bash
+python scripts/test_tool_calling.py
+```
+
+如果模型决定调用 Tool，你应该看到类似：
+
+```text
+tool_calls:
+[
+    {
+        "name": "get_stock_price",
+        "args": {
+            "ticker": "AAPL"
+        },
+        ...
+    }
+]
+```
+
+**注意：**
+
+这里即使看到：
+
+```text
+tool_calls
+```
+
+也不代表：
+
+```python
+get_stock_price()
+```
+
+已经执行。
+
+这恰恰是本课最重要的知识点之一。
+
+---
+
+### 十六、现在整个架构变成什么？
+
+到 Lesson 2：
+
+```text
+Tool
+  │
+  ▼
+Tool Schema
+```
+
+Lesson 3：
+
+```text
+                 Tool Schema
+                      │
+                      ▼
+User ───────────────▶ LLM
+                      │
+                      │
+                      ▼
+                  tool_calls
+                      │
+                      ▼
+                Tool Executor
+                      │
+                      ▼
+               get_stock_price
+```
+
+但是我们现在还没有把：
+
+```text
+Tool Result
+```
+
+送回 LLM。
+
+所以当前还不是完整 Agent Loop。
+
+---
+
+### Lesson 3 当前验收标准
+
+#### Mock 层
+
+- [ ] `AIMessage.tool_calls` 能正确解析
+- [ ] Tool name 能匹配注册 Tool
+- [ ] Tool args 能正确传入
+- [ ] Tool 能被 `.invoke()` 执行
+- [ ] Tool Result 正确返回
+
+#### Real LLM 层
+
+手工验证：
+
+- [ ] `ChatOpenAI` 正常初始化
+- [ ] `llm.bind_tools([get_stock_price])` 正常
+- [ ] LLM 能产生 `tool_calls`
+- [ ] `tool_calls.name == "get_stock_price"`
+- [ ] `tool_calls.args["ticker"]` 正确
+
+---
+
+
+## Lesson 4：Tool Result → Graph State
+
+这一课开始把前面两部分真正连接起来：
+
+```text
+Phase 2
+LLM + Graph State
+```
+
++
+
+```text
+Phase 3
+Tool Calling
+```
+
+最终形成：
+
+```text
+LLM
+ ↓
+Tool Call
+ ↓
+Tool Execution
+ ↓
+Tool Result
+ ↓
+Graph State
+```
+
+这一步非常重要，因为从这里开始，Tool 不再只是一个独立 Python Function，而会成为 **LangGraph 工作流中的一个节点能力**。
+
+---
+
+### 一、先回顾目前我们有什么
+
+到目前为止，我们已经建立：
+
+#### Tool
+
+```python
+get_stock_price(ticker)
+```
+
+返回：
+
+```python
+{
+    "ticker": "AAPL",
+    "price": 200.0
+}
+```
+
+#### Tool Schema
+
+```text
+ticker: string
+```
+
+#### LLM Tool Calling
+
+LLM 可以产生：
+
+```python
+{
+    "name": "get_stock_price",
+    "args": {
+        "ticker": "AAPL"
+    }
+}
+```
+
+但是现在还有一个断点：
+
+```text
+LLM
+ ↓
+tool_calls
+ ↓
+???
+ ↓
+GraphState
+```
+
+这个 `???` 就是本课要解决的问题。
+
+---
+
+### 二、核心概念：Tool Call 和 Tool Result 是两回事
+
+这是这一课最需要建立的概念。
+
+LLM 返回：
+
+```python
+response.tool_calls
+```
+
+例如：
+
+```python
+[
+    {
+        "name": "get_stock_price",
+        "args": {
+            "ticker": "AAPL"
+        }
+    }
+]
+```
+
+这只是：
+
+> **LLM 要求系统调用什么 Tool。**
+
+然后我们的程序执行：
+
+```python
+get_stock_price.invoke(
+    {"ticker": "AAPL"}
+)
+```
+
+得到：
+
+```python
+{
+    "ticker": "AAPL",
+    "price": 200.0
+}
+```
+
+这才叫：
+
+> **Tool Result**
+
+所以：
+
+```text
+Tool Call
+    ↓
+Tool Execution
+    ↓
+Tool Result
+```
+
+是三个不同阶段。
+
+---
+
+### 三、为什么最终必须进入 Graph State？
+
+因为我们的 Agent 最终不是单纯的：
+
+```text
+LLM → Tool → 返回结果
+```
+
+而是：
+
+```text
+Research Agent
+      │
+      ▼
+Graph State
+```
+
+例如未来：
+
+```text
+ticker = AAPL
+current_price = 200
+revenue = ...
+eps = ...
+market_cap = ...
+risk_factors = ...
+```
+
+这些数据都必须进入 State。
+
+否则下一节点：
+
+```text
+Financial Research
+```
+
+根本不知道前一个 Tool 查到了什么。
+
+因此我们现在需要新增：
+
+```text
+stock_price
+```
+
+或者更明确：
+
+```text
+current_price
+```
+
+到 Graph State。
+
+---
+
+### 四、这一课先做最小改动
+
+我们不要现在把整个 Phase 2 Graph 重构掉。
+
+只增加：
+
+```text
+Tool
+ ↓
+Tool Execution Node
+ ↓
+GraphState.current_price
+```
+
+这样可以保持每课只增加一个核心能力。
+
+---
+
+### 五、先检查当前 GraphState
+
+根据 Phase 2 的设计，我们当前已经有：
+
+```text
+GraphState
+```
+
+并且：
+
+```text
+initialize_state
+```
+
+负责初始化 State。
+
+现在新增一个字段：
+
+```python
+current_price: float | None
+```
+
+如果你的项目当前使用：
+
+```python
+TypedDict
+```
+
+那么应该加入：
+
+```python
+current_price: float | None
+```
+
+同时必须检查：
+
+```python
+initialize_state()
+```
+
+这一点我们之前专门强调过：
+
+> `TypedDict` 不会自动创建运行时默认值。
+
+所以不能只修改类型定义而忘记初始化。
+
+---
+
+### 六、增加 Tool Result State
+
+假设当前 `GraphState` 位于：
+
+```text
+app/graph/state.py
+```
+
+那么在原有字段基础上增加：
+
+```python
+current_price: float | None
+```
+
+例如逻辑上：
+
+```python
+class GraphState(TypedDict):
+    ...
+    current_price: float | None
+```
+
+然后在：
+
+```python
+initialize_state()
+```
+
+中确保：
+
+```python
+"current_price": None,
+```
+
+---
+
+### 七、为什么这里不直接把 Tool Result 整个塞进去？
+
+我们现在 Tool 返回：
+
+```python
+{
+    "ticker": "AAPL",
+    "price": 200.0
+}
+```
+
+但 GraphState 不应该简单变成：
+
+```python
+tool_result = {
+    "ticker": "AAPL",
+    "price": 200.0
+}
+```
+
+至少在当前阶段不建议这样设计。
+
+因为：
+
+```text
+Tool Result
+```
+
+是 Tool 层的数据结构。
+
+而：
+
+```text
+GraphState
+```
+
+是业务工作流的数据结构。
+
+两者应该有一个转换：
+
+```text
+Tool Result
+     ↓
+Node
+     ↓
+Business State
+```
+
+这也是以后 Provider Abstraction 很重要的基础。
+
+---
+
+### 八、创建 Tool Execution Node
+
+现在我们增加一个非常小的 Node。
+
+例如：
+
+```text
+app/graph/nodes/tool_node.py
+```
+
+完整代码：
+
+```python
+from app.tools.financial import get_stock_price
+
+
+def get_stock_price_node(state):
+    ticker = state["ticker"]
+
+    result = get_stock_price.invoke(
+        {"ticker": ticker}
+    )
+
+    return {
+        "current_price": result["price"]
+    }
+```
+
+这里非常值得注意：
+
+```python
+ticker = state["ticker"]
+```
+
+Node 从：
+
+```text
+GraphState
+```
+
+读取业务输入。
+
+然后：
+
+```python
+get_stock_price.invoke(...)
+```
+
+调用 Tool。
+
+最后：
+
+```python
+return {
+    "current_price": result["price"]
+}
+```
+
+只更新：
+
+```text
+current_price
+```
+
+---
+
+### 九、这就是我们一直强调的 Node Ownership
+
+Node：
+
+```text
+get_stock_price_node
+```
+
+负责：
+
+```text
+current_price
+```
+
+所以它只写：
+
+```python
+{
+    "current_price": ...
+}
+```
+
+而不是：
+
+```python
+{
+    "ticker": ...,
+    "recommendation": ...,
+    "investment_thesis": ...,
+    "current_price": ...
+}
+```
+
+这是 LangGraph State 设计中的重要原则：
+
+> **Node 只更新自己负责的 State 字段。**
+
+---
+
+### 十、先不要把 LLM 接进 Graph
+
+这里又是一个刻意的教学选择。
+
+现在先验证：
+
+```text
+GraphState
+ ↓
+Tool Node
+ ↓
+Tool
+ ↓
+GraphState
+```
+
+也就是说：
+
+```text
+ticker
+ ↓
+get_stock_price_node
+ ↓
+get_stock_price
+ ↓
+current_price
+```
+
+而不是马上：
+
+```text
+LLM
+ ↓
+Tool Call
+ ↓
+Tool Node
+```
+
+为什么？
+
+因为这样我们可以先独立证明：
+
+> **Tool Result 能正确进入 Graph State。**
+
+下一步再把 LLM Tool Call 接进去。
+
+---
+
+### 十一、增加一个最小测试
+
+新增：
+
+```text
+tests/test_tool_result_to_state.py
+```
+
+完整代码：
+
+```python
+from app.graph.nodes.tool_node import get_stock_price_node
+
+
+def test_get_stock_price_result_updates_graph_state():
+    state = {
+        "ticker": "AAPL",
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["current_price"] == 200.0
+```
+
+这里测试的是：
+
+```text
+Graph State Input
+        ↓
+      Node
+        ↓
+      Tool
+        ↓
+State Update
+```
+
+而不是测试 Tool 本身。
+
+Tool 本身已经在 Lesson 1 / Lesson 2 测试过了。
+
+---
+
+### 十二、这里其实出现了三层测试
+
+现在我们的测试边界已经开始清晰了。
+
+#### Layer 1 — Tool
+
+```text
+test_financial_tool.py
+```
+
+验证：
+
+```text
+Tool → Result
+```
+
+---
+
+#### Layer 2 — Tool Calling
+
+```text
+test_tool_calling.py
+```
+
+验证：
+
+```text
+LLM → Tool Call
+```
+
+以及：
+
+```text
+Tool Call → Tool
+```
+
+---
+
+#### Layer 3 — Graph Integration
+
+```text
+test_tool_result_to_state.py
+```
+
+验证：
+
+```text
+Tool → Graph State
+```
+
+最终三个部分组合：
+
+```text
+          LLM
+           │
+           ▼
+       Tool Call
+           │
+           ▼
+       Tool Node
+           │
+           ▼
+          Tool
+           │
+           ▼
+      Tool Result
+           │
+           ▼
+       Graph State
+```
+
+这正是我们希望逐步建立的架构。
+
+---
+
+### 十三、把 Node 加入 Graph
+
+现在还差一步：
+
+> 这个 Node 必须真的成为 LangGraph Node。
+
+找到当前 Graph 创建代码。
+
+原来的结构大致是：
+
+```text
+START
+ ↓
+initialize_state
+ ↓
+llm_node
+ ↓
+...
+```
+
+我们暂时不要改变原有 Phase 2 主流程。
+
+先在 Graph 中注册：
+
+```python
+builder.add_node(
+    "get_stock_price",
+    get_stock_price_node,
+)
+```
+
+但是**不要急着把它插入主流程**。
+
+第一阶段只验证：
+
+```text
+Graph 可以注册 Tool Node
+```
+
+然后再决定它应该放在哪条边上。
+
+这是为了避免 Lesson 4 一开始就同时修改：
+
+- State
+- Node
+- Edge
+- LLM
+- Tool Calling
+- Retry
+
+导致问题难以定位。
+
+---
+
+### 十四、这一课最终要形成的 Graph Topology
+
+Lesson 4 完成后，我们最终希望得到一个最小 Graph：
+
+```text
+START
+  │
+  ▼
+initialize_state
+  │
+  ▼
+get_stock_price
+  │
+  ▼
+prepare_output
+  │
+  ▼
+END
+```
+
+其中：
+
+```text
+initialize_state
+        │
+        │ ticker
+        ▼
+get_stock_price_node
+        │
+        │ Tool.invoke()
+        ▼
+get_stock_price
+        │
+        │ {"ticker": "AAPL", "price": 200}
+        ▼
+current_price
+```
+
+注意：
+
+**这一课还不需要把 LLM 放进这条最小测试 Graph。**
+
+下一课再把：
+
+```text
+LLM
+ ↓
+Tool Call
+```
+
+接到这里。
+
+---
+
+### 十五、Lesson 4 第一阶段任务
+
+这一次我们只做以下修改：
+
+#### ① GraphState
+
+增加：
+
+```python
+current_price: float | None
+```
+
+#### ② initialize_state
+
+增加：
+
+```python
+"current_price": None
+```
+
+#### ③ Tool Node
+
+新增：
+
+```text
+app/graph/nodes/tool_node.py
+```
+
+实现：
+
+```python
+def get_stock_price_node(state):
+    ticker = state["ticker"]
+
+    result = get_stock_price.invoke(
+        {"ticker": ticker}
+    )
+
+    return {
+        "current_price": result["price"]
+    }
+```
+
+#### ④ Test
+
+新增：
+
+```text
+tests/test_tool_result_to_state.py
+```
+
+测试：
+
+```text
+AAPL → 200.0
+MSFT → 450.0
+```
+
+我建议直接写两个测试：
+
+```python
+from app.graph.nodes.tool_node import get_stock_price_node
+
+
+def test_get_stock_price_result_updates_graph_state_aapl():
+    state = {
+        "ticker": "AAPL",
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["current_price"] == 200.0
+
+
+def test_get_stock_price_result_updates_graph_state_msft():
+    state = {
+        "ticker": "MSFT",
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["current_price"] == 450.0
+```
+
+---
+
+### Lesson 4 当前 Acceptance Criteria
+
+#### State
+
+- [ ] `GraphState` 包含 `current_price`
+- [ ] `initialize_state()` 正确初始化 `current_price`
+
+#### Tool Node
+
+- [ ] Node 可以从 State 获取 ticker
+- [ ] Node 调用 `get_stock_price`
+- [ ] Node 将 Tool Result 转换成 `current_price`
+- [ ] Node 只更新自己负责的字段
+
+#### Tests
+
+- [ ] AAPL → `200.0`
+- [ ] MSFT → `450.0`
+- [ ] 原有 Phase 1 / Phase 2 / Phase 3 测试全部保持通过
+
+#### Architecture
+
+当前我们建立：
+
+```text
+GraphState
+    │
+    ▼
+Tool Node
+    │
+    ▼
+Tool
+    │
+    ▼
+Tool Result
+    │
+    ▼
+GraphState.current_price
+```
+
+
+## Phase 3 — Lesson 5：Tool Failure
+
+这一课开始进入 **Error Handling**。
+
+前面我们已经建立：
+
+```text
+LLM
+ ↓
+Tool Call
+ ↓
+Tool
+ ↓
+Tool Result
+ ↓
+Graph State
+```
+
+但真实系统里，Tool 不可能永远成功。
+
+例如：
+
+```text
+Ticker 不存在
+Provider 返回错误
+网络超时
+API 限流
+数据缺失
+Provider 暂时不可用
+```
+
+如果我们直接：
+
+```python
+result = get_stock_price.invoke(...)
+```
+
+一旦抛异常，整个 Graph 可能直接失败。
+
+所以这一课要建立一个非常重要的原则：
+
+> **Tool Failure 必须成为 Graph 中可处理的状态，而不能只是 Python Exception。**
+
+这也对应项目交接文档中已经确定的错误分类：Tool Failure、LLM Failure、Timeout、Invalid Structured Output、Missing Data、Partial Research Failure 等需要分别处理，而不是用 `except Exception: pass` 静默吞掉错误。:chatgpt-content-reference{index="0"}
+
+---
+
+### 一、这一课的目标
+
+我们最终希望：
+
+```text
+Tool Success
+    │
+    ▼
+current_price
+```
+
+以及：
+
+```text
+Tool Failure
+    │
+    ▼
+tool_error
+    │
+    ▼
+Failure Path
+```
+
+也就是说：
+
+```text
+                  ┌── Success ──→ current_price
+                  │
+Tool Execution ───┤
+                  │
+                  └── Failure ──→ tool_error
+```
+
+而不是：
+
+```text
+Tool Execution
+      │
+      X
+   Exception
+      │
+   Graph Crash
+```
+
+---
+
+### 二、第一步：让 Mock Tool 能够失败
+
+目前我们的 Tool：
+
+```python
+@tool
+def get_stock_price(ticker: str) -> dict:
+```
+
+对于未知 ticker：
+
+```python
+mock_prices.get(ticker, 100.0)
+```
+
+仍然返回：
+
+```python
+{
+    "ticker": "UNKNOWN",
+    "price": 100.0
+}
+```
+
+这对于 Lesson 5 不够好。
+
+因为：
+
+> **未知 ticker 应该是 Tool Failure，而不是一个假价格。**
+
+所以我们需要改变 Mock Tool 的行为。
+
+---
+
+### 三、修改 `get_stock_price`
+
+修改：
+
+```text
+app/tools/financial.py
+```
+
+完整版本：
+
+```python
+from pydantic import BaseModel, Field
+from langchain_core.tools import tool
+
+
+class StockPriceInput(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol, for example AAPL or MSFT."
+    )
+
+
+@tool(args_schema=StockPriceInput)
+def get_stock_price(ticker: str) -> dict:
+    """Get the current stock price for a stock ticker."""
+
+    mock_prices = {
+        "AAPL": 200.0,
+        "MSFT": 450.0,
+        "GOOGL": 180.0,
+    }
+
+    if ticker not in mock_prices:
+        raise ValueError(
+            f"Stock price not found for ticker: {ticker}"
+        )
+
+    return {
+        "ticker": ticker,
+        "price": mock_prices[ticker],
+    }
+```
+
+这里的核心变化是：
+
+```python
+if ticker not in mock_prices:
+    raise ValueError(...)
+```
+
+---
+
+### 四、为什么这里可以抛 Exception？
+
+这是一个很重要的设计问题。
+
+可能会产生一个疑问：
+
+> 刚才不是说 Tool Failure 不应该让 Graph Crash 吗？
+
+这里需要区分两个层次。
+
+#### Tool 层
+
+Tool 本身负责：
+
+> **准确表达“我无法完成这个 Tool 请求”。**
+
+所以：
+
+```python
+raise ValueError(...)
+```
+
+是合理的。
+
+Tool 不应该偷偷返回：
+
+```python
+{
+    "price": 0
+}
+```
+
+或者：
+
+```python
+{
+    "price": 100
+}
+```
+
+来伪装成功。
+
+---
+
+#### Graph Node 层
+
+真正负责：
+
+> **把 Tool Exception 转换成 Graph 可处理的 State。**
+
+也就是说：
+
+```text
+Tool
+ │
+ ├── Success → result
+ │
+ └── Failure → Exception
+                    │
+                    ▼
+              Tool Node
+                    │
+                    ▼
+                tool_error
+```
+
+这是我们这一课真正要实现的地方。
+
+---
+
+### 五、GraphState 增加 Tool Error
+
+之前我们增加了：
+
+```python
+current_price: float | None
+```
+
+现在增加：
+
+```python
+tool_error: str | None
+```
+
+因此逻辑上：
+
+```python
+class GraphState(TypedDict):
+    ...
+    current_price: float | None
+    tool_error: str | None
+```
+
+同时在：
+
+```python
+initialize_state()
+```
+
+中增加：
+
+```python
+"tool_error": None,
+```
+
+这一点不能漏。
+
+因为我们之前已经明确：
+
+> 新增 GraphState 字段之后，必须检查 `initialize_state()`。
+
+---
+
+### 六、修改 Tool Node
+
+之前我们的 Node 类似：
+
+```python
+def get_stock_price_node(state):
+    ticker = state["ticker"]
+
+    result = get_stock_price.invoke(
+        {"ticker": ticker}
+    )
+
+    return {
+        "current_price": result["price"]
+    }
+```
+
+现在我们需要增加明确的 Error Path。
+
+完整修改为：
+
+```python
+from app.tools.financial import get_stock_price
+
+
+def get_stock_price_node(state):
+    ticker = state["ticker"]
+
+    try:
+        result = get_stock_price.invoke(
+            {"ticker": ticker}
+        )
+
+        return {
+            "current_price": result["price"],
+            "tool_error": None,
+        }
+
+    except ValueError as exc:
+        return {
+            "tool_error": str(exc),
+        }
+```
+
+---
+
+### 七、为什么这里捕获 `ValueError`，而不是 `Exception`？
+
+这是一个非常重要的工程习惯。
+
+我们现在明确知道 Tool 对未知 ticker 使用：
+
+```python
+ValueError
+```
+
+所以 Node 捕获：
+
+```python
+except ValueError
+```
+
+而不是：
+
+```python
+except Exception
+```
+
+原因是：
+
+```text
+精确捕获已知错误
+        ↓
+明确处理
+        ↓
+未知错误继续暴露
+```
+
+相比：
+
+```python
+except Exception:
+    ...
+```
+
+更容易发现真正的程序 Bug。
+
+项目架构中已经明确要求不要使用：
+
+```python
+except Exception:
+    pass
+```
+
+静默吞错。:chatgpt-content-reference{index="1"}
+
+---
+
+### 八、但是这里还有一个问题
+
+现在：
+
+```python
+except ValueError:
+    return {
+        "tool_error": str(exc)
+    }
+```
+
+没有返回：
+
+```python
+"current_price"
+```
+
+这其实是有意的。
+
+因为失败情况下：
+
+```text
+current_price
+```
+
+应该保持原状态，而不是被伪造。
+
+例如：
+
+```text
+current_price = None
+tool_error = "Stock price not found..."
+```
+
+这比：
+
+```text
+current_price = 0
+```
+
+安全得多。
+
+对于投资研究系统，这是非常重要的。
+
+---
+
+### 九、成功和失败状态
+
+现在 Node 的输出有两种可能。
+
+#### Success
+
+```python
+{
+    "current_price": 200.0,
+    "tool_error": None,
+}
+```
+
+#### Failure
+
+```python
+{
+    "tool_error": "Stock price not found for ticker: INVALID"
+}
+```
+
+因此 Graph State 可以表达：
+
+```text
+Success
+├── current_price = 200.0
+└── tool_error = None
+```
+
+或者：
+
+```text
+Failure
+├── current_price = None
+└── tool_error = "..."
+```
+
+这就是显式 Failure State。
+
+---
+
+### 十、增加测试
+
+现在修改：
+
+```text
+tests/test_tool_result_to_state.py
+```
+
+建议完整版本：
+
+```python
+from app.graph.nodes.tool_node import get_stock_price_node
+
+
+def test_get_stock_price_result_updates_graph_state_aapl():
+    state = {
+        "ticker": "AAPL",
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["current_price"] == 200.0
+    assert result["tool_error"] is None
+
+
+def test_get_stock_price_result_updates_graph_state_msft():
+    state = {
+        "ticker": "MSFT",
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["current_price"] == 450.0
+    assert result["tool_error"] is None
+
+
+def test_get_stock_price_tool_failure():
+    state = {
+        "ticker": "INVALID",
+    }
+
+    result = get_stock_price_node(state)
+
+    assert "tool_error" in result
+    assert result["tool_error"] is not None
+    assert "INVALID" in result["tool_error"]
+```
+
+现在我们有：
+
+```text
+AAPL
+ ↓
+Success
+
+MSFT
+ ↓
+Success
+
+INVALID
+ ↓
+Failure
+```
+
+---
+
+### 十一、还需要直接测试 Tool Failure
+
+Node 测试已经验证了 Failure Path，但 Tool 本身也应该有一个测试。
+
+修改：
+
+```text
+tests/test_financial_tool.py
+```
+
+增加：
+
+```python
+import pytest
+
+from app.tools.financial import get_stock_price
+```
+
+然后：
+
+```python
+def test_get_stock_price_invalid_ticker():
+    with pytest.raises(ValueError, match="INVALID"):
+        get_stock_price.invoke(
+            {"ticker": "INVALID"}
+        )
+```
+
+这里测试的是：
+
+```text
+Tool 层
+```
+
+而前面的：
+
+```python
+test_get_stock_price_tool_failure()
+```
+
+测试的是：
+
+```text
+Graph Node 层
+```
+
+这两个测试不要混为一谈。
+
+---
+
+### 十二、现在我们的错误边界变得清楚了
+
+整个架构现在是：
+
+```text
+                 ┌───────────────┐
+                 │ Graph State   │
+                 │ ticker        │
+                 └───────┬───────┘
+                         │
+                         ▼
+               ┌─────────────────┐
+               │ Tool Node       │
+               └────────┬────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │ get_stock_price │
+               └────────┬────────┘
+                        │
+             ┌──────────┴──────────┐
+             │                     │
+          Success               Failure
+             │                     │
+             ▼                     ▼
+      current_price           tool_error
+```
+
+这已经开始接近真正的 Agent Error Handling。
+
+---
+
+### 十三、为什么 `tool_error` 放进 State？
+
+因为下一节点需要知道：
+
+```text
+Tool 成功了吗？
+```
+
+例如后面我们会有：
+
+```text
+Tool Node
+   │
+   ▼
+route_after_tool
+   │
+   ├── success → continue
+   │
+   └── failure → retry / fallback / failure
+```
+
+如果 Error 只是 Python Exception：
+
+```text
+Exception
+```
+
+Graph 的后续节点无法自然读取。
+
+而现在：
+
+```python
+state["tool_error"]
+```
+
+可以直接进行条件路由。
+
+这与 Phase 2 的：
+
+```text
+llm_error
+failure_reason
+retry_count
+```
+
+是同一种架构思想。
+
+---
+
+### 十四、下一阶段会出现 Tool Failure Routing
+
+本课我们暂时只完成：
+
+```text
+Tool Failure
+ ↓
+tool_error
+```
+
+下一课我们会进一步变成：
+
+```text
+                    ┌── success ──→ continue
+                    │
+Tool Node ──────────┤
+                    │
+                    └── failure ──→ recovery
+```
+
+也就是说：
+
+### Lesson 6 — Tool Failure Routing / Retry
+
+我们会开始讨论：
+
+```text
+Tool Failure
+   ↓
+Should Retry?
+   ├── Yes → Tool Again
+   └── No  → Failure Path
+```
+
+这时才会真正把：
+
+```text
+Error
++
+Conditional Edge
++
+Retry
+```
+
+结合起来。
+
+---
+
+### 十五、这一课暂时不要做的事情
+
+现在不要：
+
+- 接 Yahoo Finance
+- 接真实金融 API
+- 加网络 Retry
+- 加 Exponential Backoff
+- 加 Provider abstraction
+- 加复杂 Error hierarchy
+- 修改 LLM Node
+- 把所有异常统一成一个 `Exception`
+- 创建复杂的 error framework
+
+这些都会在后续需要时逐步加入。
+
+当前只学习：
+
+> **Tool Failure → Explicit Graph State**
+
+---
+
+### Lesson 5 Acceptance Criteria
+
+完成后应该满足：
+
+#### Tool 层
+
+- [ ] AAPL 正常
+- [ ] MSFT 正常
+- [ ] GOOGL 正常
+- [ ] INVALID ticker 抛出 `ValueError`
+
+#### State 层
+
+- [ ] `GraphState` 有 `tool_error`
+- [ ] `initialize_state()` 初始化 `tool_error = None`
+
+#### Node 层
+
+成功：
+
+```text
+current_price = 200
+tool_error = None
+```
+
+失败：
+
+```text
+tool_error = "...INVALID..."
+```
