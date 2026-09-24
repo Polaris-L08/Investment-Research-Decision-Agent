@@ -33,3 +33,29 @@ def test_get_stock_price_tool_failure():
     assert "tool_error" in result
     assert result["tool_error"] is not None
     assert "INVALID" in result["tool_error"]
+
+
+def test_retryable_tool_failure():
+    state = {
+        "ticker": "TEMP_ERROR",
+        "tool_retry_count": 0,
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["tool_error"] is not None
+    assert result["tool_retryable"] is True
+    assert result["tool_retry_count"] == 1
+
+
+def test_invalid_ticker_is_not_retryable():
+    state = {
+        "ticker": "INVALID",
+        "tool_retry_count": 0,
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["tool_error"] is not None
+    assert result["tool_retryable"] is False
+    assert "INVALID" in result["tool_error"]

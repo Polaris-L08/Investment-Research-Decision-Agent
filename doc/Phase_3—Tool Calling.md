@@ -3525,7 +3525,7 @@ GraphState.current_price
 ```
 
 
-## Phase 3 — Lesson 5：Tool Failure
+## Lesson 5：Tool Failure
 
 这一课开始进入 **Error Handling**。
 
@@ -4298,3 +4298,1285 @@ tool_error = None
 ```text
 tool_error = "...INVALID..."
 ```
+---
+
+
+## Lesson 6: Tool Failure Routing / Retry
+
+### 一、这一课解决什么问题？
+
+Lesson 5 之后，我们已经能够得到：
+
+#### Tool 成功
+
+```text
+ticker = AAPL
+       ↓
+get_stock_price
+       ↓
+current_price = 200
+tool_error = None
+```
+
+#### Tool 失败
+
+```text
+ticker = INVALID
+       ↓
+get_stock_price
+       ↓
+tool_error = "Stock price not found..."
+```
+
+但现在存在一个问题：
+
+> **Tool Failure 之后，Graph 应该做什么？**
+
+我们不能让 Graph 简单地：
+
+```text
+Tool Failure
+    ↓
+END
+```
+
+因为某些错误是可以恢复的。
+
+例如未来：
+
+```text
+API timeout
+    ↓
+Retry
+```
+
+而有些错误根本不应该 Retry：
+
+```text
+INVALID ticker
+    ↓
+Retry?
+```
+
+重复调用十次仍然是：
+
+```text
+INVALID ticker
+```
+
+所以这一课最重要的概念是：
+
+> **不是所有 Tool Failure 都应该 Retry。**
+
+---
+
+### 二、先区分两类 Failure
+
+为了保持这一课简单，我们先区分：
+
+#### Retryable Failure
+
+例如：
+
+```text
+Temporary timeout
+Temporary provider error
+Rate limit
+Transient network error
+```
+
+这些错误：
+
+```text
+可能第一次失败
+第二次成功
+```
+
+因此：
+
+```text
+Failure
+  ↓
+Retry
+```
+
+是合理的。
+
+---
+
+#### Non-Retryable Failure
+
+例如：
+
+```text
+INVALID ticker
+Missing required parameter
+Invalid input
+```
+
+这种错误：
+
+```text
+重试不会改变输入
+```
+
+所以：
+
+```text
+Failure
+  ↓
+Retry
+  ↓
+Failure
+  ↓
+Retry
+  ↓
+...
+```
+
+是错误设计。
+
+---
+
+### 三、但是我们的 Mock Tool 目前只有一种 Failure
+
+Lesson 5 中：
+
+```python
+id="..."
+if ticker not in mock_prices:
+    raise ValueError(...)
+```
+
+这属于：
+
+```text
+Invalid Input
+```
+
+所以严格来说：
+
+> **当前 INVALID ticker 不应该 Retry。**
+
+因此这一课我们需要增加一个**可以模拟 Retry 的 Tool Failure**。
+
+为了避免现在引入真实网络，我们继续使用 Mock。
+
+---
+
+### 四、增加一个可重试的 Mock Failure
+
+我们可以让特殊 ticker：
+
+```text
+RETRY
+```
+
+模拟一个临时错误。
+
+但是这里有一个教学上的关键问题：
+
+> 如果每次调用 `RETRY` 都失败，那么 Retry 没有任何意义。
+
+所以我们需要让它：
+
+```text
+第一次调用 → Failure
+第二次调用 → Success
+```
+
+这可以模拟真实 Provider 中的 transient failure。
+
+---
+
+### 五、为 Tool 增加一次性 Failure
+
+修改：
+
+```text
+app/tools/financial.py
+```
+
+不过这里**不建议直接把全局计数器塞进 Tool**。
+
+例如不要：
+
+```python
+call_count = 0
+```
+
+因为这种状态会污染测试，并且不符合最终生产架构。
+
+更好的 Lesson 6 做法是：
+
+> **把 retry simulation 放在 Tool Node 层，而不是污染 Tool 本身。**
+
+这样 Tool 本身仍然是：
+
+```text
+Input
+ ↓
+Tool
+ ↓
+Result / Exception
+```
+
+而 Retry 属于：
+
+```text
+Graph orchestration
+```
+
+这是一个非常重要的架构边界。
+
+---
+
+### 六、Tool Node 增加 `retry_count`
+
+我们之前已经有：
+
+```text
+tool_error
+```
+
+现在需要：
+
+```text
+retry_count
+```
+
+这与 Phase 2 的：
+
+```text
+retry_count
+```
+
+思想一致。
+
+修改 `GraphState`：
+
+```python
+retry_count: int
+```
+
+并在：
+
+```python
+initialize_state()
+```
+
+中：
+
+```python
+"retry_count": 0,
+```
+
+---
+
+### 七、为什么 `retry_count` 是 State？
+
+因为 Retry 是：
+
+> **Graph 当前执行过程中的状态。**
+
+例如：
+
+```text
+第一次 Tool Call
+retry_count = 0
+
+失败
+↓
+retry_count = 1
+
+第二次 Tool Call
+↓
+失败
+↓
+retry_count = 2
+```
+
+Graph 必须知道：
+
+```text
+我已经重试几次了？
+```
+
+否则无法安全限制：
+
+```text
+最大 Retry 次数
+```
+
+---
+
+### 八、定义最大 Retry 次数
+
+在 Tool Node 文件中：
+
+```python
+MAX_TOOL_RETRIES = 2
+```
+
+这里要特别注意语义：
+
+```text
+初始调用 = 1
+retry = 2
+```
+
+所以最多：
+
+```text
+3 次 Tool Execution
+```
+
+这与 Phase 2 的：
+
+```text
+MAX_LLM_RETRIES = 2
+```
+
+保持一致。
+
+---
+
+### 九、但是 Lesson 6 先不要在 Node 内部 `while`
+
+这里是一个非常重要的 LangGraph 设计原则。
+
+不要写：
+
+```python
+while retry_count < 2:
+    try:
+        ...
+    except:
+        ...
+```
+
+因为这样：
+
+```text
+Retry
+```
+
+发生在：
+
+```text
+Python Function 内部
+```
+
+而不是：
+
+```text
+LangGraph topology
+```
+
+我们希望 Graph 本身能够表达：
+
+```text
+Tool
+ ↓
+Route
+ ├── Success
+ ├── Retry
+ └── Failure
+```
+
+所以：
+
+> **Retry 应该由 Graph Edge 控制，而不是 Node 内部 while loop。**
+
+---
+
+### 十、因此 Tool Node 只负责一次执行
+
+我们把 Node 设计成：
+
+```text
+get_stock_price_node
+```
+
+每次只做：
+
+```text
+一次 Tool Call
+```
+
+然后更新：
+
+```text
+current_price
+```
+
+或者：
+
+```text
+tool_error
+```
+
+以及：
+
+```text
+retry_count
+```
+
+---
+
+### 十一、修改 Tool Node
+
+可以将当前 Node 调整为：
+
+```python
+from app.tools.financial import get_stock_price
+
+
+def get_stock_price_node(state):
+    ticker = state["ticker"]
+    retry_count = state["retry_count"]
+
+    try:
+        result = get_stock_price.invoke(
+            {"ticker": ticker}
+        )
+
+        return {
+            "current_price": result["price"],
+            "tool_error": None,
+        }
+
+    except ValueError as exc:
+        return {
+            "tool_error": str(exc),
+            "retry_count": retry_count + 1,
+        }
+```
+
+但是这里马上出现一个问题：
+
+#### INVALID ticker
+
+第一次：
+
+```text
+retry_count = 0
+```
+
+失败后：
+
+```text
+retry_count = 1
+```
+
+然后如果我们无脑 Retry：
+
+```text
+retry_count = 2
+```
+
+最终：
+
+```text
+retry_count = 3
+```
+
+但实际上 INVALID ticker 根本不应该 Retry。
+
+所以我们需要进一步增加：
+
+```text
+Failure Classification
+```
+
+---
+
+### 十二、Lesson 6 不要把所有 `ValueError` 都当成 Retryable
+
+这是本课真正的核心。
+
+我们应该让 Node 输出：
+
+```text
+tool_error
+tool_retryable
+```
+
+例如 State 增加：
+
+```python
+tool_retryable: bool
+```
+
+初始化：
+
+```python
+"tool_retryable": False,
+```
+
+成功：
+
+```python
+{
+    "current_price": 200.0,
+    "tool_error": None,
+    "tool_retryable": False,
+}
+```
+
+失败：
+
+```python
+{
+    "tool_error": "...",
+    "tool_retryable": True,
+}
+```
+
+或者：
+
+```python
+{
+    "tool_error": "...",
+    "tool_retryable": False,
+}
+```
+
+这样 Conditional Edge 才有依据。
+
+---
+
+### 十三、不过我们现在没有不同类型的 Tool Exception
+
+所以我们可以在 Mock Tool 中明确增加两种异常：
+
+```text
+Invalid ticker
+Transient failure
+```
+
+例如：
+
+```python
+class TransientToolError(Exception):
+    pass
+```
+
+然后：
+
+```python
+if ticker == "TEMP_ERROR":
+    raise TransientToolError(
+        "Temporary stock price provider error."
+    )
+```
+
+以及：
+
+```python
+if ticker not in mock_prices:
+    raise ValueError(
+        f"Stock price not found for ticker: {ticker}"
+    )
+```
+
+这样：
+
+```text
+ValueError
+    ↓
+Non-retryable
+
+TransientToolError
+    ↓
+Retryable
+```
+
+这就非常清楚。
+
+---
+
+### 十四、修改 `financial.py`
+
+建议现在把完整文件调整为：
+
+```python
+from pydantic import BaseModel, Field
+from langchain_core.tools import tool
+
+
+class TransientToolError(Exception):
+    """Temporary tool failure that may succeed when retried."""
+
+
+class StockPriceInput(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol, for example AAPL or MSFT."
+    )
+
+
+@tool(args_schema=StockPriceInput)
+def get_stock_price(ticker: str) -> dict:
+    """Get the current stock price for a stock ticker."""
+
+    if ticker == "TEMP_ERROR":
+        raise TransientToolError(
+            "Temporary stock price provider error."
+        )
+
+    mock_prices = {
+        "AAPL": 200.0,
+        "MSFT": 450.0,
+        "GOOGL": 180.0,
+    }
+
+    if ticker not in mock_prices:
+        raise ValueError(
+            f"Stock price not found for ticker: {ticker}"
+        )
+
+    return {
+        "ticker": ticker,
+        "price": mock_prices[ticker],
+    }
+```
+
+现在我们拥有：
+
+```text
+AAPL
+ ↓
+Success
+
+MSFT
+ ↓
+Success
+
+INVALID
+ ↓
+ValueError
+ ↓
+Non-retryable
+
+TEMP_ERROR
+ ↓
+TransientToolError
+ ↓
+Retryable
+```
+
+---
+
+### 十五、修改 GraphState
+
+增加：
+
+```python
+tool_retryable: bool
+```
+
+和：
+
+```python
+retry_count: int
+```
+
+因此相关 State 逻辑：
+
+```python
+current_price: float | None
+tool_error: str | None
+tool_retryable: bool
+retry_count: int
+```
+
+初始化：
+
+```python
+"current_price": None,
+"tool_error": None,
+"tool_retryable": False,
+"retry_count": 0,
+```
+
+---
+
+### 十六、修改 Tool Node
+
+现在 Node 可以精确区分：
+
+```python
+from app.tools.financial import (
+    TransientToolError,
+    get_stock_price,
+)
+
+
+def get_stock_price_node(state):
+    ticker = state["ticker"]
+    retry_count = state["retry_count"]
+
+    try:
+        result = get_stock_price.invoke(
+            {"ticker": ticker}
+        )
+
+        return {
+            "current_price": result["price"],
+            "tool_error": None,
+            "tool_retryable": False,
+        }
+
+    except TransientToolError as exc:
+        return {
+            "tool_error": str(exc),
+            "tool_retryable": True,
+            "retry_count": retry_count + 1,
+        }
+
+    except ValueError as exc:
+        return {
+            "tool_error": str(exc),
+            "tool_retryable": False,
+        }
+```
+
+这里有一个很重要的设计：
+
+#### TransientToolError
+
+```text
+tool_retryable = True
+retry_count += 1
+```
+
+#### ValueError
+
+```text
+tool_retryable = False
+```
+
+而不是：
+
+```python
+except Exception:
+```
+
+---
+
+### 十七、现在建立 Conditional Router
+
+新增：
+
+```python
+def route_after_tool(state):
+    if state["tool_error"] is None:
+        return "success"
+
+    if (
+        state["tool_retryable"]
+        and state["retry_count"] <= MAX_TOOL_RETRIES
+    ):
+        return "retry"
+
+    return "failure"
+```
+
+其中：
+
+```python
+MAX_TOOL_RETRIES = 2
+```
+
+---
+
+### 十八、Router 的逻辑
+
+可以画成：
+
+```text
+                 Tool Node
+                    │
+             ┌──────┴──────┐
+             │             │
+          Success        Failure
+             │             │
+             │       ┌─────┴─────┐
+             │       │           │
+             │   Retryable   Non-retryable
+             │       │           │
+             │       ▼           ▼
+             │     Retry       Failure
+             │
+             ▼
+          Continue
+```
+
+更准确一点：
+
+```text
+tool_error is None
+       │
+       └── success
+
+tool_error != None
+       │
+       ├── retryable AND retry_count <= 2
+       │        │
+       │        └── retry
+       │
+       └── otherwise
+                │
+                └── failure
+```
+
+---
+
+### 十九、为什么 Retry 是 Edge？
+
+这是本课最重要的 LangGraph 概念。
+
+我们希望 Graph Topology 本身表达：
+
+```text
+Tool
+ ↓
+Router
+ ├── retry → Tool
+ ├── failure → Failure Handler
+ └── success → Continue
+```
+
+也就是说：
+
+```text
+Retry
+```
+
+不是：
+
+```python
+while ...
+```
+
+而是：
+
+```text
+Graph Edge
+```
+
+这样 LangGraph 才能：
+
+- checkpoint
+- interrupt
+- observe
+- recover
+- visualize
+
+这些能力。
+
+这也是为什么最终生产系统应该让 **workflow control flow 显式存在于 Graph topology 中**。
+
+---
+
+### 二十、构建最小 Retry Graph
+
+这一课暂时不要把它接回完整 Phase 2 Graph。
+
+创建一个专门用于 Tool Retry 的最小 Graph。
+
+例如：
+
+```text
+tests / 或 graph 测试辅助构建
+```
+
+我们可以先在：
+
+```text
+app/graph/tool_graph.py
+```
+
+创建：
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+from app.graph.nodes.tool_node import (
+    get_stock_price_node,
+    route_after_tool,
+)
+
+
+def build_tool_graph():
+    builder = StateGraph(GraphState)
+
+    builder.add_node(
+        "get_stock_price",
+        get_stock_price_node,
+    )
+
+    builder.add_node(
+        "tool_failure",
+        handle_tool_failure,
+    )
+
+    builder.add_edge(
+        START,
+        "get_stock_price",
+    )
+
+    builder.add_conditional_edges(
+        "get_stock_price",
+        route_after_tool,
+        {
+            "success": END,
+            "retry": "get_stock_price",
+            "failure": "tool_failure",
+        },
+    )
+
+    builder.add_edge(
+        "tool_failure",
+        END,
+    )
+
+    return builder.compile()
+```
+
+但是这里涉及你当前项目具体的 `GraphState`、`handle_tool_failure` 所在文件位置。
+
+**所以这一部分不要直接照抄创建。**
+
+Lesson 6 的第一阶段，我们先把 **Router 单独测试好**，然后再把它正式加入 Graph。
+
+这样仍然遵循我们一直采用的：
+
+```text
+先单点
+ ↓
+再集成
+```
+
+---
+
+### 二十一、先测试 Router
+
+增加：
+
+```text
+tests/test_tool_failure_routing.py
+```
+
+完整测试：
+
+```python
+from app.graph.nodes.tool_node import route_after_tool
+
+
+def test_tool_success_routes_to_success():
+    state = {
+        "tool_error": None,
+        "tool_retryable": False,
+        "retry_count": 0,
+    }
+
+    assert route_after_tool(state) == "success"
+
+
+def test_retryable_tool_failure_routes_to_retry():
+    state = {
+        "tool_error": "Temporary error",
+        "tool_retryable": True,
+        "retry_count": 1,
+    }
+
+    assert route_after_tool(state) == "retry"
+
+
+def test_retryable_tool_failure_stops_after_max_retries():
+    state = {
+        "tool_error": "Temporary error",
+        "tool_retryable": True,
+        "retry_count": 3,
+    }
+
+    assert route_after_tool(state) == "failure"
+
+
+def test_non_retryable_tool_failure_routes_to_failure():
+    state = {
+        "tool_error": "Invalid ticker",
+        "tool_retryable": False,
+        "retry_count": 0,
+    }
+
+    assert route_after_tool(state) == "failure"
+```
+
+---
+
+### 二十二、再测试 Tool Node 的错误分类
+
+在：
+
+```text
+tests/test_tool_result_to_state.py
+```
+
+增加：
+
+```python
+def test_retryable_tool_failure():
+    state = {
+        "ticker": "TEMP_ERROR",
+        "retry_count": 0,
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["tool_error"] is not None
+    assert result["tool_retryable"] is True
+    assert result["retry_count"] == 1
+```
+
+再增加：
+
+```python
+def test_invalid_ticker_is_not_retryable():
+    state = {
+        "ticker": "INVALID",
+        "retry_count": 0,
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["tool_error"] is not None
+    assert result["tool_retryable"] is False
+    assert "INVALID" in result["tool_error"]
+```
+
+这样我们就验证：
+
+```text
+TEMP_ERROR
+   ↓
+retryable
+
+INVALID
+   ↓
+non-retryable
+```
+
+---
+
+### 二十三、这里有一个细节需要特别注意
+
+你会发现：
+
+```text
+retry_count
+```
+
+是在：
+
+```python
+TransientToolError
+```
+
+发生之后才：
+
+```python
+retry_count + 1
+```
+
+因此：
+
+```text
+第一次调用失败
+retry_count = 1
+```
+
+Router 判断：
+
+```text
+1 <= 2
+```
+
+于是：
+
+```text
+retry
+```
+
+第二次：
+
+```text
+retry_count = 2
+```
+
+如果再次失败：
+
+```text
+retry
+```
+
+第三次：
+
+```text
+retry_count = 3
+```
+
+此时：
+
+```text
+3 <= 2
+```
+
+为 False：
+
+```text
+failure
+```
+
+所以总执行次数：
+
+```text
+Initial attempt
++
+Retry #1
++
+Retry #2
+=
+3 executions
+```
+
+这和我们之前 Phase 2 的 Retry 语义保持一致。
+
+---
+
+### 二十四、但是 `TEMP_ERROR` 现在永远失败
+
+对。
+
+所以目前我们验证的是：
+
+```text
+Retry Limit
+```
+
+还不是：
+
+```text
+Retry Recovery
+```
+
+这是故意的。
+
+下一阶段我们会让 Mock Provider 能够模拟：
+
+```text
+第一次失败
+第二次成功
+```
+
+从而验证：
+
+```text
+Tool
+ ↓
+Failure
+ ↓
+Retry
+ ↓
+Success
+```
+
+这会在后续 Tool Calling Loop / Provider abstraction 中更自然地实现。
+
+当前 Lesson 6 的核心是：
+
+> **Graph 能识别 Retryable Failure，并且不会无限 Retry。**
+
+---
+
+### 二十五、Lesson 6 的 Graph Topology
+
+完成本课之后，我们希望明确得到：
+
+```text
+                 ┌─────────────────────┐
+                 │                     │
+                 ▼                     │
+START → Tool Node → Router ── retry ───┘
+                    │
+                    ├── success → END
+                    │
+                    └── failure → Failure Handler → END
+```
+
+这比：
+
+```text
+Tool Node
+   │
+   └── while retry...
+```
+
+更加符合 LangGraph 的工作流思想。
+
+---
+
+### 二十六、这一课暂时不要做
+
+不要现在：
+
+- 接真实 Provider
+- 接 Yahoo Finance
+- 实现指数退避
+- 实现 jitter
+- 做 API rate-limit framework
+- 做复杂异常层级
+- 做 Provider fallback
+- 修改完整 Investment Decision Graph
+- 实现 Tool Calling Loop
+
+这些都会在后面逐步加入。
+
+---
+
+### Lesson 6 Acceptance Criteria
+
+这一课需要验证：
+
+#### Tool Error Classification
+
+```text
+AAPL
+ ↓
+Success
+
+INVALID
+ ↓
+Non-retryable Failure
+
+TEMP_ERROR
+ ↓
+Retryable Failure
+```
+
+#### State
+
+- [ ] `tool_retryable` 存在
+- [ ] `retry_count` 存在
+- [ ] 初始化正确
+- [ ] Retryable failure 会增加 `retry_count`
+
+#### Router
+
+- [ ] Success → `success`
+- [ ] Retryable + retry_count 未超限 → `retry`
+- [ ] Retryable + retry_count 超限 → `failure`
+- [ ] Non-retryable → `failure`
+
+---

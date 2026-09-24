@@ -95,6 +95,8 @@ def initialize_state(state: InputState) -> GraphState:
         "failure_reason": "",
         "retry_count": 0,
         "tool_error": None,
+        "tool_retry_count": 0,
+        "tool_retryable": False,
     }
 
 
@@ -166,6 +168,14 @@ def handle_llm_failure(state: GraphState) -> GraphState:
         "failure_reason": (
             f"LLM structured output failed: {state['llm_error']}"
         ),
+    }
+
+
+def handle_tool_failure(state: GraphState) -> GraphState:
+    return {
+        "failure_reason": (
+            f"Tool execution failed: {state['tool_error']}"
+        )
     }
 
 

@@ -42,7 +42,10 @@ class GraphState(TypedDict):
     llm_error: str
     failure_reason: str
     retry_count: int
+
     tool_error: str | None
+    tool_retry_count: int
+    tool_retryable: bool
 
 class OutputState(TypedDict):
     ticker: str
