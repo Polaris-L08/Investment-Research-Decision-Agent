@@ -7312,3 +7312,1716 @@ Lesson 8 需要满足：
 ### 本节最重要的一句话
 
 > **Tool Calling Agent 的核心不是“调用 Tool”，而是让 `LLM → Tool → Result → LLM` 成为一个由 Graph 控制的闭环。**
+---
+
+
+## Lesson 9：Tool Abstraction / Provider Separation
+
+这一节非常重要，因为它开始从：
+
+> “怎么使用 Tool？”
+
+进入：
+
+> **“怎么设计一个不会被具体数据供应商绑死的 Tool？”**
+
+---
+
+### 一、我们现在实际上有一个隐藏的问题
+
+目前：
+
+```text
+get_stock_price
+```
+
+里面直接写了：
+
+```python
+mock_prices = {
+    "AAPL": 200.0,
+    "MSFT": 450.0,
+    "GOOGL": 180.0,
+}
+```
+
+这对于教学非常好。
+
+但如果以后换成：
+
+```text
+Yahoo Finance
+Alpha Vantage
+Polygon
+Finnhub
+Bloomberg
+公司内部数据服务
+```
+
+难道我们要修改：
+
+```text
+get_stock_price()
+```
+
+本身吗？
+
+如果这样做：
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+Yahoo Finance
+```
+
+然后以后：
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+Alpha Vantage
+```
+
+那么 Tool 本身就会和 Provider 紧密耦合。
+
+这是我们现在要解决的问题。
+
+---
+
+### 二、最终希望形成的结构
+
+我们希望从：
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+Mock Data
+```
+
+演变成：
+
+```text
+                    ┌── Mock Provider
+                    │
+LLM → Tool → Provider├── Yahoo Finance
+                    │
+                    ├── Alpha Vantage
+                    │
+                    └── Other Provider
+```
+
+也就是说：
+
+> **Tool 决定“Agent 能做什么”，Provider 决定“数据从哪里来”。**
+
+这是本节最重要的一句话。
+
+---
+
+### 三、Tool 和 Provider 的职责
+
+我们先把职责彻底分开。
+
+#### Tool
+
+例如：
+
+```text
+get_stock_price(ticker)
+```
+
+它属于 Agent 能力层。
+
+它应该关心：
+
+```text
+ticker
+ ↓
+获取股票价格
+ ↓
+返回标准结果
+```
+
+但它**不应该关心**：
+
+```text
+Yahoo Finance API 怎么调用
+API Key 放在哪里
+HTTP 请求怎么发送
+第三方响应 JSON 长什么样
+```
+
+---
+
+#### Provider
+
+Provider 负责：
+
+```text
+数据获取
+```
+
+例如：
+
+```text
+StockPriceProvider
+```
+
+它可能有：
+
+```text
+MockStockPriceProvider
+YahooFinanceStockPriceProvider
+```
+
+于是：
+
+```text
+Tool
+ ↓
+Provider
+ ↓
+Data Source
+```
+
+---
+
+### 四、Lesson 9 第一目标
+
+这一次我们**不接真实金融 API**。
+
+仍然使用 Mock。
+
+但是把 Mock 数据从 Tool 中移出去。
+
+原来：
+
+```text
+get_stock_price
+    ↓
+mock_prices
+```
+
+改成：
+
+```text
+get_stock_price
+    ↓
+StockPriceProvider
+    ↓
+MockStockPriceProvider
+    ↓
+mock_prices
+```
+
+这一步看起来只是多了一层，但它实际上是在建立未来 Provider 替换的边界。
+
+---
+
+### 五、创建 Provider
+
+新建：
+
+```text
+app/providers/financial.py
+```
+
+先定义：
+
+```python
+from abc import ABC, abstractmethod
+
+
+class StockPriceProvider(ABC):
+
+    @abstractmethod
+    def get_stock_price(self, ticker: str) -> dict:
+        """Get stock price data for a ticker."""
+        raise NotImplementedError
+```
+
+这里使用抽象基类，是为了表达一个明确的 Contract：
+
+```text
+StockPriceProvider
+        ↓
+必须提供
+get_stock_price(ticker)
+```
+
+---
+
+### 六、Mock Provider
+
+继续在：
+
+```text
+app/providers/financial.py
+```
+
+增加：
+
+```python
+class MockStockPriceProvider(StockPriceProvider):
+
+    def __init__(self):
+        self.mock_prices = {
+            "AAPL": 200.0,
+            "MSFT": 450.0,
+            "GOOGL": 180.0,
+        }
+
+    def get_stock_price(self, ticker: str) -> dict:
+        if ticker == "TEMP_ERROR":
+            raise TransientToolError(
+                "Temporary stock price provider error."
+            )
+
+        if ticker not in self.mock_prices:
+            raise ValueError(
+                f"Stock price not found for ticker: {ticker}"
+            )
+
+        return {
+            "ticker": ticker,
+            "price": self.mock_prices[ticker],
+        }
+```
+
+这里有一个需要马上注意的地方：
+
+`TransientToolError` 目前属于：
+
+```text
+app.tools.financial
+```
+
+而现在 Provider 不应该依赖 Tool。
+
+所以我们需要把这个异常移动到一个更合适的位置。
+
+---
+
+### 七、异常也应该进行分层
+
+我们现在已经开始出现一个架构问题：
+
+```text
+Provider
+ ↓
+TransientToolError
+```
+
+但这个异常却定义在：
+
+```text
+tools/financial.py
+```
+
+这反过来了。
+
+所以 Lesson 9 正好把它调整。
+
+创建：
+
+```text
+app/providers/exceptions.py
+```
+
+内容：
+
+```python
+class TransientProviderError(Exception):
+    """Temporary provider failure that may succeed when retried."""
+```
+
+然后：
+
+```text
+Tool
+ ↓
+Provider
+```
+
+两层都不应该依赖对方的实现。
+
+Provider 使用：
+
+```python
+TransientProviderError
+```
+
+Tool 再决定：
+
+```text
+Provider Error
+ ↓
+Tool Error
+```
+
+怎么映射。
+
+---
+
+### 八、修改 Mock Provider
+
+因此最终：
+
+```python
+from abc import ABC, abstractmethod
+
+from app.providers.exceptions import TransientProviderError
+
+
+class StockPriceProvider(ABC):
+
+    @abstractmethod
+    def get_stock_price(self, ticker: str) -> dict:
+        raise NotImplementedError
+
+
+class MockStockPriceProvider(StockPriceProvider):
+
+    def __init__(self):
+        self.mock_prices = {
+            "AAPL": 200.0,
+            "MSFT": 450.0,
+            "GOOGL": 180.0,
+        }
+
+    def get_stock_price(self, ticker: str) -> dict:
+        if ticker == "TEMP_ERROR":
+            raise TransientProviderError(
+                "Temporary stock price provider error."
+            )
+
+        if ticker not in self.mock_prices:
+            raise ValueError(
+                f"Stock price not found for ticker: {ticker}"
+            )
+
+        return {
+            "ticker": ticker,
+            "price": self.mock_prices[ticker],
+        }
+```
+
+---
+
+### 九、修改 Tool
+
+现在：
+
+```text
+app/tools/financial.py
+```
+
+不再拥有：
+
+```python
+mock_prices = {...}
+```
+
+而是：
+
+```python
+from app.providers.financial import MockStockPriceProvider
+from app.providers.exceptions import TransientProviderError
+```
+
+然后：
+
+```python
+stock_price_provider = MockStockPriceProvider()
+```
+
+Tool：
+
+```python
+@tool(args_schema=StockPriceInput)
+def get_stock_price(ticker: str) -> dict:
+    """Get the current stock price for a stock ticker."""
+
+    try:
+        return stock_price_provider.get_stock_price(ticker)
+
+    except TransientProviderError as exc:
+        raise TransientToolError(
+            str(exc)
+        ) from exc
+```
+
+这里的 `TransientToolError` 应该重新定义在 Tool 层。
+
+所以：
+
+```python
+class TransientToolError(Exception):
+    """Temporary tool failure that may succeed when retried."""
+```
+
+仍然可以留在：
+
+```text
+app/tools/financial.py
+```
+
+这样分层就变成：
+
+```text
+Provider
+    ↓
+TransientProviderError
+    ↓
+Tool
+    ↓
+TransientToolError
+    ↓
+Graph
+    ↓
+tool_retryable
+```
+
+---
+
+### 十、这就是这一节真正要理解的 Error Boundary
+
+现在我们已经有三层：
+
+```text
+Provider Layer
+        │
+        │ Provider Error
+        ▼
+Tool Layer
+        │
+        │ Tool Error
+        ▼
+Graph Layer
+        │
+        │ Graph State
+        ▼
+Agent Workflow
+```
+
+例如真实世界：
+
+```text
+Yahoo Finance
+    ↓
+HTTP timeout
+    ↓
+YahooFinanceProvider
+    ↓
+TransientProviderError
+    ↓
+get_stock_price
+    ↓
+TransientToolError
+    ↓
+get_stock_price_node
+    ↓
+tool_retryable = True
+    ↓
+Graph Retry
+```
+
+这个链条以后会非常重要。
+
+---
+
+### 十一、`get_company_info` 也做同样的 Provider Separation
+
+Lesson 7 增加的：
+
+```text
+get_company_info
+```
+
+目前也直接持有：
+
+```python
+mock_companies
+```
+
+这一次也抽出来。
+
+在：
+
+```text
+app/providers/financial.py
+```
+
+增加：
+
+```python
+class CompanyInfoProvider(ABC):
+
+    @abstractmethod
+    def get_company_info(self, ticker: str) -> dict:
+        raise NotImplementedError
+
+
+class MockCompanyInfoProvider(CompanyInfoProvider):
+
+    def __init__(self):
+        self.mock_companies = {
+            "AAPL": {
+                "ticker": "AAPL",
+                "company_name": "Apple Inc.",
+                "sector": "Technology",
+            },
+            "MSFT": {
+                "ticker": "MSFT",
+                "company_name": "Microsoft Corporation",
+                "sector": "Technology",
+            },
+            "GOOGL": {
+                "ticker": "GOOGL",
+                "company_name": "Alphabet Inc.",
+                "sector": "Communication Services",
+            },
+        }
+
+    def get_company_info(self, ticker: str) -> dict:
+        if ticker not in self.mock_companies:
+            raise ValueError(
+                f"Company information not found for ticker: {ticker}"
+            )
+
+        return self.mock_companies[ticker]
+```
+
+于是：
+
+```text
+get_company_info Tool
+        ↓
+CompanyInfoProvider
+        ↓
+MockCompanyInfoProvider
+```
+
+---
+
+### 十二、Provider 和 Tool 的关系现在变成
+
+```text
+             Agent
+               │
+        ┌──────┴──────┐
+        ▼             ▼
+ get_stock_price  get_company_info
+        │             │
+        ▼             ▼
+StockPriceProvider  CompanyInfoProvider
+        │             │
+        ▼             ▼
+Mock Provider      Mock Provider
+```
+
+未来替换 Provider 时：
+
+```text
+MockStockPriceProvider
+        ↓
+YahooFinanceStockPriceProvider
+```
+
+Tool 的接口可以保持：
+
+```text
+get_stock_price(ticker)
+```
+
+不变。
+
+这意味着：
+
+> LLM 根本不需要知道数据来自哪里。
+
+这正是我们希望实现的解耦。
+
+---
+
+### 十三、Lesson 9 的测试
+
+这一节测试重点发生变化。
+
+之前：
+
+```text
+Tool
+ ↓
+Mock Data
+```
+
+现在需要验证：
+
+```text
+Provider
+ ↓
+Tool
+ ↓
+LLM
+```
+
+但我们仍然不接真实 Provider。
+
+---
+
+#### Test 1：Provider
+
+创建：
+
+```text
+tests/test_providers.py
+```
+
+测试：
+
+```python
+from app.providers.financial import (
+    MockCompanyInfoProvider,
+    MockStockPriceProvider,
+)
+
+
+def test_mock_stock_price_provider():
+    provider = MockStockPriceProvider()
+
+    result = provider.get_stock_price("AAPL")
+
+    assert result == {
+        "ticker": "AAPL",
+        "price": 200.0,
+    }
+
+
+def test_mock_company_info_provider():
+    provider = MockCompanyInfoProvider()
+
+    result = provider.get_company_info("AAPL")
+
+    assert result["ticker"] == "AAPL"
+    assert result["company_name"] == "Apple Inc."
+    assert result["sector"] == "Technology"
+```
+
+---
+
+### 十四、Test 2：Provider Failure
+
+继续测试：
+
+```python
+import pytest
+
+from app.providers.exceptions import TransientProviderError
+from app.providers.financial import MockStockPriceProvider
+
+
+def test_mock_stock_price_provider_transient_failure():
+    provider = MockStockPriceProvider()
+
+    with pytest.raises(TransientProviderError):
+        provider.get_stock_price("TEMP_ERROR")
+
+
+def test_mock_stock_price_provider_invalid_ticker():
+    provider = MockStockPriceProvider()
+
+    with pytest.raises(
+        ValueError,
+        match="Stock price not found",
+    ):
+        provider.get_stock_price("INVALID")
+```
+
+这样我们明确验证：
+
+```text
+Provider Failure
+```
+
+而不是：
+
+```text
+Tool Failure
+```
+
+---
+
+### 十五、Test 3：Tool 仍然正常工作
+
+原来的：
+
+```text
+tests/test_financial_tool.py
+```
+
+应该继续全部通过。
+
+这非常重要。
+
+因为我们的重构目标是：
+
+```text
+内部实现改变
+        ↓
+外部 Tool Contract 不改变
+```
+
+例如：
+
+```python
+get_stock_price.invoke(
+    {"ticker": "AAPL"}
+)
+```
+
+仍然应该得到：
+
+```python
+{
+    "ticker": "AAPL",
+    "price": 200.0
+}
+```
+
+---
+
+### 十六、Test 4：Tool Failure Mapping
+
+Lesson 6 已经验证了：
+
+```text
+TEMP_ERROR
+ ↓
+TransientToolError
+ ↓
+tool_retryable = True
+```
+
+现在我们需要确认 Provider Error 被 Tool 正确转换。
+
+原来的：
+
+```text
+tests/test_tool_result_to_state.py
+```
+
+继续验证：
+
+```python
+def test_retryable_tool_failure():
+    state = {
+        "ticker": "TEMP_ERROR",
+        "tool_retry_count": 0,
+    }
+
+    result = get_stock_price_node(state)
+
+    assert result["tool_error"] is not None
+    assert result["tool_retryable"] is True
+    assert result["tool_retry_count"] == 1
+```
+
+如果这里仍然通过，说明：
+
+```text
+Provider
+ ↓
+Provider Error
+ ↓
+Tool
+ ↓
+Tool Error
+ ↓
+Graph State
+```
+
+整个错误链没有被这次抽象破坏。
+
+---
+
+### 十七、Lesson 9 最重要的 Acceptance Criteria
+
+这一次不是看“有没有多一个类”。
+
+而是看**边界是否建立成功**：
+
+#### Provider
+
+- [ ] `StockPriceProvider` 定义 Contract
+- [ ] `CompanyInfoProvider` 定义 Contract
+- [ ] `MockStockPriceProvider` 实现 Contract
+- [ ] `MockCompanyInfoProvider` 实现 Contract
+- [ ] Mock 数据从 Tool 中移出
+
+#### Tool
+
+- [ ] `get_stock_price` 通过 Provider 获取数据
+- [ ] `get_company_info` 通过 Provider 获取数据
+- [ ] Tool 对外接口没有改变
+- [ ] Tool 不再直接持有 Mock 数据
+
+#### Error Boundary
+
+- [ ] Provider 使用 `TransientProviderError`
+- [ ] Tool 使用 `TransientToolError`
+- [ ] Provider Error 可以转换为 Tool Error
+- [ ] Graph 仍然能够识别 retryable Tool Failure
+
+#### Regression
+
+- [ ] Lesson 1～8 测试全部通过
+- [ ] Tool Calling Loop 不受影响
+- [ ] Multiple Tools 不受影响
+
+---
+
+### 十八、一个暂时不要做的事情
+
+这节**不要创建**：
+
+```text
+YahooFinanceProvider
+AlphaVantageProvider
+PolygonProvider
+```
+
+也不要安装金融数据 SDK。
+
+我们现在只是建立：
+
+```text
+Tool
+ ↓
+Provider Interface
+ ↓
+Mock Provider
+```
+
+下一步如果真的接 Provider，才会进入：
+
+```text
+Real Provider
+ ↓
+Network
+ ↓
+Authentication
+ ↓
+Timeout
+ ↓
+Rate Limit
+ ↓
+Provider-specific Error
+```
+
+那是另外一个问题。
+
+---
+
+### 十九、Lesson 9 完成后的架构
+
+完成后，我们的 Phase 3 架构会第一次变成：
+
+```text
+                         ┌─────────────────────┐
+                         │        LLM          │
+                         └──────────┬──────────┘
+                                    │
+                              Tool Call
+                                    │
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+            get_stock_price                 get_company_info
+                    │                               │
+                    ▼                               ▼
+          StockPriceProvider                CompanyInfoProvider
+                    │                               │
+                    ▼                               ▼
+         MockStockPriceProvider            MockCompanyInfoProvider
+                    │                               │
+                    └───────────────┬───────────────┘
+                                    │
+                              Tool Result
+                                    │
+                                    ▼
+                                   LLM
+```
+
+这时候我们才真正开始拥有一个合理的 Agent Tool Architecture。
+
+---
+
+
+## Lesson 10：End-to-End Tool Integration
+
+### 一、这一节解决什么问题？
+
+到 Lesson 9，我们已经分别验证了：
+
+```text
+LLM
+ ↓
+Tool Calling
+```
+
+```text
+Tool
+ ↓
+Provider
+```
+
+```text
+Provider
+ ↓
+Tool Result
+ ↓
+Graph State
+```
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+Tool Result
+ ↓
+LLM
+```
+
+但这些能力目前还是分散验证的。
+
+Lesson 10 要把它们组合成：
+
+```text
+                    ┌──────────────────────┐
+                    │         LLM          │
+                    └──────────┬───────────┘
+                               │
+                         Tool Call
+                               │
+                    ┌──────────┴───────────┐
+                    │                      │
+                    ▼                      ▼
+            get_stock_price        get_company_info
+                    │                      │
+                    ▼                      ▼
+             Stock Provider         Company Provider
+                    │                      │
+                    ▼                      ▼
+               Mock Data              Mock Data
+                    │                      │
+                    └──────────┬───────────┘
+                               │
+                          Tool Result
+                               │
+                               ▼
+                              LLM
+                               │
+                               ▼
+                         Final Answer
+```
+
+也就是说：
+
+> **Lesson 10 是 Phase 3 的集成验证课，而不是继续增加一个新机制。**
+
+---
+
+### 二、为什么现在做 End-to-End Integration？
+
+这是非常重要的工程习惯。
+
+我们前面大量使用的是：
+
+```text
+Unit Test
+```
+
+例如：
+
+```text
+test_financial_tool.py
+test_providers.py
+test_tool_result_to_state.py
+test_tool_failure_routing.py
+```
+
+这些测试分别证明局部正确。
+
+但局部正确并不意味着系统正确。
+
+例如：
+
+```text
+Provider 正确
+Tool 正确
+LLM Tool Calling 正确
+Graph Loop 正确
+```
+
+理论上都通过了，但是如果：
+
+```text
+Tool → Provider
+```
+
+连接错了，整个系统仍然失败。
+
+因此 Lesson 10 开始验证：
+
+```text
+Integration
+```
+
+---
+
+### 三、Lesson 10 的第一个目标：建立正式的 Tool Runtime
+
+目前 Lesson 8 已经有：
+
+```text
+app/graph/tool_loop.py
+```
+
+它里面有：
+
+```python
+tools = [
+    get_stock_price,
+    get_company_info,
+]
+```
+
+以及：
+
+```python
+tool_node = ToolNode(tools)
+```
+
+这已经是一个基本的 Tool Runtime。
+
+本节我们不再创建第二套 Tool Runtime。
+
+而是把这个概念明确下来：
+
+```text
+Tool Registry
+        ↓
+ToolNode
+        ↓
+Tool Execution
+```
+
+---
+
+### 四、创建 Tool Registry
+
+建议新增：
+
+```text
+app/tools/registry.py
+```
+
+内容：
+
+```python
+from app.tools.financial import (
+    get_company_info,
+    get_stock_price,
+)
+
+
+TOOLS = [
+    get_stock_price,
+    get_company_info,
+]
+```
+
+然后修改：
+
+```text
+app/graph/tool_loop.py
+```
+
+不再自己定义：
+
+```python
+tools = [
+    get_stock_price,
+    get_company_info,
+]
+```
+
+而是：
+
+```python
+from app.tools.registry import TOOLS
+```
+
+然后：
+
+```python
+llm_with_tools = get_llm().bind_tools(TOOLS)
+
+tool_node = ToolNode(TOOLS)
+```
+
+这样我们第一次建立：
+
+```text
+                    ┌── get_stock_price
+TOOLS ──────────────┤
+                    └── get_company_info
+```
+
+---
+
+### 五、为什么需要 Registry？
+
+现在只有两个 Tool，看起来：
+
+```python
+TOOLS = [...]
+```
+
+似乎没有必要。
+
+但最终项目会有：
+
+```text
+get_stock_price
+get_company_info
+get_financial_statements
+get_market_data
+get_news
+get_industry_data
+...
+```
+
+如果每个 Graph 都自己写：
+
+```python
+[
+    get_stock_price,
+    get_company_info,
+    ...
+]
+```
+
+很快就会出现：
+
+```text
+Graph A
+    ↓
+Tool List A
+
+Graph B
+    ↓
+Tool List B
+
+Agent C
+    ↓
+Tool List C
+```
+
+然后不同 Agent 使用的 Tool 集合可能悄悄发生偏差。
+
+Registry 的作用就是提供一个明确的：
+
+> **Tool Registration Boundary**
+
+---
+
+### 六、注意：Registry 不是 Provider Registry
+
+这一点非常重要。
+
+现在有两个不同概念：
+
+#### Tool Registry
+
+```text
+Agent 能调用什么？
+```
+
+例如：
+
+```text
+get_stock_price
+get_company_info
+```
+
+#### Provider
+
+```text
+Tool 从哪里获取数据？
+```
+
+例如：
+
+```text
+MockStockPriceProvider
+YahooFinanceStockPriceProvider
+```
+
+不要混淆：
+
+```text
+Tool Registry ≠ Provider Registry
+```
+
+这是两个不同层次。
+
+---
+
+### 七、第二个目标：验证完整 Tool Loop
+
+现在我们重新验证：
+
+```text
+Human
+ ↓
+LLM
+ ↓
+Tool Call
+ ↓
+ToolNode
+ ↓
+Tool
+ ↓
+Provider
+ ↓
+Tool Result
+ ↓
+LLM
+ ↓
+Final Answer
+```
+
+这一次，真正的区别在于：
+
+```text
+Tool
+ ↓
+Provider
+```
+
+已经不再是：
+
+```text
+Tool
+ ↓
+Mock Dictionary
+```
+
+而是：
+
+```text
+Tool
+ ↓
+Provider Interface
+ ↓
+Mock Provider
+ ↓
+Mock Data
+```
+
+所以这是第一次完整验证：
+
+> **Agent 层完全不关心数据 Provider 的实现。**
+
+---
+
+### 八、增加 Integration Test
+
+创建：
+
+```text
+tests/test_tool_integration.py
+```
+
+第一项：
+
+```python
+from langchain_core.messages import HumanMessage
+
+from app.graph.tool_loop import build_tool_loop_graph
+
+
+def test_stock_price_end_to_end():
+    graph = build_tool_loop_graph()
+
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "What is the current stock price "
+                        "of AAPL?"
+                    )
+                )
+            ]
+        }
+    )
+
+    messages = result["messages"]
+
+    assert messages[0].type == "human"
+
+    tool_messages = [
+        message
+        for message in messages
+        if message.type == "tool"
+    ]
+
+    assert tool_messages
+
+    tool_message = tool_messages[0]
+
+    assert "AAPL" in tool_message.content
+    assert "200.0" in tool_message.content
+
+    final_message = messages[-1]
+
+    assert final_message.type == "ai"
+    assert not final_message.tool_calls
+```
+
+这里第一次验证：
+
+```text
+LLM
+ ↓
+Tool Call
+ ↓
+ToolNode
+ ↓
+Tool
+ ↓
+Provider
+ ↓
+ToolMessage
+ ↓
+LLM
+```
+
+---
+
+### 九、第二个 Integration Test
+
+验证公司信息：
+
+```python
+def test_company_info_end_to_end():
+    graph = build_tool_loop_graph()
+
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "What company is AAPL and "
+                        "what sector does it belong to?"
+                    )
+                )
+            ]
+        }
+    )
+
+    messages = result["messages"]
+
+    tool_messages = [
+        message
+        for message in messages
+        if message.type == "tool"
+    ]
+
+    assert tool_messages
+
+    tool_message = tool_messages[0]
+
+    assert "Apple Inc." in tool_message.content
+    assert "Technology" in tool_message.content
+
+    final_message = messages[-1]
+
+    assert final_message.type == "ai"
+    assert not final_message.tool_calls
+```
+
+---
+
+### 十、第三个 Integration Test：两个 Tool
+
+这是本节最有价值的测试。
+
+```python
+def test_multiple_tools_end_to_end():
+    graph = build_tool_loop_graph()
+
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "What is the current stock price of AAPL, "
+                        "and what sector does the company belong to?"
+                    )
+                )
+            ]
+        }
+    )
+
+    messages = result["messages"]
+
+    tool_names = []
+
+    for message in messages:
+        if message.type != "ai":
+            continue
+
+        for tool_call in message.tool_calls:
+            tool_names.append(tool_call["name"])
+
+    assert "get_stock_price" in tool_names
+    assert "get_company_info" in tool_names
+
+    tool_messages = [
+        message
+        for message in messages
+        if message.type == "tool"
+    ]
+
+    assert tool_messages
+
+    final_message = messages[-1]
+
+    assert final_message.type == "ai"
+    assert not final_message.tool_calls
+```
+
+这里不要检查：
+
+```text
+get_stock_price 一定先执行
+```
+
+也不要检查：
+
+```text
+get_company_info 一定第二个执行
+```
+
+因为 Tool Call 顺序是模型行为的一部分，不应该在这个测试里人为绑定。
+
+我们只要求：
+
+```text
+两个必要 Tool 都被使用
+        ↓
+Tool Result 都进入消息历史
+        ↓
+最终 LLM 结束 Loop
+```
+
+---
+
+### 十一、一个很重要的测试边界
+
+你可能会注意到：
+
+```python
+assert "200.0" in tool_message.content
+```
+
+这里我们测试的是 `ToolMessage` 的内容，而不是：
+
+```python
+assert final_message.content == "..."
+```
+
+这是故意的。
+
+最终 LLM 的自然语言可能是：
+
+```text
+AAPL is currently trading at $200.
+```
+
+也可能：
+
+```text
+The current price of Apple is $200.0.
+```
+
+甚至：
+
+```text
+According to the latest available data, AAPL is priced at 200 dollars.
+```
+
+如果我们把自然语言答案写死：
+
+```python
+assert final_message.content == "..."
+```
+
+测试就会变得非常脆弱。
+
+所以当前阶段：
+
+```text
+Tool Result
+    ↓
+确定性验证
+
+Final Answer
+    ↓
+只验证结构和是否结束
+```
+
+这是比较合理的。
+
+---
+
+### 十二、Lesson 10 暂时不把它接入主 Investment Graph
+
+这点继续保持。
+
+现在我们有：
+
+```text
+app/graph/graph.py
+```
+
+主 Investment Graph。
+
+以及：
+
+```text
+app/graph/tool_loop.py
+```
+
+Tool Calling Loop。
+
+本节**不要把 Tool Loop 整个塞进主 Graph**。
+
+因为 Phase 3 的目标是：
+
+```text
+理解 Tool Calling
+```
+
+而不是：
+
+```text
+把所有代码提前整合成最终 Agent
+```
+
+真正把 Tool Loop 接入 Research Agent，是 Phase 4/5 的事情。
+
+---
+
+### 十三、Lesson 10 的架构意义
+
+完成之后，我们会得到三个清晰边界：
+
+```text
+┌─────────────────────────────────┐
+│             Agent               │
+│                                 │
+│       LLM + Tool Calling        │
+└────────────────┬────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────┐
+│              Tool               │
+│                                 │
+│ get_stock_price                 │
+│ get_company_info                │
+└────────────────┬────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────┐
+│            Provider             │
+│                                 │
+│ StockPriceProvider               │
+│ CompanyInfoProvider              │
+└────────────────┬────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────┐
+│          Data Source            │
+│                                 │
+│       Mock Provider              │
+└─────────────────────────────────┘
+```
+
+未来真正接 API 时，只替换最下面：
+
+```text
+MockStockPriceProvider
+        ↓
+YahooFinanceStockPriceProvider
+```
+
+而：
+
+```text
+LLM
+Tool
+Graph
+Tool Calling Loop
+```
+
+理论上都不需要改变。
+
+这就是本 Phase 3 最终希望建立的核心架构思想。
+
+---
+
+### 十四、Lesson 10 测试顺序
+
+先：
+
+```bash
+python -m pytest tests/test_tool_integration.py -v
+```
+
+然后：
+
+```bash
+python -m pytest tests -v
+```
+
+如果全部通过，Lesson 10 完成。
+
+---
+
+### Lesson 10 Acceptance Criteria
+
+- [ ] 建立 `app/tools/registry.py`
+- [ ] Tool Registry 包含当前两个 Tool
+- [ ] Tool Loop 使用统一 Registry
+- [ ] LLM 使用 Registry 注册 Tools
+- [ ] `ToolNode` 使用 Registry 执行 Tools
+- [ ] Tool → Provider → Mock Provider 链路正常
+- [ ] Stock Price End-to-End 测试通过
+- [ ] Company Info End-to-End 测试通过
+- [ ] Multiple Tools End-to-End 测试通过
+- [ ] 最终 AI Message 没有 `tool_calls`
+- [ ] 所有 Phase 3 之前测试继续通过
+- [ ] 不修改主 Investment Graph 的架构
+
+---

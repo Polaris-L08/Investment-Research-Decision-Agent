@@ -10,20 +10,16 @@ from app.tools.financial import (
     get_company_info,
     get_stock_price,
 )
+from app.tools.registry import TOOLS
 
 
 class ToolLoopState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
-tools = [
-    get_stock_price,
-    get_company_info,
-]
+llm_with_tools = llm.bind_tools(TOOLS)
 
-llm_with_tools = llm.bind_tools(tools)
-
-tool_node = ToolNode(tools)
+tool_node = ToolNode(TOOLS)
 
 
 def tool_loop_llm_node(state: ToolLoopState):
