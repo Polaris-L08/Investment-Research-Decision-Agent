@@ -5580,3 +5580,1735 @@ Retryable Failure
 - [ ] Non-retryable → `failure`
 
 ---
+
+
+## Lesson 7：Multiple Tools
+
+Lesson 6 我们解决的是：
+
+> **一个 Tool 出错以后，Graph 如何判断 Success / Retry / Failure。**
+
+现在进入一个更重要的能力：
+
+> **一个 LLM 可以同时拥有多个 Tools，并根据用户需求决定调用哪个 Tool。**
+
+---
+
+### 一、Lesson 7 的目标
+
+目前我们的 Agent 只有一个 Tool：
+
+```text
+LLM
+ │
+ └── get_stock_price
+```
+
+本节增加第二个 Tool：
+
+```text
+LLM
+ │
+ ├── get_stock_price
+ │
+ └── get_company_info
+```
+
+最终希望理解完整的关系：
+
+```text
+                    ┌── get_stock_price
+                    │
+LLM ── Tool Call ───┤
+                    │
+                    └── get_company_info
+```
+
+这里最重要的不是“多写一个 Python 函数”。
+
+而是理解：
+
+> **LLM 如何从多个 Tool 中选择合适的 Tool。**
+
+---
+
+### 二、为什么需要 Multiple Tools？
+
+真实的 Investment Research Agent 不可能只有：
+
+```text
+get_stock_price()
+```
+
+例如后续可能存在：
+
+```text
+get_stock_price()
+get_company_info()
+get_financial_statements()
+get_market_data()
+get_news()
+get_industry_data()
+```
+
+LLM 的职责不是执行这些函数。
+
+它负责：
+
+```text
+理解用户需求
+    ↓
+判断需要什么信息
+    ↓
+选择 Tool
+    ↓
+生成 Tool Call
+```
+
+而 Graph / Tool Runtime 负责：
+
+```text
+接收 Tool Call
+    ↓
+找到对应 Tool
+    ↓
+执行 Tool
+    ↓
+返回 Tool Result
+```
+
+因此架构开始变成：
+
+```text
+User
+ ↓
+LLM
+ ↓
+选择 Tool
+ ↓
+Tool Call
+ ↓
+Tool Runtime
+ ↓
+具体 Tool
+ ↓
+Tool Result
+```
+
+---
+
+### 三、Lesson 7 不做什么
+
+这一节我们**故意不做**：
+
+- Tool Calling Loop
+- 多 Tool 连续调用
+- Tool Result 回传 LLM
+- Real API
+- Yahoo Finance
+- Financial Statements
+- Provider abstraction
+- Agent 自动循环
+
+这些属于后面的 Lesson。
+
+Lesson 7 只解决一个问题：
+
+> **LLM 面对多个 Tools 时，能否正确选择并生成对应的 Tool Call？**
+
+---
+
+### 四、第二个 Tool：`get_company_info`
+
+我们继续保持目前的 Mock 策略。
+
+新增：
+
+```python
+get_company_info(ticker)
+```
+
+例如：
+
+```text
+AAPL
+↓
+{
+    "ticker": "AAPL",
+    "company_name": "Apple Inc.",
+    "sector": "Technology"
+}
+```
+
+暂时不连接任何真实数据源。
+
+---
+
+### 五、修改 `app/tools/financial.py`
+
+在现有文件中增加第二个 Tool。
+
+你现在的文件应该已经包含：
+
+```python
+StockPriceInput
+TransientToolError
+get_stock_price
+```
+
+在这个基础上增加：
+
+```python
+class CompanyInfoInput(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol, for example AAPL or MSFT."
+    )
+
+
+@tool(args_schema=CompanyInfoInput)
+def get_company_info(ticker: str) -> dict:
+    """Get basic company information for a stock ticker."""
+
+    mock_companies = {
+        "AAPL": {
+            "ticker": "AAPL",
+            "company_name": "Apple Inc.",
+            "sector": "Technology",
+        },
+        "MSFT": {
+            "ticker": "MSFT",
+            "company_name": "Microsoft Corporation",
+            "sector": "Technology",
+        },
+        "GOOGL": {
+            "ticker": "GOOGL",
+            "company_name": "Alphabet Inc.",
+            "sector": "Communication Services",
+        },
+    }
+
+    if ticker not in mock_companies:
+        raise ValueError(
+            f"Company information not found for ticker: {ticker}"
+        )
+
+    return mock_companies[ticker]
+```
+
+注意：
+
+#### `get_stock_price`
+
+负责：
+
+```text
+价格
+```
+
+#### `get_company_info`
+
+负责：
+
+```text
+公司基本信息
+```
+
+不要让一个 Tool 同时返回：
+
+```text
+price
+company_name
+sector
+...
+```
+
+这是非常重要的 Tool Design 原则：
+
+> **一个 Tool 应该有清晰、单一的业务职责。**
+
+---
+
+### 六、先测试第二个 Tool 本身
+
+新建：
+
+```text
+tests/test_multiple_tools.py
+```
+
+第一部分先不要测试 LLM。
+
+测试 Tool 本身：
+
+```python
+from app.tools.financial import get_company_info
+
+
+def test_get_company_info_returns_company_data():
+    result = get_company_info.invoke(
+        {"ticker": "AAPL"}
+    )
+
+    assert result["ticker"] == "AAPL"
+    assert result["company_name"] == "Apple Inc."
+    assert result["sector"] == "Technology"
+
+
+def test_get_company_info_requires_ticker():
+    schema = get_company_info.args_schema
+
+    assert "ticker" in schema.model_fields
+
+
+def test_get_company_info_invalid_ticker():
+    import pytest
+
+    with pytest.raises(
+        ValueError,
+        match="Company information not found",
+    ):
+        get_company_info.invoke(
+            {"ticker": "INVALID"}
+        )
+```
+
+先运行：
+
+```bash
+python -m pytest tests/test_multiple_tools.py -v
+```
+
+这里我们首先验证：
+
+```text
+Tool Definition
+      ↓
+Tool Schema
+      ↓
+Tool Invocation
+      ↓
+Tool Result
+      ↓
+Tool Failure
+```
+
+也就是说，我们没有因为进入 Multiple Tools 就跳过前面学过的 Tool 基础。
+
+---
+
+### 七、然后让 LLM 同时看到两个 Tools
+
+现在是本节真正的重点。
+
+你之前 Lesson 3 使用的是：
+
+```python
+llm_with_tools = llm.bind_tools(
+    [get_stock_price]
+)
+```
+
+现在改成：
+
+```python
+llm_with_tools = llm.bind_tools(
+    [
+        get_stock_price,
+        get_company_info,
+    ]
+)
+```
+
+这意味着：
+
+> LLM 的 Tool registry 现在包含两个 Tool。
+
+---
+
+### 八、一个非常重要的概念
+
+注意：
+
+```python
+llm.bind_tools(
+    [
+        get_stock_price,
+        get_company_info,
+    ]
+)
+```
+
+**并不是执行两个 Tool。**
+
+它只是把 Tool 的：
+
+```text
+name
+description
+input schema
+```
+
+提供给 LLM。
+
+例如 LLM 看到类似：
+
+```text
+get_stock_price
+    ticker: string
+
+get_company_info
+    ticker: string
+```
+
+然后由 LLM 根据 Prompt 决定：
+
+```text
+用户：
+告诉我 AAPL 的股价
+
+LLM：
+→ get_stock_price
+```
+
+或者：
+
+```text
+用户：
+告诉我 AAPL 是什么公司，属于什么行业
+
+LLM：
+→ get_company_info
+```
+
+这就是：
+
+> **Tool Selection**
+
+---
+
+### 九、增加两个 Tool Selection 测试
+
+继续在：
+
+```text
+tests/test_multiple_tools.py
+```
+
+中增加：
+
+```python
+from langchain_core.messages import HumanMessage
+
+from app.llm import get_llm
+from app.tools.financial import (
+    get_company_info,
+    get_stock_price,
+)
+
+
+def test_llm_selects_stock_price_tool():
+    llm = get_llm()
+
+    llm_with_tools = llm.bind_tools(
+        [
+            get_stock_price,
+            get_company_info,
+        ]
+    )
+
+    response = llm_with_tools.invoke(
+        [
+            HumanMessage(
+                content="What is the current stock price of AAPL?"
+            )
+        ]
+    )
+
+    assert response.tool_calls
+
+    tool_call = response.tool_calls[0]
+
+    assert tool_call["name"] == "get_stock_price"
+    assert tool_call["args"]["ticker"] == "AAPL"
+```
+
+第二个：
+
+```python
+def test_llm_selects_company_info_tool():
+    llm = get_llm()
+
+    llm_with_tools = llm.bind_tools(
+        [
+            get_stock_price,
+            get_company_info,
+        ]
+    )
+
+    response = llm_with_tools.invoke(
+        [
+            HumanMessage(
+                content=(
+                    "What company is AAPL and "
+                    "what sector does it belong to?"
+                )
+            )
+        ]
+    )
+
+    assert response.tool_calls
+
+    tool_call = response.tool_calls[0]
+
+    assert tool_call["name"] == "get_company_info"
+    assert tool_call["args"]["ticker"] == "AAPL"
+```
+
+---
+
+### 十、这里有一个测试设计上的重要变化
+
+Lesson 3 我们验证的是：
+
+```text
+LLM
+ ↓
+get_stock_price
+```
+
+现在 Lesson 7 验证：
+
+```text
+LLM
+ ├── get_stock_price
+ └── get_company_info
+```
+
+因此测试的重点变成：
+
+```text
+Tool Registry
+      ↓
+Tool Selection
+      ↓
+Tool Call Name
+      ↓
+Tool Call Arguments
+```
+
+尤其是：
+
+```python
+assert tool_call["name"] == ...
+```
+
+非常重要。
+
+因为：
+
+```python
+response.tool_calls
+```
+
+只说明：
+
+> LLM 决定调用 Tool。
+
+但是：
+
+```python
+tool_call["name"]
+```
+
+才能说明：
+
+> LLM 选择了哪个 Tool。
+
+---
+
+### 十一、不要直接测试 Tool Result
+
+本节暂时不要写：
+
+```python
+get_stock_price.invoke(...)
+```
+
+然后把结果喂回 LLM。
+
+也不要写：
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+LLM
+```
+
+因为这已经进入下一阶段：
+
+**Lesson 8 — Tool Calling Loop**
+
+Lesson 7 只观察：
+
+```text
+Prompt
+ ↓
+LLM
+ ↓
+Tool Call
+```
+
+Lesson 8 才会变成：
+
+```text
+Prompt
+ ↓
+LLM
+ ↓
+Tool Call
+ ↓
+Tool
+ ↓
+Tool Result
+ ↓
+LLM
+```
+
+这个区别非常重要。
+
+---
+
+### 十二、Lesson 7 的 Graph 暂时也不需要大改
+
+这一节我们甚至**不要求修改主 Graph topology**。
+
+因为我们现在学习的是：
+
+```text
+LLM Tool Registry
+        +
+Tool Selection
+```
+
+而不是 Workflow Loop。
+
+所以目前：
+
+```text
+Graph
+```
+
+仍然可以保持现状。
+
+我们通过测试独立验证：
+
+```text
+LLM
+ │
+ ├── Tool A
+ │
+ └── Tool B
+```
+
+这样可以继续贯彻我们一直使用的：
+
+> **先隔离一个能力，再把它集成进 Graph。**
+
+---
+
+### 十三、Lesson 7 当前任务
+
+你现在按下面顺序完成即可。
+
+#### Step 1
+
+修改：
+
+```text
+app/tools/financial.py
+```
+
+增加：
+
+```text
+CompanyInfoInput
+get_company_info
+```
+
+---
+
+#### Step 2
+
+创建：
+
+```text
+tests/test_multiple_tools.py
+```
+
+加入：
+
+- Tool invocation
+- Schema
+- Invalid ticker
+- LLM selects `get_stock_price`
+- LLM selects `get_company_info`
+
+---
+
+#### Step 3
+
+运行：
+
+```bash
+python -m pytest tests/test_multiple_tools.py -v
+```
+
+---
+
+#### Step 4
+
+如果通过，再运行完整测试：
+
+```bash
+python -m pytest tests -v
+```
+
+---
+
+### Lesson 7 Acceptance Criteria
+
+全部满足才算 Lesson 7 完成：
+
+- [ ] `get_company_info` Tool 存在
+- [ ] `CompanyInfoInput` 使用 Pydantic
+- [ ] Tool 有明确 description
+- [ ] Tool 可以正常 `.invoke()`
+- [ ] Invalid ticker 会产生明确错误
+- [ ] LLM 同时注册两个 Tools
+- [ ] 查询股价时选择 `get_stock_price`
+- [ ] 查询公司信息时选择 `get_company_info`
+- [ ] Tool Call 参数正确
+- [ ] 现有全部测试继续通过
+- [ ] 本节没有提前实现 Tool Calling Loop
+
+---
+
+
+## Lesson 8：Tool Calling Loop
+
+前面 7 个 Lesson，我们已经把 Tool Calling 的各个零件拆开学习：
+
+```text
+Lesson 1
+Tool Definition
+        ↓
+Lesson 2
+Tool Schema
+        ↓
+Lesson 3
+LLM → Tool Call
+        ↓
+Lesson 4
+Tool Result → Graph State
+        ↓
+Lesson 5
+Tool Failure
+        ↓
+Lesson 6
+Tool Failure → Retry / Failure
+        ↓
+Lesson 7
+Multiple Tools
+```
+
+现在终于要把其中最关键的一条链真正串起来：
+
+```text
+                    ┌──────────────┐
+                    │              │
+                    ▼              │
+User → LLM → Tool Call → Tool → Tool Result
+                    ▲              │
+                    └──── LLM ◄───┘
+```
+
+也就是：
+
+> **LLM 不只是调用一次 Tool，而是能够根据 Tool Result 决定下一步是否还需要 Tool。**
+
+---
+
+### 一、Lesson 8 的核心目标
+
+我们最终要建立这样的流程：
+
+```text
+START
+  ↓
+LLM
+  ↓
+是否需要 Tool？
+  ├── No ───────────────→ END
+  │
+  └── Yes
+       ↓
+    Tool Call
+       ↓
+    Tool Execution
+       ↓
+    Tool Result
+       ↓
+      LLM
+       │
+       └───────────────┐
+                       │
+                       ▼
+                 是否还需要 Tool？
+```
+
+这里第一次出现真正的：
+
+> **循环（Loop）**
+
+这也是 LangGraph 非常重要的能力之一。
+
+---
+
+### 二、先明确：为什么需要 Loop？
+
+假设用户问：
+
+> “AAPL 当前股价是多少？然后告诉我它属于哪个行业。”
+
+LLM 第一次看到问题：
+
+```text
+User
+ ↓
+LLM
+```
+
+它可能决定：
+
+```text
+→ get_stock_price(AAPL)
+```
+
+Tool 返回：
+
+```python
+{
+    "ticker": "AAPL",
+    "price": 200.0
+}
+```
+
+但是：
+
+> LLM 还没有得到行业信息。
+
+因此不能结束。
+
+它需要继续：
+
+```text
+Tool Result
+    ↓
+LLM
+    ↓
+get_company_info(AAPL)
+```
+
+得到：
+
+```python
+{
+    "ticker": "AAPL",
+    "company_name": "Apple Inc.",
+    "sector": "Technology"
+}
+```
+
+然后 LLM 才能生成最终答案。
+
+所以完整过程是：
+
+```text
+User
+ ↓
+LLM
+ ↓
+get_stock_price
+ ↓
+Tool Result
+ ↓
+LLM
+ ↓
+get_company_info
+ ↓
+Tool Result
+ ↓
+LLM
+ ↓
+Final Answer
+```
+
+这就是 Tool Calling Loop。
+
+---
+
+### 三、一个非常重要的架构变化
+
+Lesson 7 我们测试的是：
+
+```text
+LLM
+ ↓
+Tool Call
+```
+
+Lesson 8 开始，我们真正构建：
+
+```text
+LLM
+ ↓
+Tool Call
+ ↓
+Tool
+ ↓
+Tool Result
+ ↓
+LLM
+```
+
+因此这一次需要真正进入 Graph。
+
+---
+
+### 四、我们先不要修改现有主 Graph
+
+这里继续遵守我们的教学策略：
+
+> **先建立独立的最小 Loop，再考虑把它合并到现有 Investment Agent。**
+
+因此我们新增一个专门用于 Lesson 8 的 Graph。
+
+建议创建：
+
+```text
+app/graph/tool_loop.py
+```
+
+它只负责：
+
+```text
+LLM ↔ Tools
+```
+
+而不是：
+
+```text
+Investment Research
+```
+
+这样不会污染当前 Phase 2 的主 Graph。
+
+---
+
+### 五、Tool Calling Loop 的 State
+
+创建：
+
+```python id="8ayc5m"
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
+
+
+class ToolLoopState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+```
+
+这里出现一个我们之前还没有正式使用过的东西：
+
+```python
+Annotated[list[BaseMessage], add_messages]
+```
+
+这是本节非常重要的知识点。
+
+---
+
+### 六、为什么不能直接用普通的 `messages`
+
+如果写：
+
+```python
+messages: list[BaseMessage]
+```
+
+那么 Node 返回：
+
+```python
+{
+    "messages": [new_message]
+}
+```
+
+它的语义更接近：
+
+> 用新的 list 更新这个字段。
+
+但是 Tool Calling Loop 需要：
+
+```text
+HumanMessage
+    ↓
+AIMessage(tool_call)
+    ↓
+ToolMessage
+    ↓
+AIMessage
+    ↓
+ToolMessage
+    ↓
+AIMessage
+```
+
+我们需要的是：
+
+> **不断追加消息，而不是覆盖消息。**
+
+所以使用：
+
+```python
+Annotated[
+    list[BaseMessage],
+    add_messages
+]
+```
+
+告诉 LangGraph：
+
+> `messages` 字段使用 `add_messages` 作为 reducer。
+
+---
+
+### 七、LLM Node
+
+新建：
+
+```text id="9d1f4c"
+app/graph/nodes/tool_loop_node.py
+```
+
+内容：
+
+```python
+from langchain_core.messages import BaseMessage
+
+from app.llm import get_llm
+from app.tools.financial import (
+    get_company_info,
+    get_stock_price,
+)
+
+
+llm_with_tools = get_llm().bind_tools(
+    [
+        get_stock_price,
+        get_company_info,
+    ]
+)
+
+
+def tool_loop_llm_node(
+    state: dict,
+) -> dict:
+    response = llm_with_tools.invoke(
+        state["messages"]
+    )
+
+    return {
+        "messages": [response]
+    }
+```
+
+这里第一次出现一个非常重要的结构：
+
+```text
+state["messages"]
+       ↓
+      LLM
+       ↓
+AIMessage
+       ↓
+state["messages"]
+```
+
+由于 `messages` 使用 `add_messages` reducer，所以不会覆盖之前的消息。
+
+---
+
+### 八、Tool Node
+
+现在我们需要真正执行 LLM 产生的 Tool Call。
+
+这里先使用 LangChain/LangGraph 已经提供的 ToolNode。
+
+修改：
+
+```text id="q5r9t4"
+app/graph/tool_loop.py
+```
+
+加入：
+
+```python
+from langchain_core.messages import BaseMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
+
+from app.tools.financial import (
+    get_company_info,
+    get_stock_price,
+)
+```
+
+然后：
+
+```python
+tools = [
+    get_stock_price,
+    get_company_info,
+]
+
+tool_node = ToolNode(tools)
+```
+
+这里要特别理解：
+
+> `ToolNode` 是 LangGraph 对 Tool Execution 的封装。
+
+我们之前 Lesson 4 手工写过：
+
+```python
+result = get_stock_price.invoke(...)
+```
+
+现在不再手工解析：
+
+```text
+AIMessage.tool_calls
+```
+
+而是让：
+
+```text
+ToolNode
+```
+
+负责执行这些 Tool Calls。
+
+---
+
+### 九、Conditional Routing
+
+接下来是整个 Lesson 8 最重要的 Graph Routing。
+
+我们需要判断：
+
+```text
+LLM 返回的 AIMessage
+        ↓
+有没有 tool_calls？
+```
+
+如果：
+
+```text
+有
+ ↓
+ToolNode
+```
+
+如果：
+
+```text
+没有
+ ↓
+END
+```
+
+创建：
+
+```python id="p5q4hy"
+def route_after_llm(state: ToolLoopState):
+    last_message = state["messages"][-1]
+
+    if last_message.tool_calls:
+        return "tools"
+
+    return "end"
+```
+
+这个函数非常简单，但它代表了一个非常重要的 Agent 模式：
+
+```text
+LLM
+ ↓
+Decision
+ ├── Tool
+ └── Final Answer
+```
+
+---
+
+### 十、构建 Loop Graph
+
+完整：
+
+```python id="6u3jz8"
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import BaseMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+
+from app.llm import get_llm
+from app.tools.financial import (
+    get_company_info,
+    get_stock_price,
+)
+
+
+class ToolLoopState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+
+tools = [
+    get_stock_price,
+    get_company_info,
+]
+
+llm_with_tools = get_llm().bind_tools(tools)
+
+tool_node = ToolNode(tools)
+
+
+def tool_loop_llm_node(state: ToolLoopState):
+    response = llm_with_tools.invoke(
+        state["messages"]
+    )
+
+    return {
+        "messages": [response]
+    }
+
+
+def route_after_llm(state: ToolLoopState):
+    last_message = state["messages"][-1]
+
+    if last_message.tool_calls:
+        return "tools"
+
+    return "end"
+
+
+def build_tool_loop_graph():
+    builder = StateGraph(ToolLoopState)
+
+    builder.add_node(
+        "llm",
+        tool_loop_llm_node,
+    )
+
+    builder.add_node(
+        "tools",
+        tool_node,
+    )
+
+    builder.add_edge(
+        START,
+        "llm",
+    )
+
+    builder.add_conditional_edges(
+        "llm",
+        route_after_llm,
+        {
+            "tools": "tools",
+            "end": END,
+        },
+    )
+
+    builder.add_edge(
+        "tools",
+        "llm",
+    )
+
+    return builder.compile()
+```
+
+---
+
+### 十一、现在观察这个 Graph Topology
+
+这是 Lesson 8 最重要的 Graph：
+
+```text
+              ┌──────────────────────┐
+              │                      │
+              ▼                      │
+           ┌──────┐                 │
+START ───→ │ LLM  │                 │
+           └───┬──┘                 │
+               │                    │
+        ┌──────┴──────┐             │
+        │             │             │
+   tool_calls       no tool_calls   │
+        │             │             │
+        ▼             ▼             │
+   ┌────────┐        END            │
+   │ Tools  │                       │
+   └────┬───┘                       │
+        │                            │
+        └────────────────────────────┘
+```
+
+这就是一个真正的 Agent Loop。
+
+注意：
+
+```text
+Tools → LLM
+```
+
+而不是：
+
+```text
+Tools → END
+```
+
+这是 Lesson 8 与 Lesson 4 的本质区别。
+
+---
+
+### 十二、第一次运行：单 Tool
+
+先测试最简单的：
+
+> “What is the current stock price of AAPL?”
+
+流程应该是：
+
+```text
+HumanMessage
+     ↓
+LLM
+     ↓
+get_stock_price(AAPL)
+     ↓
+ToolMessage
+     ↓
+LLM
+     ↓
+Final AIMessage
+```
+
+---
+
+### 十三、测试文件
+
+创建：
+
+```text id="0hrf3f"
+tests/test_tool_calling_loop.py
+```
+
+第一组测试：
+
+```python id="5k1h2m"
+from langchain_core.messages import HumanMessage
+
+from app.graph.tool_loop import build_tool_loop_graph
+
+
+def test_tool_calling_loop_returns_final_answer():
+    graph = build_tool_loop_graph()
+
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "What is the current stock price "
+                        "of AAPL?"
+                    )
+                )
+            ]
+        }
+    )
+
+    messages = result["messages"]
+
+    assert len(messages) >= 4
+
+    assert messages[0].type == "human"
+    assert messages[1].type == "ai"
+    assert messages[1].tool_calls
+
+    assert messages[2].type == "tool"
+    assert messages[3].type == "ai"
+
+    assert not messages[3].tool_calls
+```
+
+这里我们不是简单测试：
+
+```python
+assert result
+```
+
+而是在验证整个消息链：
+
+```text
+Human
+ ↓
+AI Tool Call
+ ↓
+Tool Result
+ ↓
+AI Final Answer
+```
+
+---
+
+### 十四、第二个测试：Multiple Tools Loop
+
+然后测试 Lesson 7 的多个 Tool 能否真正进入 Loop。
+
+```python id="3g2x7n"
+def test_tool_calling_loop_can_use_company_info():
+    graph = build_tool_loop_graph()
+
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "What company is AAPL and "
+                        "what sector does it belong to?"
+                    )
+                )
+            ]
+        }
+    )
+
+    messages = result["messages"]
+
+    tool_calls = [
+        message.tool_calls
+        for message in messages
+        if message.type == "ai"
+        and message.tool_calls
+    ]
+
+    assert tool_calls
+
+    first_tool_call = tool_calls[0][0]
+
+    assert first_tool_call["name"] == "get_company_info"
+    assert first_tool_call["args"]["ticker"] == "AAPL"
+
+    assert messages[-1].type == "ai"
+    assert not messages[-1].tool_calls
+```
+
+---
+
+### 十五、第三个测试：真正验证 Loop
+
+这一测试非常重要。
+
+我们让 LLM 面对一个需要**两个不同信息源**的问题：
+
+> “What is the current stock price of AAPL, and what sector does the company belong to?”
+
+理论流程：
+
+```text
+              ┌─ get_stock_price
+              │
+LLM ──────────┤
+              │
+              └─ get_company_info
+```
+
+但这里有一个现实问题：
+
+> **LLM 不一定严格按照我们期待的顺序调用两个 Tool。**
+
+它可能：
+
+```text
+get_stock_price
+ ↓
+get_company_info
+ ↓
+final
+```
+
+也可能：
+
+```text
+get_company_info
+ ↓
+get_stock_price
+ ↓
+final
+```
+
+甚至某些模型支持一次 AIMessage 中产生多个 Tool Calls。
+
+因此本测试**不要测试调用顺序**。
+
+应该测试：
+
+```python id="u3g5s2"
+def test_tool_calling_loop_can_use_multiple_tools():
+    graph = build_tool_loop_graph()
+
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "What is the current stock price of AAPL, "
+                        "and what sector does the company belong to?"
+                    )
+                )
+            ]
+        }
+    )
+
+    messages = result["messages"]
+
+    tool_names = []
+
+    for message in messages:
+        if message.type == "ai":
+            for tool_call in message.tool_calls:
+                tool_names.append(tool_call["name"])
+
+    assert "get_stock_price" in tool_names
+    assert "get_company_info" in tool_names
+
+    assert messages[-1].type == "ai"
+    assert not messages[-1].tool_calls
+```
+
+这个测试真正验证：
+
+```text
+LLM
+ ↓
+Tool A
+ ↓
+LLM
+ ↓
+Tool B
+ ↓
+LLM
+ ↓
+Final Answer
+```
+
+或者：
+
+```text
+LLM
+ ↓
+Tool A + Tool B
+ ↓
+LLM
+ ↓
+Final Answer
+```
+
+两者都可以。
+
+---
+
+### 十六、这里必须理解一个 LangGraph 核心概念
+
+现在我们有：
+
+```python
+builder.add_edge(
+    "tools",
+    "llm",
+)
+```
+
+这条 Edge：
+
+```text
+Tools → LLM
+```
+
+就是 Loop 的来源。
+
+LangGraph 并不是：
+
+```text
+while True:
+    ...
+```
+
+而是：
+
+```text
+Graph Topology
+       ↓
+Conditional Edge
+       ↓
+循环回到之前的 Node
+```
+
+这和 Lesson 6 的 Retry 思路完全一致。
+
+---
+
+### 十七、Retry Loop 和 Tool Calling Loop 的区别
+
+现在我们已经可以把两个概念区分开：
+
+#### Lesson 6
+
+```text
+Tool
+ ↓
+Failure
+ ↓
+Router
+ ↓
+Retry
+ ↓
+Tool
+```
+
+这是：
+
+> **Error Recovery Loop**
+
+---
+
+#### Lesson 8
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+Result
+ ↓
+LLM
+```
+
+这是：
+
+> **Agent Reasoning / Tool Calling Loop**
+
+两个 Loop 的目的完全不同。
+
+```text
+Retry Loop
+    → 解决失败
+
+Tool Calling Loop
+    → 继续完成任务
+```
+
+这是后面设计 Agent 时非常重要的区别。
+
+---
+
+### 十八、本节暂时不要处理 Tool Error
+
+虽然我们已经有：
+
+```text
+tool_error
+tool_retry_count
+handle_tool_failure
+```
+
+但是**不要现在把 Lesson 6 的错误处理直接复制进这个独立 Loop**。
+
+原因是我们正在学习两个不同抽象：
+
+```text
+Lesson 6
+Tool execution failure handling
+
+Lesson 8
+LLM ↔ Tool execution loop
+```
+
+下一阶段再把：
+
+```text
+Tool Loop
++
+Tool Failure
++
+Retry
+```
+
+统一起来会更清楚。
+
+---
+
+### 十九、Lesson 8 的测试顺序
+
+先运行新测试：
+
+```bash
+python -m pytest tests/test_tool_calling_loop.py -v
+```
+
+如果通过，再运行：
+
+```bash
+python -m pytest tests -v
+```
+
+---
+
+### 二十、Acceptance Criteria
+
+Lesson 8 需要满足：
+
+- [ ] `ToolLoopState` 使用 `messages`
+- [ ] `messages` 使用 `add_messages` reducer
+- [ ] LLM Node 可以读取完整 message history
+- [ ] LLM 可以产生 Tool Call
+- [ ] `ToolNode` 可以执行 Tool
+- [ ] Tool Result 会进入 message history
+- [ ] Tool Result 会再次发送给 LLM
+- [ ] LLM 没有 Tool Call 时进入 `END`
+- [ ] LLM 有 Tool Call 时进入 `ToolNode`
+- [ ] `ToolNode → LLM` 形成 Graph Loop
+- [ ] 单 Tool Calling Loop 成功
+- [ ] Multiple Tools Calling Loop 成功
+- [ ] 最终能够得到没有 `tool_calls` 的 AIMessage
+- [ ] 所有旧测试继续通过
+
+### 本节最重要的一句话
+
+> **Tool Calling Agent 的核心不是“调用 Tool”，而是让 `LLM → Tool → Result → LLM` 成为一个由 Graph 控制的闭环。**
