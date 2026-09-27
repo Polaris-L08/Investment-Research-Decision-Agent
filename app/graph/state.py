@@ -1,5 +1,6 @@
 from typing import TypedDict
 
+from app.agents.company_research import CompanyResearchResult
 from app.graph.models import ResearchSummary, Recommendation, InvestmentHorizon, InvestmentDecision
 
 
@@ -17,6 +18,7 @@ class GraphState(TypedDict):
 
     # Research results
     company_research: str
+    company_research_result: CompanyResearchResult | None
     financial_research: str
     market_research: str
     industry_research: str

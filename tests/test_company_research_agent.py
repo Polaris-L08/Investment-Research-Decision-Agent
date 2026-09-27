@@ -120,3 +120,175 @@ def test_company_research_graph_topology_is_single_business_agent():
         "company_research_agent",
         "__end__",
     }
+
+
+from unittest.mock import MagicMock, patch
+
+from langchain_core.messages import AIMessage, ToolMessage
+
+from app.agents.company_research import (
+    CompanyResearchResult,
+    build_company_research_graph,
+    company_research_agent,
+)
+from app.graph.tool_loop import tool_loop_graph
+
+
+def test_tool_loop_graph_is_compiled_graph():
+    assert tool_loop_graph is not None
+
+
+def test_company_research_agent_uses_tool_loop_graph():
+    fake_tool_result = {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_company_info",
+                        "args": {"ticker": "AAPL"},
+                        "id": "call_company",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "get_stock_price",
+                        "args": {"ticker": "AAPL"},
+                        "id": "call_price",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            ToolMessage(
+                content=(
+                    '{"ticker": "AAPL", '
+                    '"company_name": "Apple Inc.", '
+                    '"sector": "Technology"}'
+                ),
+                tool_call_id="call_company",
+            ),
+            ToolMessage(
+                content=(
+                    '{"ticker": "AAPL", '
+                    '"price": 200.0}'
+                ),
+                tool_call_id="call_price",
+            ),
+        ]
+    }
+
+    fake_tool_loop = MagicMock()
+    fake_tool_loop.invoke.return_value = fake_tool_result
+
+    fake_research_result = CompanyResearchResult(
+        ticker="AAPL",
+        company_name="Apple Inc.",
+        sector="Technology",
+        current_price=200.0,
+        summary="Apple Inc. is a technology company.",
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = (
+        fake_research_result
+    )
+
+    with (
+        patch(
+            "app.agents.company_research.tool_loop_graph",
+            fake_tool_loop,
+        ),
+        patch(
+            "app.agents.company_research.structured_company_research_llm",
+            fake_structured_llm,
+        ),
+    ):
+        result = company_research_agent(
+            {
+                "ticker": "AAPL",
+                "research_result": None,
+                "research_error": "",
+            }
+        )
+
+    assert result["research_result"] == fake_research_result
+    assert result["research_error"] == ""
+
+    fake_tool_loop.invoke.assert_called_once()
+    fake_structured_llm.invoke.assert_called_once()
+
+
+def test_company_research_agent_passes_only_tool_loop_state():
+    fake_tool_loop = MagicMock()
+
+    fake_tool_loop.invoke.return_value = {
+        "messages": [
+            ToolMessage(
+                content=(
+                    '{"ticker": "AAPL", '
+                    '"company_name": "Apple Inc.", '
+                    '"sector": "Technology"}'
+                ),
+                tool_call_id="call_company",
+            ),
+            ToolMessage(
+                content=(
+                    '{"ticker": "AAPL", '
+                    '"price": 200.0}'
+                ),
+                tool_call_id="call_price",
+            ),
+        ]
+    }
+
+    fake_research_result = CompanyResearchResult(
+        ticker="AAPL",
+        company_name="Apple Inc.",
+        sector="Technology",
+        current_price=200.0,
+        summary="Apple Inc. is a technology company.",
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = (
+        fake_research_result
+    )
+
+    with (
+        patch(
+            "app.agents.company_research.tool_loop_graph",
+            fake_tool_loop,
+        ),
+        patch(
+            "app.agents.company_research.structured_company_research_llm",
+            fake_structured_llm,
+        ),
+    ):
+        company_research_agent(
+            {
+                "ticker": "AAPL",
+                "research_result": None,
+                "research_error": "",
+            }
+        )
+
+    call_args = fake_tool_loop.invoke.call_args
+    tool_loop_input = call_args.args[0]
+
+    assert set(tool_loop_input.keys()) == {"messages"}
+    assert "ticker" not in tool_loop_input
+    assert "research_result" not in tool_loop_input
+    assert "research_error" not in tool_loop_input
+
+
+def test_company_research_graph_topology():
+    graph = build_company_research_graph()
+
+    node_names = set(
+        graph.get_graph().nodes
+    )
+
+    assert node_names == {
+        "__start__",
+        "company_research_agent",
+        "__end__",
+    }

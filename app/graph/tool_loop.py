@@ -5,11 +5,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from app.graph.graph import llm
-from app.tools.financial import (
-    get_company_info,
-    get_stock_price,
-)
+from app.llm.client import llm
 from app.tools.registry import TOOLS
 
 
@@ -41,36 +37,35 @@ def route_after_llm(state: ToolLoopState):
     return "end"
 
 
-def build_tool_loop_graph():
-    builder = StateGraph(ToolLoopState)
+builder = StateGraph(ToolLoopState)
 
-    builder.add_node(
-        "llm",
-        tool_loop_llm_node,
-    )
+builder.add_node(
+    "llm",
+    tool_loop_llm_node,
+)
 
-    builder.add_node(
-        "tools",
-        tool_node,
-    )
+builder.add_node(
+    "tools",
+    tool_node,
+)
 
-    builder.add_edge(
-        START,
-        "llm",
-    )
+builder.add_edge(
+    START,
+    "llm",
+)
 
-    builder.add_conditional_edges(
-        "llm",
-        route_after_llm,
-        {
-            "tools": "tools",
-            "end": END,
-        },
-    )
+builder.add_conditional_edges(
+    "llm",
+    route_after_llm,
+    {
+        "tools": "tools",
+        "end": END,
+    },
+)
 
-    builder.add_edge(
-        "tools",
-        "llm",
-    )
+builder.add_edge(
+    "tools",
+    "llm",
+)
 
-    return builder.compile()
+tool_loop_graph = builder.compile()
