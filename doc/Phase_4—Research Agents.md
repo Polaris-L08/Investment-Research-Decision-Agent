@@ -6866,3 +6866,1151 @@ Industry / Macro Research
 再之后才是 Phase 5 的 Multi-Agent Orchestration。
 
 ---
+
+
+## Lesson 7：Industry / Macro Research Agent
+
+Lesson 6（Market Research Agent）已经通过。现在继续按照 Phase 4 的主线，建立第四类独立 Research Agent。
+
+这一步仍然**不进入 Supervisor、Multi-Agent、Parallel/Fan-out/Fan-in**，也不做 Research Data Normalization。我们继续练习一个核心能力：
+
+> **一个具有明确业务职责的 Research Agent，如何拥有自己的 Tool Set，并完成独立的 Research Task。**
+
+---
+
+### 1. 本 Lesson 的目标
+
+本 Lesson 建立：
+
+```text
+Industry / Macro Research Agent
+```
+
+它负责回答：
+
+> “这家公司所处的行业以及宏观环境有哪些基础事实？”
+
+例如：
+
+```text
+Ticker: AAPL
+
+Industry: Technology
+Industry Growth: 6.2%
+Macro Environment: Expansion
+Macro Growth: 2.8%
+```
+
+最终形成：
+
+```text
+Company Research Agent
+Financial Research Agent
+Market Research Agent
+Industry / Macro Research Agent
+```
+
+四个相互独立的 Research Agent。
+
+---
+
+### 2. 为什么现在做 Industry / Macro Agent？
+
+目前已经有：
+
+```text
+Company Agent
+    ↓
+公司是谁？
+
+Financial Agent
+    ↓
+公司财务怎么样？
+
+Market Agent
+    ↓
+市场表现怎么样？
+```
+
+还缺一个重要维度：
+
+```text
+Industry / Macro Agent
+    ↓
+公司所处的行业和宏观环境怎么样？
+```
+
+因此现在完成第四个独立 Research Agent 后，我们就拥有 Phase 4 中比较完整的基础 Research Agent 集合。
+
+最终：
+
+```text
+                    Research
+                       │
+        ┌──────────────┼──────────────┐
+        │              │              │
+     Company        Financial       Market
+        │              │              │
+        └──────────────┼──────────────┘
+                       │
+                 Industry/Macro
+```
+
+**注意：现在仍然没有 Supervisor。**
+
+---
+
+### 3. 本 Lesson 不学习什么
+
+这一点非常重要。
+
+本 Lesson **不做**：
+
+* Multi-Agent Supervisor
+* Research Planner
+* Agent Routing
+* Parallel Research
+* Fan-out / Fan-in
+* Research Result Normalization
+* Deterministic Computation
+* Valuation
+* Risk Analysis
+* Investment Recommendation
+
+这些属于后续阶段。
+
+当前仍然是：
+
+```text
+一个 Agent
+    ↓
+自己的 Tool Set
+    ↓
+自己的 Research Result
+```
+
+---
+
+### 4. Core Concept：Research Agent 的职责边界
+
+现在四个 Agent 的职责应该越来越清楚。
+
+| Agent                           | 负责什么       |
+|---------------------------------|----------------|
+| Company Research Agent          | 公司基本信息   |
+| Financial Research Agent        | 财务数据       |
+| Market Research Agent           | 市场表现       |
+| Industry / Macro Research Agent | 行业与宏观环境 |
+
+因此 Industry / Macro Agent **不能偷偷变成 Investment Agent**。
+
+它可以：
+
+```text
+获取行业信息
+获取宏观信息
+总结行业/宏观环境
+```
+
+但不能：
+
+```text
+“因此应该买入”
+“目标价是 $250”
+“风险很低”
+```
+
+这些属于后面的研究/决策层。
+
+---
+
+### 5. Graph Topology
+
+本 Lesson 的 Graph topology：
+
+```text
+START
+  │
+  ▼
+industry_macro_research_agent
+  │
+  ▼
+ END
+```
+
+Agent 内部：
+
+```text
+Industry / Macro Research Agent
+            │
+            ▼
+       Research Prompt
+            │
+            ▼
+        Tool Loop
+        /        \
+       /          \
+Industry Tool   Macro Tool
+      │              │
+      ▼              ▼
+Industry         Macro
+Provider         Provider
+      │              │
+      └──────┬───────┘
+             ▼
+       Research Context
+             │
+             ▼
+      Structured LLM
+             │
+             ▼
+IndustryMacroResearchResult
+```
+
+这和前两个 Agent 的架构保持一致。
+
+---
+
+### 6. State Design
+
+这里继续采用我们已经建立的：
+
+```text
+Input State
+Internal State
+Output State
+```
+
+#### Input
+
+```python
+class IndustryMacroResearchInputState(TypedDict):
+    ticker: str
+```
+
+Agent 只需要：
+
+```text
+ticker
+```
+
+---
+
+#### Internal State
+
+```python
+class IndustryMacroResearchState(TypedDict):
+    ticker: str
+    research_result: IndustryMacroResearchResult | None
+    research_error: str
+```
+
+---
+
+#### Output
+
+```python
+class IndustryMacroResearchOutputState(TypedDict):
+    research_result: IndustryMacroResearchResult | None
+    research_error: str
+```
+
+与 Company / Financial / Market Agent 保持统一。
+
+---
+
+### 7. Research Result
+
+我们新增：
+
+```python
+IndustryMacroResearchResult
+```
+
+建议本 Lesson 使用：
+
+```python
+class IndustryMacroResearchResult(BaseModel):
+    ticker: str
+    industry: str
+    industry_growth: float
+    macro_environment: str
+    macro_growth: float
+    summary: str
+```
+
+这里的字段含义：
+
+```text
+ticker
+    ↓
+研究对象
+
+industry
+    ↓
+行业名称
+
+industry_growth
+    ↓
+行业增长率
+
+macro_environment
+    ↓
+宏观环境描述
+
+macro_growth
+    ↓
+宏观增长率
+
+summary
+    ↓
+LLM 对上述事实的简洁总结
+```
+
+这里暂时**不要讨论这些数据应该由 Python 计算还是 LLM 计算**。本 Lesson 的重点依然是 Agent architecture。
+
+---
+
+### 8. Provider Layer
+
+现在我们需要增加两个 Provider：
+
+```text
+IndustryInfoProvider
+MacroEnvironmentProvider
+```
+
+继续使用 Mock Provider。
+
+#### `app/providers/financial.py`
+
+在现有 Provider 文件中增加：
+
+```python
+class IndustryInfoProvider(ABC):
+    @abstractmethod
+    def get_industry_info(self, ticker: str) -> dict:
+        raise NotImplementedError
+
+
+class MockIndustryInfoProvider(IndustryInfoProvider):
+    def __init__(self):
+        self.mock_industries = {
+            "AAPL": {
+                "ticker": "AAPL",
+                "industry": "Consumer Electronics",
+                "industry_growth": 6.2,
+            },
+            "MSFT": {
+                "ticker": "MSFT",
+                "industry": "Software",
+                "industry_growth": 8.1,
+            },
+        }
+
+    def get_industry_info(self, ticker: str) -> dict:
+        if ticker not in self.mock_industries:
+            raise ValueError(
+                f"Industry information not found for ticker: {ticker}"
+            )
+
+        return self.mock_industries[ticker]
+
+
+class MacroEnvironmentProvider(ABC):
+    @abstractmethod
+    def get_macro_environment(self, ticker: str) -> dict:
+        raise NotImplementedError
+
+
+class MockMacroEnvironmentProvider(MacroEnvironmentProvider):
+    def __init__(self):
+        self.mock_macro_environment = {
+            "AAPL": {
+                "ticker": "AAPL",
+                "macro_environment": "Expansion",
+                "macro_growth": 2.8,
+            },
+            "MSFT": {
+                "ticker": "MSFT",
+                "macro_environment": "Expansion",
+                "macro_growth": 2.8,
+            },
+        }
+
+    def get_macro_environment(self, ticker: str) -> dict:
+        if ticker not in self.mock_macro_environment:
+            raise ValueError(
+                f"Macro environment not found for ticker: {ticker}"
+            )
+
+        return self.mock_macro_environment[ticker]
+```
+
+---
+
+### 9. Tool Layer
+
+然后在：
+
+```text
+app/tools/financial.py
+```
+
+增加两个 Tool。
+
+```python
+class IndustryInfoInput(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol, for example AAPL or MSFT."
+    )
+
+
+industry_provider = MockIndustryInfoProvider()
+
+
+@tool(args_schema=IndustryInfoInput)
+def get_industry_info(ticker: str) -> dict:
+    """Get basic industry information for a stock ticker."""
+    try:
+        return industry_provider.get_industry_info(ticker)
+    except TransientProviderError as exc:
+        raise TransientToolError(str(exc)) from exc
+```
+
+以及：
+
+```python
+class MacroEnvironmentInput(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol, for example AAPL or MSFT."
+    )
+
+
+macro_environment_provider = MockMacroEnvironmentProvider()
+
+
+@tool(args_schema=MacroEnvironmentInput)
+def get_macro_environment(ticker: str) -> dict:
+    """Get basic macroeconomic environment information for a stock ticker."""
+    try:
+        return macro_environment_provider.get_macro_environment(ticker)
+    except TransientProviderError as exc:
+        raise TransientToolError(str(exc)) from exc
+```
+
+---
+
+### 10. Tool Set
+
+然后修改：
+
+```text
+app/agents/tool_sets.py
+```
+
+增加：
+
+```python
+from app.tools.financial import (
+    get_company_info,
+    get_stock_price,
+    get_revenue,
+    get_net_income,
+    get_market_index,
+    get_market_return,
+    get_industry_info,
+    get_macro_environment,
+)
+```
+
+并增加：
+
+```python
+INDUSTRY_MACRO_RESEARCH_TOOLS = [
+    get_industry_info,
+    get_macro_environment,
+]
+```
+
+最终 Tool Set：
+
+```text
+COMPANY_RESEARCH_TOOLS
+    ├── get_company_info
+    └── get_stock_price
+
+FINANCIAL_RESEARCH_TOOLS
+    ├── get_revenue
+    └── get_net_income
+
+MARKET_RESEARCH_TOOLS
+    ├── get_market_index
+    └── get_market_return
+
+INDUSTRY_MACRO_RESEARCH_TOOLS
+    ├── get_industry_info
+    └── get_macro_environment
+```
+
+这也是本 Lesson 一个非常重要的架构结果：
+
+> **每一个 Research Agent 都有自己的 Tool Boundary。**
+
+---
+
+### 11. Model
+
+修改：
+
+```text
+app/agents/models.py
+```
+
+增加：
+
+```python
+class IndustryMacroResearchResult(BaseModel):
+    ticker: str = Field(description="Stock ticker symbol.")
+    industry: str = Field(description="Industry associated with the company.")
+    industry_growth: float = Field(
+        description="Industry growth rate."
+    )
+    macro_environment: str = Field(
+        description="Current macroeconomic environment."
+    )
+    macro_growth: float = Field(
+        description="Macro-level growth rate."
+    )
+    summary: str = Field(
+        description="Concise factual industry and macro research summary."
+    )
+```
+
+---
+
+### 12. Agent Prompt
+
+新建：
+
+```text
+app/agents/industry_macro_research.py
+```
+
+核心 Prompt：
+
+```python
+industry_macro_research_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an Industry and Macro Research Agent. "
+            "Your responsibility is to research the basic industry "
+            "and macroeconomic environment for the given stock ticker. "
+            "Use the available tools to obtain industry information "
+            "and macroeconomic environment information. "
+            "Do not perform valuation. "
+            "Do not make an investment recommendation. "
+            "Do not assess investment risk. "
+            "Do not invent industry or macroeconomic data.",
+        ),
+        (
+            "human",
+            "Research the industry and macroeconomic environment "
+            "for the following company and return a concise "
+            "industry and macro research result.\n\n"
+            "Ticker: {ticker}",
+        ),
+    ]
+)
+```
+
+---
+
+### 13. 完整 Agent
+
+完整文件：
+
+```python
+from typing import TypedDict
+
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.constants import START, END
+from langgraph.graph import StateGraph
+
+from app.agents.models import IndustryMacroResearchResult
+from app.agents.tool_sets import INDUSTRY_MACRO_RESEARCH_TOOLS
+from app.graph.tool_loop import build_tool_loop_graph
+from app.llm.client import llm
+
+
+class IndustryMacroResearchInputState(TypedDict):
+    ticker: str
+
+
+class IndustryMacroResearchState(TypedDict):
+    ticker: str
+    research_result: IndustryMacroResearchResult | None
+    research_error: str
+
+
+class IndustryMacroResearchOutputState(TypedDict):
+    research_result: IndustryMacroResearchResult | None
+    research_error: str
+
+
+industry_macro_research_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an Industry and Macro Research Agent. "
+            "Your responsibility is to research the basic industry "
+            "and macroeconomic environment for the given stock ticker. "
+            "Use the available tools to obtain industry information "
+            "and macroeconomic environment information. "
+            "Do not perform valuation. "
+            "Do not make an investment recommendation. "
+            "Do not assess investment risk. "
+            "Do not invent industry or macroeconomic data.",
+        ),
+        (
+            "human",
+            "Research the industry and macroeconomic environment "
+            "for the following company and return a concise "
+            "industry and macro research result.\n\n"
+            "Ticker: {ticker}",
+        ),
+    ]
+)
+
+
+industry_macro_research_tool_loop = build_tool_loop_graph(
+    INDUSTRY_MACRO_RESEARCH_TOOLS
+)
+
+
+structured_industry_macro_research_llm = llm.with_structured_output(
+    IndustryMacroResearchResult
+)
+
+
+def extract_tool_results(tool_result: dict) -> str:
+    tool_messages = [
+        message
+        for message in tool_result["messages"]
+        if message.type == "tool"
+    ]
+
+    return "\n".join(message.content for message in tool_messages)
+
+
+def industry_macro_research_agent(
+    state: IndustryMacroResearchState,
+) -> IndustryMacroResearchState:
+    ticker = state["ticker"]
+
+    prompt_value = industry_macro_research_prompt.invoke(
+        {"ticker": ticker}
+    )
+
+    try:
+        tool_result = industry_macro_research_tool_loop.invoke(
+            {"messages": prompt_value.messages}
+        )
+
+        research_context = extract_tool_results(tool_result)
+
+        structured_result = (
+            structured_industry_macro_research_llm.invoke(
+                [
+                    *prompt_value.messages,
+                    HumanMessage(
+                        content=(
+                            "Tool results:\n"
+                            f"{research_context}\n\n"
+                            "Using only these tool results, "
+                            "produce the structured industry and "
+                            "macro research result."
+                        )
+                    ),
+                ]
+            )
+        )
+
+    except Exception as exc:
+        return {
+            "ticker": ticker,
+            "research_result": None,
+            "research_error": str(exc),
+        }
+
+    return {
+        "ticker": ticker,
+        "research_result": structured_result,
+        "research_error": "",
+    }
+
+
+def build_industry_macro_research_graph():
+    builder = StateGraph(
+        IndustryMacroResearchState,
+        input_schema=IndustryMacroResearchInputState,
+        output_schema=IndustryMacroResearchOutputState,
+    )
+
+    builder.add_node(
+        "industry_macro_research_agent",
+        industry_macro_research_agent,
+    )
+
+    builder.add_edge(
+        START,
+        "industry_macro_research_agent",
+    )
+
+    builder.add_edge(
+        "industry_macro_research_agent",
+        END,
+    )
+
+    return builder.compile()
+
+
+industry_macro_research_graph = build_industry_macro_research_graph()
+```
+
+---
+
+### 14. 一个需要特别注意的地方
+
+这里我们继续使用：
+
+```python
+llm.with_structured_output(
+    IndustryMacroResearchResult
+)
+```
+
+而不是：
+
+```python
+IndustryMacroResearchOutputState
+```
+
+这是上一 Lesson 已经踩过的坑，现在应该保持清晰：
+
+```text
+OutputState
+    ↓
+Graph 的边界
+
+ResearchResult
+    ↓
+业务领域的数据结构
+```
+
+二者不是一回事。
+
+---
+
+### 15. Tests
+
+本 Lesson 不跑整个历史测试套件。
+
+按照我们之前约定，只测试：
+
+1. Provider
+2. Tool
+3. Agent
+4. Tool Boundary
+
+---
+
+#### Test 1 — Provider
+
+新建：
+
+```text
+tests/test_industry_macro_research_provider.py
+```
+
+```python
+import pytest
+
+from app.providers.financial import (
+    MockIndustryInfoProvider,
+    MockMacroEnvironmentProvider,
+)
+
+
+def test_industry_info_provider_returns_mock_data():
+    provider = MockIndustryInfoProvider()
+
+    result = provider.get_industry_info("AAPL")
+
+    assert result["industry"] == "Consumer Electronics"
+    assert result["industry_growth"] == 6.2
+
+
+def test_industry_info_provider_rejects_unknown_ticker():
+    provider = MockIndustryInfoProvider()
+
+    with pytest.raises(ValueError):
+        provider.get_industry_info("UNKNOWN")
+
+
+def test_macro_environment_provider_returns_mock_data():
+    provider = MockMacroEnvironmentProvider()
+
+    result = provider.get_macro_environment("AAPL")
+
+    assert result["macro_environment"] == "Expansion"
+    assert result["macro_growth"] == 2.8
+
+
+def test_macro_environment_provider_rejects_unknown_ticker():
+    provider = MockMacroEnvironmentProvider()
+
+    with pytest.raises(ValueError):
+        provider.get_macro_environment("UNKNOWN")
+```
+
+---
+
+#### Test 2 — Tools
+
+新建：
+
+```text
+tests/test_industry_macro_research_tools.py
+```
+
+```python
+from app.tools.financial import (
+    get_industry_info,
+    get_macro_environment,
+)
+
+
+def test_get_industry_info_tool():
+    result = get_industry_info.invoke(
+        {"ticker": "AAPL"}
+    )
+
+    assert result["industry"] == "Consumer Electronics"
+    assert result["industry_growth"] == 6.2
+
+
+def test_get_macro_environment_tool():
+    result = get_macro_environment.invoke(
+        {"ticker": "AAPL"}
+    )
+
+    assert result["macro_environment"] == "Expansion"
+    assert result["macro_growth"] == 2.8
+```
+
+---
+
+#### Test 3 — Agent
+
+新建：
+
+```text
+tests/test_industry_macro_research_agent.py
+```
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.agents.industry_macro_research import (
+    industry_macro_research_graph,
+)
+from app.agents.models import IndustryMacroResearchResult
+
+
+def test_industry_macro_research_graph_returns_expected_result():
+    result = IndustryMacroResearchResult(
+        ticker="AAPL",
+        industry="Consumer Electronics",
+        industry_growth=6.2,
+        macro_environment="Expansion",
+        macro_growth=2.8,
+        summary=(
+            "The company operates in a growing consumer "
+            "electronics industry within an expansionary "
+            "macro environment."
+        ),
+    )
+
+    fake_tool_loop = MagicMock()
+    fake_tool_loop.invoke.return_value = {
+        "messages": []
+    }
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = result
+
+    with patch(
+        "app.agents.industry_macro_research."
+        "industry_macro_research_tool_loop",
+        fake_tool_loop,
+    ), patch(
+        "app.agents.industry_macro_research."
+        "structured_industry_macro_research_llm",
+        fake_structured_llm,
+    ):
+        output = industry_macro_research_graph.invoke(
+            {"ticker": "AAPL"}
+        )
+
+    assert output["research_result"] == result
+    assert output["research_error"] == ""
+
+
+def test_industry_macro_research_graph_maps_agent_failure():
+    fake_tool_loop = MagicMock()
+    fake_tool_loop.invoke.side_effect = RuntimeError(
+        "Industry macro tool loop failed."
+    )
+
+    with patch(
+        "app.agents.industry_macro_research."
+        "industry_macro_research_tool_loop",
+        fake_tool_loop,
+    ):
+        output = industry_macro_research_graph.invoke(
+            {"ticker": "AAPL"}
+        )
+
+    assert output["research_result"] is None
+    assert output["research_error"] == (
+        "Industry macro tool loop failed."
+    )
+
+
+def test_industry_macro_research_agent_only_requires_ticker():
+    result = IndustryMacroResearchResult(
+        ticker="AAPL",
+        industry="Consumer Electronics",
+        industry_growth=6.2,
+        macro_environment="Expansion",
+        macro_growth=2.8,
+        summary="Industry and macro conditions were positive.",
+    )
+
+    fake_tool_loop = MagicMock()
+    fake_tool_loop.invoke.return_value = {
+        "messages": []
+    }
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = result
+
+    with patch(
+        "app.agents.industry_macro_research."
+        "industry_macro_research_tool_loop",
+        fake_tool_loop,
+    ), patch(
+        "app.agents.industry_macro_research."
+        "structured_industry_macro_research_llm",
+        fake_structured_llm,
+    ):
+        output = industry_macro_research_graph.invoke(
+            {"ticker": "AAPL"}
+        )
+
+    assert output["research_result"].ticker == "AAPL"
+```
+
+这里继续使用上一 Lesson 已经验证过的正确 Mock 方法：
+
+```python
+fake_structured_llm = MagicMock()
+
+with patch(
+    "...structured_industry_macro_research_llm",
+    fake_structured_llm,
+):
+```
+
+而不是尝试直接 patch Runnable 的 `.invoke`。
+
+---
+
+#### Test 4 — Tool Boundary
+
+继续修改：
+
+```text
+tests/test_agent_tool_boundary.py
+```
+
+增加：
+
+```python
+from app.agents.tool_sets import (
+    COMPANY_RESEARCH_TOOLS,
+    FINANCIAL_RESEARCH_TOOLS,
+    MARKET_RESEARCH_TOOLS,
+    INDUSTRY_MACRO_RESEARCH_TOOLS,
+)
+
+
+def test_industry_macro_research_tool_boundary():
+    tool_names = {
+        tool.name
+        for tool in INDUSTRY_MACRO_RESEARCH_TOOLS
+    }
+
+    assert tool_names == {
+        "get_industry_info",
+        "get_macro_environment",
+    }
+
+
+def test_all_research_agent_tool_sets_are_disjoint():
+    company_tools = {
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    }
+
+    financial_tools = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    market_tools = {
+        tool.name
+        for tool in MARKET_RESEARCH_TOOLS
+    }
+
+    industry_macro_tools = {
+        tool.name
+        for tool in INDUSTRY_MACRO_RESEARCH_TOOLS
+    }
+
+    tool_sets = [
+        company_tools,
+        financial_tools,
+        market_tools,
+        industry_macro_tools,
+    ]
+
+    for index, current_tools in enumerate(tool_sets):
+        for other_tools in tool_sets[index + 1:]:
+            assert current_tools.isdisjoint(other_tools)
+```
+
+---
+
+### 16. 本 Lesson 的测试命令
+
+只运行当前 Lesson：
+
+```bash
+pytest tests/test_industry_macro_research_provider.py -v
+```
+
+```bash
+pytest tests/test_industry_macro_research_tools.py -v
+```
+
+```bash
+pytest tests/test_industry_macro_research_agent.py -v
+```
+
+```bash
+pytest tests/test_agent_tool_boundary.py -v
+```
+
+**暂时不要运行整个 `tests/`。**
+
+---
+
+### 17. Acceptance Criteria
+
+本 Lesson 完成的判断标准：
+
+#### Provider
+
+* [ ] `MockIndustryInfoProvider` 工作
+* [ ] `MockMacroEnvironmentProvider` 工作
+* [ ] unknown ticker 正确失败
+
+#### Tool
+
+* [ ] `get_industry_info` 工作
+* [ ] `get_macro_environment` 工作
+* [ ] Tool 调用 Provider，而不是自己保存业务数据
+
+#### Agent
+
+* [ ] `IndustryMacroResearchAgent` 只需要 ticker
+* [ ] Agent 拥有自己的 Tool Loop
+* [ ] Agent 使用自己的 Tool Set
+* [ ] Agent 输出 `IndustryMacroResearchResult`
+* [ ] Agent 能正确映射失败
+* [ ] 不进行 valuation / recommendation / risk analysis
+
+#### Architecture
+
+最终应该形成：
+
+```text
+Company Agent
+    │
+    └── Company Tools
+
+Financial Agent
+    │
+    └── Financial Tools
+
+Market Agent
+    │
+    └── Market Tools
+
+Industry/Macro Agent
+    │
+    └── Industry/Macro Tools
+```
+
+---
+
+### 18. 本 Lesson 最重要的理解
+
+到 Lesson 7 为止，我们实际上完成了 Phase 4 一个非常重要的架构阶段：
+
+```text
+                    Research Agents
+                          │
+       ┌──────────────────┼──────────────────┐
+       │                  │                  │
+       ▼                  ▼                  ▼
+   Company            Financial           Market
+   Agent               Agent              Agent
+       │                  │                  │
+       ▼                  ▼                  ▼
+ Company Tools       Financial Tools    Market Tools
+       │                  │                  │
+       └──────────────────┼──────────────────┘
+                          │
+                          ▼
+                 Industry / Macro
+                      Agent
+                          │
+                          ▼
+                Industry / Macro
+                       Tools
+```
+
+现在的关键已经**不再是“LangGraph 怎么调用 Tool”**——Phase 3 已经解决了这个问题。
+
+现在真正需要掌握的是：
+
+> **如何把业务职责封装成独立 Research Agent，并让每个 Agent 拥有清晰、受约束的 Tool Boundary 和 Research Result。**
+
+这正是 Phase 4 相对于 Phase 3 的核心变化。
+
+**现在请按上面的修改完成 Lesson 7，然后只运行这 4 组测试。测试如果全部通过，我们直接进入下一 Lesson；如果失败，按照 `Error → Cause → Fix → Retest` 处理。**

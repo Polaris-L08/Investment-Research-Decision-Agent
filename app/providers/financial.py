@@ -154,3 +154,63 @@ class MockMarketReturnProvider(MarketReturnProvider):
                 f"Market return not found for ticker: {ticker}"
             )
         return self.mock_return[ticker]
+
+
+class IndustryInfoProvider(ABC):
+    @abstractmethod
+    def get_industry_info(self, ticker: str) -> dict:
+        raise NotImplementedError
+
+
+class MockIndustryInfoProvider(IndustryInfoProvider):
+    def __init__(self):
+        self.mock_industries = {
+            "AAPL": {
+                "ticker": "AAPL",
+                "industry": "Consumer Electronics",
+                "industry_growth": 6.2,
+            },
+            "MSFT": {
+                "ticker": "MSFT",
+                "industry": "Software",
+                "industry_growth": 8.1,
+            },
+        }
+
+    def get_industry_info(self, ticker: str) -> dict:
+        if ticker not in self.mock_industries:
+            raise ValueError(
+                f"Industry information not found for ticker: {ticker}"
+            )
+
+        return self.mock_industries[ticker]
+
+
+class MacroEnvironmentProvider(ABC):
+    @abstractmethod
+    def get_macro_environment(self, ticker: str) -> dict:
+        raise NotImplementedError
+
+
+class MockMacroEnvironmentProvider(MacroEnvironmentProvider):
+    def __init__(self):
+        self.mock_macro_environment = {
+            "AAPL": {
+                "ticker": "AAPL",
+                "macro_environment": "Expansion",
+                "macro_growth": 2.8,
+            },
+            "MSFT": {
+                "ticker": "MSFT",
+                "macro_environment": "Expansion",
+                "macro_growth": 2.8,
+            },
+        }
+
+    def get_macro_environment(self, ticker: str) -> dict:
+        if ticker not in self.mock_macro_environment:
+            raise ValueError(
+                f"Macro environment not found for ticker: {ticker}"
+            )
+
+        return self.mock_macro_environment[ticker]

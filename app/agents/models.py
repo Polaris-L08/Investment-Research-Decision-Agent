@@ -50,3 +50,20 @@ class MarketResearchResult(BaseModel):
     market_index: str
     market_return: float
     summary: str
+
+
+class IndustryMacroResearchResult(BaseModel):
+    ticker: str = Field(description="Stock ticker symbol.")
+    industry: str = Field(description="Industry associated with the company.")
+    industry_growth: float = Field(
+        description="Industry growth rate."
+    )
+    macro_environment: str = Field(
+        description="Current macroeconomic environment."
+    )
+    macro_growth: float = Field(
+        description="Macro-level growth rate."
+    )
+    summary: str = Field(
+        description="Concise factual industry and macro research summary."
+    )

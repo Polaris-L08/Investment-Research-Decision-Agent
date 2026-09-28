@@ -1,6 +1,7 @@
 from app.tools.financial import (
     get_company_info,
-    get_stock_price, get_revenue, get_net_income, get_market_index, get_market_return,
+    get_stock_price, get_revenue, get_net_income, get_market_index, get_market_return, get_industry_info,
+    get_macro_environment,
 )
 
 
@@ -17,4 +18,9 @@ FINANCIAL_RESEARCH_TOOLS = [
 MARKET_RESEARCH_TOOLS = [
     get_market_index,
     get_market_return,
+]
+
+INDUSTRY_MACRO_RESEARCH_TOOLS = [
+    get_industry_info,
+    get_macro_environment,
 ]

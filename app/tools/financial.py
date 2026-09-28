@@ -3,7 +3,8 @@ from pydantic import BaseModel, Field
 
 from app.providers.exceptions import TransientProviderError
 from app.providers.financial import MockStockPriceProvider, MockCompanyInfoProvider, MockRevenueInfoProvider, \
-    MockNetIncomeInfoProvider, MockMarketIndexProvider, MockMarketReturnProvider
+    MockNetIncomeInfoProvider, MockMarketIndexProvider, MockMarketReturnProvider, MockIndustryInfoProvider, \
+    MockMacroEnvironmentProvider
 
 stock_price_provider = MockStockPriceProvider()
 company_info_provider = MockCompanyInfoProvider()
@@ -110,3 +111,39 @@ def get_market_return(ticker: str) -> float:
         raise TransientToolError(
             str(exc)
         ) from exc
+
+
+class IndustryInfoInput(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol, for example AAPL or MSFT."
+    )
+
+
+industry_provider = MockIndustryInfoProvider()
+
+
+@tool(args_schema=IndustryInfoInput)
+def get_industry_info(ticker: str) -> dict:
+    """Get basic industry information for a stock ticker."""
+    try:
+        return industry_provider.get_industry_info(ticker)
+    except TransientProviderError as exc:
+        raise TransientToolError(str(exc)) from exc
+
+
+class MacroEnvironmentInput(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol, for example AAPL or MSFT."
+    )
+
+
+macro_environment_provider = MockMacroEnvironmentProvider()
+
+
+@tool(args_schema=MacroEnvironmentInput)
+def get_macro_environment(ticker: str) -> dict:
+    """Get basic macroeconomic environment information for a stock ticker."""
+    try:
+        return macro_environment_provider.get_macro_environment(ticker)
+    except TransientProviderError as exc:
+        raise TransientToolError(str(exc)) from exc

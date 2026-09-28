@@ -150,3 +150,56 @@ def test_research_agent_tool_sets_are_disjoint():
     assert company_tools.isdisjoint(financial_tools)
     assert company_tools.isdisjoint(market_tools)
     assert financial_tools.isdisjoint(market_tools)
+
+
+from app.agents.tool_sets import (
+    COMPANY_RESEARCH_TOOLS,
+    FINANCIAL_RESEARCH_TOOLS,
+    MARKET_RESEARCH_TOOLS,
+    INDUSTRY_MACRO_RESEARCH_TOOLS,
+)
+
+
+def test_industry_macro_research_tool_boundary():
+    tool_names = {
+        tool.name
+        for tool in INDUSTRY_MACRO_RESEARCH_TOOLS
+    }
+
+    assert tool_names == {
+        "get_industry_info",
+        "get_macro_environment",
+    }
+
+
+def test_all_research_agent_tool_sets_are_disjoint():
+    company_tools = {
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    }
+
+    financial_tools = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    market_tools = {
+        tool.name
+        for tool in MARKET_RESEARCH_TOOLS
+    }
+
+    industry_macro_tools = {
+        tool.name
+        for tool in INDUSTRY_MACRO_RESEARCH_TOOLS
+    }
+
+    tool_sets = [
+        company_tools,
+        financial_tools,
+        market_tools,
+        industry_macro_tools,
+    ]
+
+    for index, current_tools in enumerate(tool_sets):
+        for other_tools in tool_sets[index + 1:]:
+            assert current_tools.isdisjoint(other_tools)
