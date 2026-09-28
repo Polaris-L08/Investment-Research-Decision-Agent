@@ -1,4 +1,27 @@
 from pydantic import BaseModel, Field
+from enum import Enum
+
+
+class ResearchArea(str, Enum):
+    COMPANY = "company"
+    FINANCIAL = "financial"
+    MARKET = "market"
+    INDUSTRY_MACRO = "industry_macro"
+
+
+class ResearchPlan(BaseModel):
+    research_areas: list[ResearchArea] = Field(
+        description=(
+            "The research areas required to answer the "
+            "user's research request."
+        )
+    )
+    rationale: str = Field(
+        description=(
+            "A concise explanation of why these research "
+            "areas are required."
+        )
+    )
 
 
 class CompanyResearchResult(BaseModel):

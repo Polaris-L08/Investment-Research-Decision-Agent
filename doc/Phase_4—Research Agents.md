@@ -8014,3 +8014,993 @@ Industry/Macro Agent
 这正是 Phase 4 相对于 Phase 3 的核心变化。
 
 **现在请按上面的修改完成 Lesson 7，然后只运行这 4 组测试。测试如果全部通过，我们直接进入下一 Lesson；如果失败，按照 `Error → Cause → Fix → Retest` 处理。**
+
+
+
+## Lesson 8：Research Planner（已经废弃，在Phase 5中重新实现）
+
+Lesson 7 完成后，我们已经拥有四个独立 Research Agent：
+
+```text
+Company Research Agent
+Financial Research Agent
+Market Research Agent
+Industry / Macro Research Agent
+```
+
+现在开始 Phase 4 的下一层能力：
+
+> **Research Planner：根据研究任务决定需要哪些 Research Agents。**
+
+这一步非常重要，因为它是从：
+
+```text
+“我有几个独立 Agent”
+```
+
+进入：
+
+```text
+“我如何组织这些 Agent 完成一个 Research Task”
+```
+
+的第一步。
+
+---
+
+### 1. 本 Lesson 的目标
+
+本 Lesson **只建立 Research Planner**。
+
+Planner 的职责是：
+
+```text
+User Research Request
+        │
+        ▼
+Research Planner
+        │
+        ▼
+Research Plan
+        │
+        ├── Company Research
+        ├── Financial Research
+        ├── Market Research
+        └── Industry / Macro Research
+```
+
+例如用户输入：
+
+```text
+Research AAPL for a long-term investment analysis.
+```
+
+Planner 可以生成：
+
+```text
+[
+    "company",
+    "financial",
+    "market",
+    "industry_macro"
+]
+```
+
+但是：
+
+> **Planner 本 Lesson 不执行这些 Agent。**
+
+也就是说：
+
+```text
+Planner
+   │
+   └── 产生计划
+```
+
+而不是：
+
+```text
+Planner
+   │
+   ├── Company Agent
+   ├── Financial Agent
+   ├── Market Agent
+   └── Industry Agent
+```
+
+后者属于下一阶段。
+
+---
+
+### 2. 为什么现在做 Planner？
+
+到 Lesson 7 为止，我们的架构是：
+
+```text
+Company Agent
+Financial Agent
+Market Agent
+Industry/Macro Agent
+```
+
+它们都是独立的。
+
+问题来了：
+
+> 如果用户提出一个完整的 Research Request，系统怎么知道应该调用哪些 Agent？
+
+例如：
+
+#### Request A
+
+```text
+“Tell me the basic information about Apple.”
+```
+
+可能只需要：
+
+```text
+Company Agent
+```
+
+#### Request B
+
+```text
+“Analyze Apple's financial condition.”
+```
+
+可能需要：
+
+```text
+Financial Agent
+```
+
+#### Request C
+
+```text
+“Research Apple comprehensively.”
+```
+
+可能需要：
+
+```text
+Company
+Financial
+Market
+Industry/Macro
+```
+
+所以我们需要一个新的职责：
+
+```text
+Research Planner
+```
+
+它负责：
+
+> **把自然语言 Research Request 转换成结构化 Research Plan。**
+
+---
+
+### 3. 本 Lesson 不做什么
+
+这一步边界必须非常明确。
+
+暂时不做：
+
+* Supervisor
+* Agent execution
+* Parallel execution
+* Fan-out
+* Fan-in
+* Agent result aggregation
+* Research Data Normalization
+* Deterministic Computation
+* Investment Decision
+
+所以：
+
+```text
+Planner ≠ Supervisor
+```
+
+这是本 Lesson 最重要的概念之一。
+
+---
+
+### 4. Planner 与 Supervisor 的区别
+
+#### Research Planner
+
+负责：
+
+```text
+“What research should be performed?”
+```
+
+也就是：
+
+> **研究什么？**
+
+例如：
+
+```text
+Company
+Financial
+Market
+Industry/Macro
+```
+
+---
+
+#### Supervisor
+
+未来负责：
+
+```text
+“What should execute next?”
+```
+
+也就是：
+
+> **现在让谁执行？**
+
+甚至进一步：
+
+```text
+Company Agent
+      ↓
+Financial Agent
+      ↓
+Market Agent
+      ↓
+Industry Agent
+      ↓
+Aggregation
+```
+
+因此：
+
+```text
+Research Planner
+    ↓
+Research Plan
+
+Supervisor
+    ↓
+Execution / Routing
+```
+
+两个职责必须分开。
+
+---
+
+### 5. Graph Topology
+
+本 Lesson 的 Graph 非常简单：
+
+```text
+START
+  │
+  ▼
+research_planner
+  │
+  ▼
+ END
+```
+
+没有 Tool Loop。
+
+没有 ToolNode。
+
+没有 Research Agent。
+
+因为 Planner 当前只是：
+
+```text
+User Request
+    ↓
+LLM
+    ↓
+Structured Research Plan
+```
+
+---
+
+### 6. State Design
+
+新增：
+
+```text
+app/agents/research_planner.py
+```
+
+我们采用和其他 Agent 一致的 Input / Internal / Output 分层。
+
+#### Input State
+
+```python
+class ResearchPlannerInputState(TypedDict):
+    user_query: str
+```
+
+---
+
+#### Internal State
+
+```python
+class ResearchPlannerState(TypedDict):
+    user_query: str
+    research_plan: ResearchPlan | None
+    research_error: str
+```
+
+---
+
+#### Output State
+
+```python
+class ResearchPlannerOutputState(TypedDict):
+    research_plan: ResearchPlan | None
+    research_error: str
+```
+
+---
+
+### 7. Research Plan Model
+
+修改：
+
+```text
+app/agents/models.py
+```
+
+增加：
+
+```python
+from enum import Enum
+
+class ResearchArea(str, Enum):
+    COMPANY = "company"
+    FINANCIAL = "financial"
+    MARKET = "market"
+    INDUSTRY_MACRO = "industry_macro"
+```
+
+然后：
+
+```python
+class ResearchPlan(BaseModel):
+    research_areas: list[ResearchArea] = Field(
+        description=(
+            "The research areas required to answer the "
+            "user's research request."
+        )
+    )
+    rationale: str = Field(
+        description=(
+            "A concise explanation of why these research "
+            "areas are required."
+        )
+    )
+```
+
+这里的关键是：
+
+```text
+ResearchPlan
+    ├── research_areas
+    └── rationale
+```
+
+例如：
+
+```python
+ResearchPlan(
+    research_areas=[
+        ResearchArea.COMPANY,
+        ResearchArea.FINANCIAL,
+        ResearchArea.MARKET,
+        ResearchArea.INDUSTRY_MACRO,
+    ],
+    rationale="A comprehensive company research requires..."
+)
+```
+
+---
+
+### 8. 为什么不用 `list[str]`？
+
+我们当然可以：
+
+```python
+research_areas: list[str]
+```
+
+但这会允许：
+
+```text
+"company"
+"financial"
+"banana"
+"random_agent"
+```
+
+进入系统。
+
+而 Enum 将 Planner 的输出限制在：
+
+```text
+company
+financial
+market
+industry_macro
+```
+
+因此：
+
+```text
+LLM
+ ↓
+Structured Output
+ ↓
+ResearchPlan
+ ↓
+Enum Validation
+```
+
+这就是我们已经在 Phase 3 / Phase 4 建立起来的：
+
+> **让 LLM 输出受到业务 Schema 约束。**
+
+---
+
+### 9. Planner Prompt
+
+新建：
+
+```text
+app/agents/research_planner.py
+```
+
+Prompt：
+
+```python
+research_planner_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a Research Planning Agent for an "
+            "investment research system. "
+            "Your responsibility is to determine which "
+            "research areas are required to answer the "
+            "user's research request. "
+            "Available research areas are: "
+            "company, financial, market, and industry_macro. "
+            "Select only the research areas that are relevant "
+            "to the request. "
+            "Do not perform the research yourself. "
+            "Do not make an investment recommendation. "
+            "Do not perform valuation or risk analysis.",
+        ),
+        (
+            "human",
+            "Create a research plan for the following request:\n\n"
+            "{user_query}",
+        ),
+    ]
+)
+```
+
+注意：
+
+Planner 不需要任何 Tool。
+
+---
+
+### 10. Structured Output
+
+继续使用我们已经验证过的模式：
+
+```python
+structured_research_planner_llm = llm.with_structured_output(
+    ResearchPlan
+)
+```
+
+因此：
+
+```text
+LLM
+ ↓
+ResearchPlan
+```
+
+而不是：
+
+```text
+LLM
+ ↓
+dict
+```
+
+---
+
+### 11. 完整 `research_planner.py`
+
+文件：
+
+```text
+app/agents/research_planner.py
+```
+
+完整代码：
+
+```python
+from typing import TypedDict
+
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.constants import START, END
+from langgraph.graph import StateGraph
+
+from app.agents.models import ResearchPlan
+from app.llm.client import llm
+
+
+class ResearchPlannerInputState(TypedDict):
+    user_query: str
+
+
+class ResearchPlannerState(TypedDict):
+    user_query: str
+    research_plan: ResearchPlan | None
+    research_error: str
+
+
+class ResearchPlannerOutputState(TypedDict):
+    research_plan: ResearchPlan | None
+    research_error: str
+
+
+research_planner_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a Research Planning Agent for an "
+            "investment research system. "
+            "Your responsibility is to determine which "
+            "research areas are required to answer the "
+            "user's research request. "
+            "Available research areas are: "
+            "company, financial, market, and industry_macro. "
+            "Select only the research areas that are relevant "
+            "to the request. "
+            "Do not perform the research yourself. "
+            "Do not make an investment recommendation. "
+            "Do not perform valuation or risk analysis.",
+        ),
+        (
+            "human",
+            "Create a research plan for the following request:\n\n"
+            "{user_query}",
+        ),
+    ]
+)
+
+
+structured_research_planner_llm = llm.with_structured_output(
+    ResearchPlan
+)
+
+
+def research_planner(
+    state: ResearchPlannerState,
+) -> ResearchPlannerState:
+    user_query = state["user_query"]
+
+    prompt_value = research_planner_prompt.invoke(
+        {"user_query": user_query}
+    )
+
+    try:
+        research_plan = structured_research_planner_llm.invoke(
+            prompt_value.messages
+        )
+    except Exception as exc:
+        return {
+            "user_query": user_query,
+            "research_plan": None,
+            "research_error": str(exc),
+        }
+
+    return {
+        "user_query": user_query,
+        "research_plan": research_plan,
+        "research_error": "",
+    }
+
+
+def build_research_planner_graph():
+    builder = StateGraph(
+        ResearchPlannerState,
+        input_schema=ResearchPlannerInputState,
+        output_schema=ResearchPlannerOutputState,
+    )
+
+    builder.add_node(
+        "research_planner",
+        research_planner,
+    )
+
+    builder.add_edge(
+        START,
+        "research_planner",
+    )
+
+    builder.add_edge(
+        "research_planner",
+        END,
+    )
+
+    return builder.compile()
+
+
+research_planner_graph = build_research_planner_graph()
+```
+
+---
+
+### 12. Tests
+
+本 Lesson 我们重点测试三个东西：
+
+```text
+Model
+Planner Success
+Planner Failure
+```
+
+---
+
+#### Test 1：Research Plan Model
+
+新建：
+
+```text
+tests/test_research_planner_models.py
+```
+
+```python
+from app.agents.models import ResearchArea, ResearchPlan
+
+
+def test_research_plan_accepts_valid_research_areas():
+    plan = ResearchPlan(
+        research_areas=[
+            ResearchArea.COMPANY,
+            ResearchArea.FINANCIAL,
+            ResearchArea.MARKET,
+        ],
+        rationale="A broad research request requires these areas.",
+    )
+
+    assert ResearchArea.COMPANY in plan.research_areas
+    assert ResearchArea.FINANCIAL in plan.research_areas
+    assert ResearchArea.MARKET in plan.research_areas
+
+
+def test_research_plan_supports_industry_macro_area():
+    plan = ResearchPlan(
+        research_areas=[
+            ResearchArea.INDUSTRY_MACRO,
+        ],
+        rationale="The request focuses on industry conditions.",
+    )
+
+    assert plan.research_areas == [
+        ResearchArea.INDUSTRY_MACRO
+    ]
+```
+
+---
+
+#### Test 2：Planner
+
+新建：
+
+```text
+tests/test_research_planner.py
+```
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.agents.models import (
+    ResearchArea,
+    ResearchPlan,
+)
+from app.agents.research_planner import (
+    research_planner_graph,
+)
+
+
+def test_research_planner_returns_expected_plan():
+    result = ResearchPlan(
+        research_areas=[
+            ResearchArea.COMPANY,
+            ResearchArea.FINANCIAL,
+            ResearchArea.MARKET,
+            ResearchArea.INDUSTRY_MACRO,
+        ],
+        rationale=(
+            "A comprehensive research request requires "
+            "all available research areas."
+        ),
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = result
+
+    with patch(
+        "app.agents.research_planner."
+        "structured_research_planner_llm",
+        fake_structured_llm,
+    ):
+        output = research_planner_graph.invoke(
+            {
+                "user_query": (
+                    "Conduct comprehensive research on AAPL."
+                )
+            }
+        )
+
+    assert output["research_plan"] == result
+    assert output["research_error"] == ""
+
+
+def test_research_planner_maps_llm_failure():
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.side_effect = RuntimeError(
+        "Research planner LLM failed."
+    )
+
+    with patch(
+        "app.agents.research_planner."
+        "structured_research_planner_llm",
+        fake_structured_llm,
+    ):
+        output = research_planner_graph.invoke(
+            {
+                "user_query": "Research AAPL."
+            }
+        )
+
+    assert output["research_plan"] is None
+    assert output["research_error"] == (
+        "Research planner LLM failed."
+    )
+
+
+def test_research_planner_accepts_only_user_query():
+    result = ResearchPlan(
+        research_areas=[
+            ResearchArea.COMPANY,
+        ],
+        rationale="The request asks for basic company information.",
+    )
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = result
+
+    with patch(
+        "app.agents.research_planner."
+        "structured_research_planner_llm",
+        fake_structured_llm,
+    ):
+        output = research_planner_graph.invoke(
+            {
+                "user_query": "Give me basic information about AAPL."
+            }
+        )
+
+    assert output["research_plan"].research_areas == [
+        ResearchArea.COMPANY
+    ]
+```
+
+注意这里继续使用我们在 Lesson 5、6、7 已经验证过的：
+
+```python
+fake_structured_llm = MagicMock()
+
+with patch(
+    "...structured_research_planner_llm",
+    fake_structured_llm,
+):
+```
+
+不要直接 patch Runnable 对象的 `.invoke`。
+
+---
+
+### 13. Planner 的一个关键测试
+
+我们还需要确认：
+
+> Planner 本身不拥有 Research Tools。
+
+新建：
+
+```text
+tests/test_research_planner_boundary.py
+```
+
+```python
+from app.agents.research_planner import (
+    research_planner_graph,
+)
+
+
+def test_research_planner_has_no_research_tool_loop():
+    assert not hasattr(
+        research_planner_graph,
+        "tool_loop",
+    )
+```
+
+不过这个测试对 LangGraph 编译后的对象来说比较弱。
+
+因此更有价值的是直接检查源码级架构边界并保持设计：
+
+```text
+research_planner.py
+    ↓
+LLM
+    ↓
+ResearchPlan
+```
+
+而不是：
+
+```text
+research_planner.py
+    ↓
+Tool Loop
+```
+
+所以这里**不强制增加这个测试**。
+
+当前 Lesson 的测试重点放在 Model + Planner 行为即可。
+
+---
+
+### 14. 测试命令
+
+只运行当前 Lesson：
+
+```bash
+pytest tests/test_research_planner_models.py -v
+```
+
+```bash
+pytest tests/test_research_planner.py -v
+```
+
+不要运行：
+
+```bash
+pytest
+```
+
+因为我们已经明确约定，不重复运行早期可能存在 obsolete assertion 的历史测试。
+
+---
+
+### 15. Acceptance Criteria
+
+Lesson 8 完成条件：
+
+#### Research Plan
+
+* [ ] `ResearchArea` Enum 创建完成
+* [ ] 支持四种 Research Area
+* [ ] `ResearchPlan` Pydantic Model 创建完成
+* [ ] Planner 只能产生定义好的 Research Area
+
+#### Research Planner
+
+* [ ] 只需要 `user_query`
+* [ ] 使用真实 LLM 接口
+* [ ] 使用 Structured Output
+* [ ] 输出 `ResearchPlan`
+* [ ] LLM failure 可以映射为 `research_error`
+* [ ] 不调用任何 Research Tool
+* [ ] 不执行任何 Research Agent
+
+#### Architecture
+
+必须保持：
+
+```text
+User Query
+    │
+    ▼
+Research Planner
+    │
+    ▼
+Research Plan
+```
+
+而不是：
+
+```text
+User Query
+    │
+    ▼
+Research Planner
+    │
+    ├── Company Agent
+    ├── Financial Agent
+    ├── Market Agent
+    └── Industry Agent
+```
+
+后者留到下一阶段。
+
+---
+
+### 16. 本 Lesson 最重要的理解
+
+到这里，Phase 4 的架构开始发生第一次明显变化。
+
+之前：
+
+```text
+User
+ │
+ ├── Company Agent
+ ├── Financial Agent
+ ├── Market Agent
+ └── Industry/Macro Agent
+```
+
+现在增加：
+
+```text
+User
+ │
+ ▼
+Research Planner
+ │
+ ▼
+Research Plan
+ │
+ ├── Company
+ ├── Financial
+ ├── Market
+ └── Industry/Macro
+```
+
+因此：
+
+> **Research Planner 不是执行者，而是研究任务的结构化规划者。**
+
+这为后续真正的 Multi-Agent Orchestration 铺路，但**本 Lesson 还没有进入 Multi-Agent Execution**。
+
+---
+
+### 当前 Phase 4 进度
+
+```text
+Phase 4 — Research Agents
+
+Lesson 1  Company Research Agent          ✓
+Lesson 2  Company Agent 深化              ✓
+Lesson 3  Research Result / State         ✓
+Lesson 4  Tool Set / Tool Loop Factory    ✓
+Lesson 5  Financial Research Agent        ✓
+Lesson 6  Market Research Agent           ✓
+Lesson 7  Industry / Macro Agent         ✓
+Lesson 8  Research Planner                ← 当前
+```
