@@ -67,3 +67,46 @@ def test_company_research_tool_loop_uses_expected_tool_set():
         tool.name
         for tool in COMPANY_RESEARCH_TOOLS
     ) == tool_names
+
+
+from app.agents.tool_sets import (
+    COMPANY_RESEARCH_TOOLS,
+    FINANCIAL_RESEARCH_TOOLS,
+)
+
+def test_financial_research_tool_set_contains_financial_tools():
+    tool_names = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    assert tool_names == {
+        "get_revenue",
+        "get_net_income",
+    }
+
+
+def test_company_and_financial_tool_sets_are_separate():
+    company_tools = {
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    }
+
+    financial_tools = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    assert company_tools.isdisjoint(
+        financial_tools
+    )
+
+
+def test_financial_tool_set_does_not_include_company_tools():
+    tool_names = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    assert "get_company_info" not in tool_names
+    assert "get_stock_price" not in tool_names

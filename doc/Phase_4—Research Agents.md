@@ -4409,3 +4409,1498 @@ Agent Tool Set
 > **这个 Agent 被允许使用哪些能力？**
 
 这是后面进入 **多个 Research Agents** 前必须建立的边界。
+
+
+## Lesson 5 — Financial Research Agent：第二个职责明确的 Research Agent
+
+Lesson 4 我们解决了：
+
+> **一个 Agent 应该使用哪些 Tools？**
+
+现在进入 Lesson 5，解决下一个自然问题：
+
+> **如果系统里出现第二个 Research Agent，它应该如何与 Company Research Agent 并存，同时保持职责、Tool Set、State 和输出彼此独立？**
+
+这一课我们建立 **Financial Research Agent**。
+
+但有一个边界必须先明确：
+
+**本课不进入 Multi-Agent Orchestration。**
+
+不会实现：
+
+* Supervisor
+* Agent Routing
+* Parallel Agents
+* Fan-out / Fan-in
+* Agent-to-Agent communication
+
+这些属于后续 Multi-Agent Orchestration 阶段。交接文档也明确将 Company、Financial、Market、Industry Research Agents 的组合协调放到后续阶段。
+
+本课只是让第二个 Agent 独立成立。
+
+---
+
+### 一、Phase 4 到目前为止的演进
+
+我们现在不是从零开始，而是：
+
+```text
+Phase 3
+LLM
+ ↓
+Tool Calling
+ ↓
+Tool Loop
+ ↓
+Provider
+```
+
+↓
+
+```text
+Lesson 1
+Company Research Agent
+```
+
+↓
+
+```text
+Lesson 2
+Compiled Tool Loop
+```
+
+↓
+
+```text
+Lesson 3
+Agent Result
+ ↓
+Parent Graph State
+```
+
+↓
+
+```text
+Lesson 4
+Agent-specific Tool Set
+```
+
+现在：
+
+```text
+Lesson 5
+
+Company Research Agent
+        │
+        └── Company Tools
+
+
+Financial Research Agent
+        │
+        └── Financial Tools
+```
+
+这一步非常重要，因为我们第一次拥有了**两个具有不同业务职责的 Agent**。
+
+---
+
+### 二、为什么现在需要 Financial Research Agent
+
+目前只有：
+
+```text
+CompanyResearchAgent
+```
+
+如果我们继续往里面塞功能，很容易变成：
+
+```text
+CompanyResearchAgent
+    ├── company information
+    ├── price
+    ├── revenue
+    ├── earnings
+    ├── valuation
+    ├── risk
+    ├── market
+    └── recommendation
+```
+
+最终又会退化成：
+
+```text
+Super Agent
+```
+
+而 Phase 4 的目标恰恰是避免这一点。
+
+交接文档明确给出的后续方向是：
+
+```text
+Research Planner
+        │
+        ├── Company Research Agent
+        ├── Financial Research Agent
+        ├── Market Research Agent
+        └── Industry / Macro Research Agent
+```
+
+然后在后续阶段才进入 Supervisor、Routing、Parallel Agents、Fan-out/Fan-in 等协调机制。
+
+所以 Lesson 5 先只做：
+
+```text
+Financial Research Agent
+```
+
+---
+
+### 三、Lesson 5 的业务职责
+
+Financial Research Agent 的职责定义为：
+
+> **研究公司的基础财务表现，并返回结构化的 Financial Research Result。**
+
+本课只研究三个指标：
+
+```text
+ticker
+ ↓
+revenue
+ ↓
+net income
+ ↓
+profit margin
+```
+
+暂时不做：
+
+```text
+Valuation
+Risk
+Target Price
+Expected Return
+Investment Recommendation
+```
+
+因此：
+
+```text
+Company Research Agent
+```
+
+负责：
+
+```text
+Who is the company?
+What sector?
+What is current price?
+```
+
+而：
+
+```text
+Financial Research Agent
+```
+
+负责：
+
+```text
+How is the company performing financially?
+```
+
+---
+
+### 四、Graph Topology
+
+#### Parent Graph
+
+本课**暂时不修改 Parent Graph**。
+
+仍然：
+
+```text
+START
+  ↓
+initialize_state
+  ↓
+company_research
+  ↓
+llm_node
+  ↓
+create_research_plan
+  ↓
+investment_decision_node
+  ↓
+prepare_output
+  ↓
+END
+```
+
+为什么？
+
+因为我们还没有进入 Multi-Agent Orchestration。
+
+---
+
+#### Financial Research Graph
+
+新增：
+
+```text
+START
+  ↓
+financial_research_agent
+  ↓
+END
+```
+
+Agent 内部：
+
+```text
+Financial Research Agent
+        ↓
+Financial Tool Loop
+        ↓
+Financial Tools
+        ├── get_revenue
+        └── get_net_income
+        ↓
+Mock Provider
+        ↓
+FinancialResearchResult
+```
+
+因此现在系统有两个独立的 Agent Graph：
+
+```text
+Company Research Graph
+        │
+        └── Company Tool Loop
+                ├── get_company_info
+                └── get_stock_price
+
+
+Financial Research Graph
+        │
+        └── Financial Tool Loop
+                ├── get_revenue
+                └── get_net_income
+```
+
+**它们现在彼此不调用。**
+
+这点非常重要。
+
+---
+
+### 五、State Design
+
+Financial Agent 不应该直接复用 Parent `GraphState`。
+
+我们建立自己的：
+
+```python
+FinancialResearchInputState
+FinancialResearchState
+FinancialResearchOutputState
+```
+
+以及：
+
+```python
+FinancialResearchResult
+```
+
+结果模型：
+
+```python
+class FinancialResearchResult(BaseModel):
+    ticker: str
+    revenue: float
+    net_income: float
+    profit_margin: float
+    summary: str
+```
+
+这样形成：
+
+```text
+Financial Agent
+      ↓
+FinancialResearchResult
+```
+
+而不是：
+
+```text
+Financial Agent
+      ↓
+GraphState
+```
+
+这是与 Lesson 3 非常重要的区别。
+
+Lesson 3 学习的是：
+
+```text
+Child Agent Result
+       ↓
+Parent Graph State
+```
+
+Lesson 5 学习的是：
+
+```text
+Independent Agent
+       ↓
+Independent Domain Result
+```
+
+---
+
+### 六、Step 1：新增 Financial Result Model
+
+新建：
+
+```text
+app/agents/financial_research.py
+```
+
+不过为了与 Lesson 3 建立的结构保持一致，我们把 Domain Model 放在：
+
+```text
+app/agents/models.py
+```
+
+修改为：
+
+```python
+from pydantic import BaseModel, Field
+
+
+class CompanyResearchResult(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol."
+    )
+
+    company_name: str = Field(
+        description="Company name."
+    )
+
+    sector: str = Field(
+        description="Primary business sector."
+    )
+
+    current_price: float = Field(
+        description="Current stock price."
+    )
+
+    summary: str = Field(
+        description="Concise factual company research summary."
+    )
+
+
+class FinancialResearchResult(BaseModel):
+    ticker: str = Field(
+        description="Stock ticker symbol."
+    )
+
+    revenue: float = Field(
+        description="Company revenue."
+    )
+
+    net_income: float = Field(
+        description="Company net income."
+    )
+
+    profit_margin: float = Field(
+        description="Net income divided by revenue."
+    )
+
+    summary: str = Field(
+        description="Concise factual financial research summary."
+    )
+```
+
+这里暂时不引入：
+
+```text
+EPS
+ROE
+ROIC
+Free Cash Flow
+Debt
+Growth
+```
+
+因为我们这一课的目标不是建立完整 Fundamental Analysis，而是建立**第二个独立 Research Agent**。
+
+---
+
+### 七、Step 2：新增 Financial Provider
+
+目前项目的 Provider 抽象已经建立。
+
+Lesson 5 继续遵循项目的：
+
+> **Mock Provider → Agent Integration**
+
+原则。
+
+交接文档明确要求继续保持：
+
+```text
+Real LLM
++
+Mock Tools
++
+Mock Providers
+```
+
+这种测试方式，而不要现在把重点转移到真实金融 API、认证和网络问题。
+
+修改：
+
+```text
+app/providers/financial.py
+```
+
+在现有内容中增加：
+
+```python
+def get_revenue(ticker: str) -> float:
+    mock_revenue = {
+        "AAPL": 100000.0,
+        "MSFT": 80000.0,
+    }
+
+    try:
+        return mock_revenue[ticker.upper()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported ticker: {ticker}"
+        ) from exc
+
+
+def get_net_income(ticker: str) -> float:
+    mock_net_income = {
+        "AAPL": 25000.0,
+        "MSFT": 22000.0,
+    }
+
+    try:
+        return mock_net_income[ticker.upper()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported ticker: {ticker}"
+        ) from exc
+```
+
+这里的数字仍然只是 Mock Data。
+
+不要把：
+
+```text
+100000
+25000
+```
+
+理解成真实财务数据。
+
+---
+
+### 八、Step 3：新增 Financial Tools
+
+修改：
+
+```text
+app/tools/financial.py
+```
+
+在现有 Company/Price Tools 之后增加：
+
+```python
+from app.providers.financial import (
+    get_net_income as provider_get_net_income,
+    get_revenue as provider_get_revenue,
+)
+```
+
+然后：
+
+```python
+@tool
+def get_revenue(ticker: str) -> float:
+    """Get company revenue for the given stock ticker."""
+    return provider_get_revenue(ticker)
+```
+
+以及：
+
+```python
+@tool
+def get_net_income(ticker: str) -> float:
+    """Get company net income for the given stock ticker."""
+    return provider_get_net_income(ticker)
+```
+
+如果你当前 `financial.py` 已经有统一的 Provider import 结构，则**保持现有结构，只增加这两个 Tool**，不要为了这两个函数重构整个文件。
+
+最终应该有：
+
+```text
+app.tools.financial
+    ├── get_company_info
+    ├── get_stock_price
+    ├── get_revenue
+    └── get_net_income
+```
+
+---
+
+### 九、Step 4：扩展 Agent Tool Sets
+
+Lesson 4 已经建立：
+
+```text
+app/agents/tool_sets.py
+```
+
+现在加入 Financial Tool Set。
+
+完整文件变成：
+
+```python
+from app.tools.financial import (
+    get_company_info,
+    get_net_income,
+    get_revenue,
+    get_stock_price,
+)
+
+
+COMPANY_RESEARCH_TOOLS = [
+    get_company_info,
+    get_stock_price,
+]
+
+
+FINANCIAL_RESEARCH_TOOLS = [
+    get_revenue,
+    get_net_income,
+]
+```
+
+现在终于形成非常清晰的边界：
+
+```text
+COMPANY_RESEARCH_TOOLS
+    ├── get_company_info
+    └── get_stock_price
+
+
+FINANCIAL_RESEARCH_TOOLS
+    ├── get_revenue
+    └── get_net_income
+```
+
+---
+
+### 十、Step 5：创建 Financial Research Agent
+
+新建：
+
+```text
+app/agents/financial_research.py
+```
+
+完整代码：
+
+```python
+from typing import TypedDict
+
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import END, START, StateGraph
+
+from app.agents.models import FinancialResearchResult
+from app.agents.tool_sets import FINANCIAL_RESEARCH_TOOLS
+from app.graph.tool_loop import build_tool_loop_graph
+from app.llm.client import llm
+
+
+class FinancialResearchInputState(TypedDict):
+    ticker: str
+
+
+class FinancialResearchState(TypedDict):
+    ticker: str
+    research_result: FinancialResearchResult | None
+    research_error: str
+
+
+class FinancialResearchOutputState(TypedDict):
+    research_result: FinancialResearchResult | None
+    research_error: str
+
+
+financial_research_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a Financial Research Agent. "
+            "Your responsibility is to research basic financial "
+            "performance for the given stock ticker. "
+            "Use the available tools to obtain revenue and "
+            "net income. "
+            "Calculate profit margin as net income divided by "
+            "revenue. "
+            "Do not perform valuation. "
+            "Do not make an investment recommendation. "
+            "Do not assess investment risk. "
+            "Do not invent financial data.",
+        ),
+        (
+            "human",
+            "Research the financial performance of the following "
+            "company and return a concise financial research result.\n\n"
+            "Ticker: {ticker}",
+        ),
+    ]
+)
+
+
+structured_financial_research_llm = (
+    llm.with_structured_output(
+        FinancialResearchResult
+    )
+)
+
+
+financial_research_tool_loop = build_tool_loop_graph(
+    FINANCIAL_RESEARCH_TOOLS
+)
+
+
+def extract_tool_results(
+    tool_result: dict,
+) -> str:
+
+    tool_messages = [
+        message
+        for message in tool_result["messages"]
+        if message.type == "tool"
+    ]
+
+    return "\n".join(
+        message.content
+        for message in tool_messages
+    )
+
+
+def financial_research_agent(
+    state: FinancialResearchState,
+) -> FinancialResearchState:
+
+    ticker = state["ticker"]
+
+    prompt_value = financial_research_prompt.invoke(
+        {
+            "ticker": ticker,
+        }
+    )
+
+    try:
+        tool_result = financial_research_tool_loop.invoke(
+            {
+                "messages": prompt_value.messages,
+            }
+        )
+
+        research_context = extract_tool_results(
+            tool_result
+        )
+
+        structured_result = (
+            structured_financial_research_llm.invoke(
+                [
+                    *prompt_value.messages,
+                    HumanMessage(
+                        content=(
+                            "Tool results:\n"
+                            f"{research_context}\n\n"
+                            "Using only these tool results, "
+                            "produce the structured financial "
+                            "research result."
+                        )
+                    ),
+                ]
+            )
+        )
+
+    except Exception as exc:
+        return {
+            "research_result": None,
+            "research_error": str(exc),
+        }
+
+    return {
+        "research_result": structured_result,
+        "research_error": "",
+    }
+
+
+def build_financial_research_graph():
+
+    builder = StateGraph(
+        FinancialResearchState,
+        input_schema=FinancialResearchInputState,
+        output_schema=FinancialResearchOutputState,
+    )
+
+    builder.add_node(
+        "financial_research_agent",
+        financial_research_agent,
+    )
+
+    builder.add_edge(
+        START,
+        "financial_research_agent",
+    )
+
+    builder.add_edge(
+        "financial_research_agent",
+        END,
+    )
+
+    return builder.compile()
+
+
+financial_research_graph = (
+    build_financial_research_graph()
+)
+```
+
+---
+
+### 十一、这里出现了一个非常值得注意的重复
+
+现在：
+
+```text
+company_research.py
+```
+
+和：
+
+```text
+financial_research.py
+```
+
+有很多相似代码：
+
+```text
+Prompt
+Tool Loop
+extract_tool_results
+structured output
+State
+Graph builder
+```
+
+**现在不要重构。**
+
+这是刻意保留的。
+
+为什么？
+
+因为我们正在学习：
+
+```text
+两个独立的 Research Agents
+```
+
+如果现在立即抽象成：
+
+```python
+BaseResearchAgent
+ResearchAgentFactory
+GenericResearchGraph
+AgentConfig
+```
+
+我们会把两个概念混在一起：
+
+```text
+Business Responsibility
+```
+
+和：
+
+```text
+Framework Abstraction
+```
+
+目前应该先让你清楚看到：
+
+```text
+Company Agent
+```
+
+和：
+
+```text
+Financial Agent
+```
+
+是两个独立业务组件。
+
+等第三、第四个 Agent 出现后，再判断哪些重复是真正稳定的抽象。
+
+---
+
+### 十二、这里也再次体现 Lesson 4 的价值
+
+Company Agent：
+
+```text
+Company Research Agent
+        ↓
+COMPANY_RESEARCH_TOOLS
+        ↓
+get_company_info
+get_stock_price
+```
+
+Financial Agent：
+
+```text
+Financial Research Agent
+        ↓
+FINANCIAL_RESEARCH_TOOLS
+        ↓
+get_revenue
+get_net_income
+```
+
+因此：
+
+```text
+Financial Research Agent
+```
+
+不会看到：
+
+```text
+get_company_info
+get_stock_price
+```
+
+而：
+
+```text
+Company Research Agent
+```
+
+不会看到：
+
+```text
+get_revenue
+get_net_income
+```
+
+这就是：
+
+> **Business Responsibility → Tool Boundary**
+
+真正落地后的效果。
+
+---
+
+### 十三、不要把两个 Agent 放进 Parent Graph
+
+这是 Lesson 5 最容易犯的错误。
+
+不要现在改成：
+
+```text
+START
+  ↓
+Company Research
+  ↓
+Financial Research
+  ↓
+LLM
+```
+
+也不要：
+
+```text
+START
+  ↓
+Company Research
+  ↓
+Financial Research
+  ↓
+END
+```
+
+因为这已经开始进入：
+
+```text
+Multi-Agent Orchestration
+```
+
+我们现在只需要让：
+
+```text
+Company Research Graph
+```
+
+和：
+
+```text
+Financial Research Graph
+```
+
+分别能够独立运行。
+
+所以目前：
+
+```text
+Parent Graph
+      │
+      └── Company Research Agent
+```
+
+保持不变。
+
+Financial Agent 作为新的独立能力存在：
+
+```text
+Financial Research Graph
+      │
+      └── Financial Research Agent
+```
+
+下一阶段再研究：
+
+```text
+谁决定什么时候调用 Company Agent？
+谁决定什么时候调用 Financial Agent？
+是否并行？
+如何汇总？
+```
+
+那才是 Multi-Agent Orchestration。
+
+---
+
+### 十四、测试 1：Provider
+
+新增：
+
+```text
+tests/test_financial_research_provider.py
+```
+
+```python
+from app.providers.financial import (
+    get_net_income,
+    get_revenue,
+)
+
+
+def test_get_revenue_returns_mock_value():
+    assert get_revenue("AAPL") == 100000.0
+
+
+def test_get_net_income_returns_mock_value():
+    assert get_net_income("AAPL") == 25000.0
+
+
+def test_financial_provider_is_case_insensitive():
+    assert get_revenue("aapl") == 100000.0
+    assert get_net_income("aapl") == 25000.0
+
+
+def test_financial_provider_rejects_unknown_ticker():
+    try:
+        get_revenue("UNKNOWN")
+    except ValueError as exc:
+        assert "UNKNOWN" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected ValueError"
+        )
+```
+
+---
+
+### 十五、测试 2：Financial Tool
+
+新增：
+
+```text
+tests/test_financial_research_tools.py
+```
+
+```python
+from app.tools.financial import (
+    get_net_income,
+    get_revenue,
+)
+
+
+def test_get_revenue_tool_has_expected_name():
+    assert get_revenue.name == "get_revenue"
+
+
+def test_get_net_income_tool_has_expected_name():
+    assert get_net_income.name == "get_net_income"
+
+
+def test_get_revenue_tool_returns_provider_value():
+    result = get_revenue.invoke(
+        {
+            "ticker": "AAPL",
+        }
+    )
+
+    assert result == 100000.0
+
+
+def test_get_net_income_tool_returns_provider_value():
+    result = get_net_income.invoke(
+        {
+            "ticker": "AAPL",
+        }
+    )
+
+    assert result == 25000.0
+```
+
+---
+
+### 十六、测试 3：Financial Agent
+
+新增：
+
+```text
+tests/test_financial_research_agent.py
+```
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.agents.financial_research import (
+    FinancialResearchResult,
+    build_financial_research_graph,
+    financial_research_graph,
+    financial_research_tool_loop,
+)
+
+
+def test_financial_research_result_model():
+    result = FinancialResearchResult(
+        ticker="AAPL",
+        revenue=100000.0,
+        net_income=25000.0,
+        profit_margin=0.25,
+        summary="Apple generated strong net income.",
+    )
+
+    assert result.ticker == "AAPL"
+    assert result.revenue == 100000.0
+    assert result.net_income == 25000.0
+    assert result.profit_margin == 0.25
+
+
+def test_financial_research_graph_is_compiled():
+    assert financial_research_graph is not None
+
+
+def test_build_financial_research_graph():
+    graph = build_financial_research_graph()
+
+    assert graph is not None
+
+
+def test_financial_research_agent_uses_financial_tool_loop():
+    assert financial_research_tool_loop is not None
+
+
+def test_financial_research_agent_maps_tool_result():
+    fake_result = FinancialResearchResult(
+        ticker="AAPL",
+        revenue=100000.0,
+        net_income=25000.0,
+        profit_margin=0.25,
+        summary="Apple generated strong net income.",
+    )
+
+    fake_tool_loop = MagicMock()
+
+    fake_tool_loop.invoke.return_value = {
+        "messages": [],
+    }
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = fake_result
+
+    with patch(
+        "app.agents.financial_research.financial_research_tool_loop",
+        fake_tool_loop,
+    ), patch(
+        "app.agents.financial_research.structured_financial_research_llm",
+        fake_structured_llm,
+    ):
+
+        result = financial_research_graph.invoke(
+            {
+                "ticker": "AAPL",
+            }
+        )
+
+    assert result["research_result"] == fake_result
+    assert result["research_error"] == ""
+
+    fake_tool_loop.invoke.assert_called_once()
+```
+
+这里测试的是：
+
+```text
+Financial Research Agent
+        ↓
+Financial Tool Loop
+        ↓
+Structured Financial Result
+```
+
+---
+
+### 十七、测试 4：两个 Agent 的 Tool Boundary
+
+修改 Lesson 4 的：
+
+```text
+tests/test_agent_tool_boundary.py
+```
+
+增加：
+
+```python
+from app.agents.tool_sets import (
+    COMPANY_RESEARCH_TOOLS,
+    FINANCIAL_RESEARCH_TOOLS,
+)
+```
+
+然后增加：
+
+```python
+def test_financial_research_tool_set_contains_financial_tools():
+    tool_names = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    assert tool_names == {
+        "get_revenue",
+        "get_net_income",
+    }
+
+
+def test_company_and_financial_tool_sets_are_separate():
+    company_tools = {
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    }
+
+    financial_tools = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    assert company_tools.isdisjoint(
+        financial_tools
+    )
+
+
+def test_financial_tool_set_does_not_include_company_tools():
+    tool_names = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    assert "get_company_info" not in tool_names
+    assert "get_stock_price" not in tool_names
+```
+
+这个测试实际上是在验证：
+
+```text
+Company Tool Set ∩ Financial Tool Set = ∅
+```
+
+即：
+
+```text
+Company Tools
+       ∩
+Financial Tools
+       =
+Empty Set
+```
+
+这不是数学炫技，而是在测试一个真正的架构约束：
+
+> **两个 Agent 当前拥有独立的 Tool Capability Boundary。**
+
+---
+
+### 十八、为什么 Lesson 5 暂时不修改 GraphState
+
+你可能会注意到：
+
+```text
+GraphState
+```
+
+目前没有：
+
+```python
+financial_research_result
+```
+
+这是**有意的**。
+
+因为如果现在直接加入：
+
+```python
+financial_research_result: FinancialResearchResult | None
+```
+
+然后又把 Financial Agent 接进 Parent Graph，就会同时引入：
+
+```text
+第二 Agent
++
+Parent Graph Integration
++
+State Integration
++
+Orchestration
+```
+
+一次学习太多概念。
+
+Lesson 3 已经学习过：
+
+```text
+Agent Result → Parent State
+```
+
+Lesson 5 要学习的是：
+
+```text
+第二个独立 Research Agent
+```
+
+因此现在保持：
+
+```text
+Financial Agent
+      ↓
+FinancialResearchResult
+      ↓
+END
+```
+
+就足够。
+
+---
+
+### 十九、现在的整体架构
+
+完成 Lesson 5 后：
+
+```text
+                         Parent Research Graph
+                                  │
+                                  ▼
+                        Company Research Agent
+                                  │
+                         Company Tool Set
+                           /            \
+                          /              \
+             get_company_info       get_stock_price
+```
+
+同时独立存在：
+
+```text
+                     Financial Research Graph
+                              │
+                              ▼
+                    Financial Research Agent
+                              │
+                     Financial Tool Set
+                         /          \
+                        /            \
+               get_revenue      get_net_income
+```
+
+二者现在：
+
+```text
+         Company Agent             Financial Agent
+               │                         │
+               ▼                         ▼
+        Company Result            Financial Result
+```
+
+**没有 Agent-to-Agent communication。**
+
+**没有 Supervisor。**
+
+**没有 Parallel Execution。**
+
+这正是我们希望 Lesson 5 达到的状态。
+
+---
+
+### 二十、测试运行顺序
+
+不要跑全部历史测试。
+
+先跑本课 Provider：
+
+```bash
+pytest tests/test_financial_research_provider.py -v
+```
+
+然后 Tool：
+
+```bash
+pytest tests/test_financial_research_tools.py -v
+```
+
+然后 Agent：
+
+```bash
+pytest tests/test_financial_research_agent.py -v
+```
+
+然后 Tool Boundary：
+
+```bash
+pytest tests/test_agent_tool_boundary.py -v
+```
+
+最后做一个 Lesson 4 回归：
+
+```bash
+pytest tests/test_company_research_agent.py -v
+```
+
+---
+
+### 二十一、Lesson 5 Acceptance Criteria
+
+#### Financial Domain
+
+* [ ] `FinancialResearchResult` 存在
+* [ ] 包含 `ticker`
+* [ ] 包含 `revenue`
+* [ ] 包含 `net_income`
+* [ ] 包含 `profit_margin`
+* [ ] 包含 `summary`
+
+#### Financial Tools
+
+* [ ] `get_revenue` 存在
+* [ ] `get_net_income` 存在
+* [ ] 两个 Tool 都通过 Provider 获取数据
+* [ ] Provider 仍然是 Mock Provider
+* [ ] 不引入真实金融 API
+
+#### Financial Agent
+
+* [ ] `FinancialResearchAgent` 独立存在
+* [ ] 有自己的 Input State
+* [ ] 有自己的 Internal State
+* [ ] 有自己的 Output State
+* [ ] 使用 `FINANCIAL_RESEARCH_TOOLS`
+* [ ] 使用自己的 Tool Loop
+* [ ] 可以返回 `FinancialResearchResult`
+
+#### Agent Boundary
+
+* [ ] Company Tool Set 与 Financial Tool Set 独立
+* [ ] Financial Agent 不使用 Company Tools
+* [ ] Company Agent 不使用 Financial Tools
+
+#### Orchestration Boundary
+
+* [ ] Parent Graph 不调用 Financial Agent
+* [ ] 没有 Supervisor
+* [ ] 没有 Parallel Agent
+* [ ] 没有 Agent-to-Agent communication
+
+---
+
+### 二十二、Lesson 5 最重要的理解
+
+现在你应该看到 Phase 4 的核心结构正在形成：
+
+```text
+                    Research Agents
+                         │
+          ┌──────────────┴──────────────┐
+          │                             │
+          ▼                             ▼
+ Company Research               Financial Research
+      Agent                           Agent
+          │                             │
+          ▼                             ▼
+ Company Tool Set              Financial Tool Set
+          │                             │
+          ▼                             ▼
+ Company Result                Financial Result
+```
+
+这和 Phase 3 的根本区别是：
+
+```text
+Phase 3
+```
+
+关注：
+
+> **LLM 如何调用 Tool？**
+
+而 Phase 4 现在关注：
+
+> **一个具有明确业务职责的 Agent，应该拥有哪些能力，并产生什么业务结果？**
+
+这正是交接文档定义的 Phase 4 核心变化：从 `LLM → Tool → Provider` 进入 `Research Agent → LLM → Tools → Provider → Research Result`。
+
+而 Lesson 5 完成之后，下一步才真正有条件讨论：
+
+```text
+Company Agent
+      +
+Financial Agent
+      +
+Market Agent
+      +
+Industry Agent
+      ↓
+如何协调？
+```
+
+这部分再进入后续 Multi-Agent Orchestration，而不是在本课提前实现。

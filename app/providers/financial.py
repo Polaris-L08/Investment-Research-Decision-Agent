@@ -71,3 +71,45 @@ class MockCompanyInfoProvider(CompanyInfoProvider):
             )
 
         return self.mock_companies[ticker]
+
+
+class RevenueInfoProvider(ABC):
+    @abstractmethod
+    def get_revenue(self, ticker: str) -> float:
+        raise NotImplementedError
+
+
+class MockRevenueInfoProvider(RevenueInfoProvider):
+    def __init__(self):
+        self.mock_revenue = {
+            "AAPL": 100000.0,
+            "MSFT": 80000.0,
+        }
+
+    def get_revenue(self, ticker: str) -> float:
+        if ticker not in self.mock_revenue:
+            raise ValueError(
+                f"Revenue not found for ticker: {ticker}"
+            )
+        return self.mock_revenue[ticker]
+
+
+class NetIncomeInfoProvider(ABC):
+    @abstractmethod
+    def get_net_income(self, ticker: str) -> float:
+        raise NotImplementedError
+
+
+class MockNetIncomeInfoProvider(NetIncomeInfoProvider):
+    def __init__(self):
+        self.mock_net_income = {
+            "AAPL": 25000.0,
+            "MSFT": 22000.0,
+        }
+
+    def get_net_income(self, ticker: str) -> float:
+        if ticker not in self.mock_net_income:
+            raise ValueError(
+                f"Net income not found for ticker: {ticker}"
+            )
+        return self.mock_net_income[ticker]

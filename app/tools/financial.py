@@ -2,7 +2,8 @@ from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 
 from app.providers.exceptions import TransientProviderError
-from app.providers.financial import MockStockPriceProvider, MockCompanyInfoProvider
+from app.providers.financial import MockStockPriceProvider, MockCompanyInfoProvider, RevenueInfoProvider, \
+    NetIncomeInfoProvider
 
 stock_price_provider = MockStockPriceProvider()
 company_info_provider = MockCompanyInfoProvider()
@@ -42,6 +43,37 @@ def get_company_info(ticker: str) -> dict:
 
     try:
         return company_info_provider.get_company_info(ticker)
+    except TransientProviderError as exc:
+        raise TransientToolError(
+            str(exc)
+        ) from exc
+
+class RevenueInput(BaseModel):
+    ticker: str = Field(
+        description="Company revenue symbol, for example AAPL or MSFT."
+    )
+
+@tool(args_schema=RevenueInput)
+def get_revenue(ticker: str) -> float:
+    """Get company revenue for the given stock ticker."""
+    try:
+        return RevenueInfoProvider.get_revenue(ticker)
+    except TransientProviderError as exc:
+        raise TransientToolError(
+            str(exc)
+        ) from exc
+
+
+class NetIncomeInput(BaseModel):
+    ticker: str = Field(
+        description="Company net incoming for the given stock ticker."
+    )
+
+@tool(args_schema=NetIncomeInput)
+def get_net_income(ticker: str) -> float:
+    """Get company net income for the given stock ticker."""
+    try:
+        return NetIncomeInfoProvider.get_net_income(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(
             str(exc)
