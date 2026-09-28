@@ -1651,3 +1651,169 @@ Output State
 Parallel 要等 Shared State 稳定之后，再在 Lesson 5 引入。
 
 ---
+
+
+## Phase 5 — Lesson 3：Multi-Agent Shared State
+
+Lesson 3 已完成实现，核心变化是：
+
+```text
+Lesson 2
+
+Router
+  ↓
+research_result
+```
+
+变为：
+
+```text
+Lesson 3
+
+Router
+  ↓
+Shared Research State
+  ├── company_research
+  ├── financial_research
+  ├── market_research
+  └── industry_macro_research
+```
+
+### 本课新增
+
+```text
+app/agents/research_state.py
+tests/test_research_state.py
+```
+
+`ResearchState` 当前定义了：
+
+```python
+class ResearchState(TypedDict, total=False):
+    ticker: str
+    research_plan: ResearchPlan
+    next_research_area: ResearchArea
+
+    company_research: CompanyResearchResult | None
+    financial_research: FinancialResearchResult | None
+    market_research: MarketResearchResult | None
+    industry_macro_research: IndustryMacroResearchResult | None
+
+    research_errors: dict[str, str]
+```
+
+### Router 的变化
+
+例如 Financial Agent 现在不再：
+
+```python
+"research_result": result["research_result"]
+```
+
+而是：
+
+```python
+"financial_research": result["research_result"]
+```
+
+因此不同 Agent 可以把结果放入不同的 State 字段，而不会互相覆盖。
+
+同时保留：
+
+```text
+Agent Failure
+    ↓
+research_errors
+```
+
+的显式错误信息。
+
+---
+
+### 本课没有做的事情
+
+严格保持 Lesson 边界：
+
+* ❌ 没有 Sequential Orchestration
+* ❌ 没有 Parallel Execution
+* ❌ 没有 Fan-out
+* ❌ 没有 Fan-in
+* ❌ 没有 Reducer
+* ❌ 没有 Supervisor
+* ❌ 没有修改 Phase 4 Research Agent 的内部结构
+
+特别是 **Reducer 不在本课引入**。
+
+现在仍然只有一个 Agent 分支执行，因此 `research_errors` 使用普通 `dict` 即可。到了 Lesson 5 真正进入并行执行时，再解决多个分支如何安全合并 State 的问题。
+
+---
+
+### 验证
+
+当前新增代码已经通过：
+
+```bash
+python -m compileall -q app tests
+```
+
+你本地已经验证 Lesson 2：
+
+```text
+tests/test_research_router.py → PASS
+```
+
+Lesson 3 请运行：
+
+```bash
+pytest tests/test_research_state.py tests/test_research_router.py -q
+```
+
+再运行：
+
+```bash
+pytest tests/test_models.py tests/test_research_planner.py tests/test_research_router.py tests/test_research_state.py -q
+```
+
+---
+
+## Lesson 3 的核心理解
+
+现在我们正式拥有了：
+
+```text
+                    ┌── company_research
+                    │
+ResearchPlan → Router ── financial_research
+                    │
+                    ├── market_research
+                    │
+                    └── industry_macro_research
+                             
+                              ↓
+
+                       ResearchState
+```
+
+这意味着：
+
+> **State 开始成为多个 Agent 之间真正的共享边界。**
+
+Agent 仍然不知道其他 Agent 的存在；它只负责产生自己的结果，而 Orchestrator/Graph 负责把结果放入共享 State。
+
+下一课才会利用这个 Shared State 构建：
+
+```text
+Planner
+   ↓
+Company Agent
+   ↓
+Financial Agent
+   ↓
+Market Agent
+   ↓
+Industry/Macro Agent
+   ↓
+Research State
+```
+
+也就是 **Lesson 4 — Sequential Multi-Agent Orchestration**。
