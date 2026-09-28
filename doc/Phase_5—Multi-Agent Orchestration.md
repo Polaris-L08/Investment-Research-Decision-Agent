@@ -1653,7 +1653,7 @@ Parallel 要等 Shared State 稳定之后，再在 Lesson 5 引入。
 ---
 
 
-## Phase 5 — Lesson 3：Multi-Agent Shared State
+## Lesson 3：Multi-Agent Shared State
 
 Lesson 3 已完成实现，核心变化是：
 
@@ -1776,7 +1776,7 @@ pytest tests/test_models.py tests/test_research_planner.py tests/test_research_r
 
 ---
 
-## Lesson 3 的核心理解
+### Lesson 3 的核心理解
 
 现在我们正式拥有了：
 
