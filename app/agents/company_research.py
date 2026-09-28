@@ -5,7 +5,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.models import CompanyResearchResult
-from app.graph.tool_loop import tool_loop_graph
+from app.agents.tool_sets import COMPANY_RESEARCH_TOOLS
+from app.graph.tool_loop import build_tool_loop_graph
 from app.llm.client import llm
 
 
@@ -52,6 +53,8 @@ structured_company_research_llm = (
     llm.with_structured_output(CompanyResearchResult)
 )
 
+company_research_tool_loop = build_tool_loop_graph(COMPANY_RESEARCH_TOOLS)
+
 
 def extract_tool_results(tool_result: dict) -> str:
     tool_messages = [
@@ -79,7 +82,7 @@ def company_research_agent(
     )
 
     try:
-        tool_result = tool_loop_graph.invoke(
+        tool_result = company_research_tool_loop.invoke(
             {
                 "messages": prompt_value.messages,
             }

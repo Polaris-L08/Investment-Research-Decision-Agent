@@ -3181,3 +3181,1231 @@ Investment Research Graph
 llm和CompanyResearchResult独立声明，避免循环依赖
 
 ---
+
+
+## Lesson 4 — Agent-Specific Tool Boundary
+
+这一课我们解决一个非常关键的问题：
+
+> **一个 Research Agent 是否应该看到系统里的所有 Tools？**
+
+答案在架构上应该是：**不应该。**
+
+Company Research Agent 的职责是：
+
+```text
+Company Research
+    ↓
+company information
+current price
+basic company facts
+```
+
+因此它应该只能使用完成这个职责所需要的 Tools，而不是整个系统的 Tool Registry。
+
+这会是 Phase 4 从“一个 Agent 能运行”走向“多个 Agent 可以安全扩展”的第一个关键步骤。
+
+---
+
+### 1. 为什么现在学习这个
+
+目前我们的结构实际上是：
+
+```text
+Company Research Agent
+        ↓
+tool_loop_graph
+        ↓
+TOOLS
+        ↓
+所有 Tools
+```
+
+而 `tool_loop.py` 中：
+
+```python
+llm_with_tools = llm.bind_tools(TOOLS)
+```
+
+这里的 `TOOLS` 是全局 Registry。
+
+随着项目继续发展，未来很可能出现：
+
+```text
+Company Research Agent
+    ├── get_company_info
+    └── get_stock_price
+
+Financial Research Agent
+    ├── get_income_statement
+    ├── get_balance_sheet
+    └── get_cash_flow
+
+Market Research Agent
+    ├── get_market_index
+    └── get_market_data
+
+Industry Research Agent
+    └── ...
+```
+
+如果所有 Agent 都看到：
+
+```text
+全部 Tools
+```
+
+就会出现职责泄漏：
+
+```text
+Company Research Agent
+        ↓
+看到 valuation tool
+        ↓
+看到 risk tool
+        ↓
+看到 market tool
+        ↓
+看到 financial tool
+```
+
+这会让 Agent 的 prompt 中：
+
+```text
+Do not perform valuation.
+```
+
+变成一种**软约束**。
+
+更好的设计是：
+
+```text
+Company Research Agent
+        ↓
+只能看到 Company Research Tools
+```
+
+也就是：
+
+> **职责边界不仅由 Prompt 定义，还应该由 Tool Availability 定义。**
+
+---
+
+### 2. Lesson 4 的目标
+
+本课完成：
+
+```text
+Company Research Agent
+        ↓
+Company Research Tool Set
+        ↓
+Tool Loop
+        ↓
+CompanyResearchResult
+```
+
+具体来说：
+
+```text
+Company Research Agent
+       │
+       ├── get_company_info
+       │
+       └── get_stock_price
+```
+
+而不是：
+
+```text
+Company Research Agent
+       │
+       └── ALL TOOLS
+```
+
+---
+
+### 3. Lesson 4 的 Graph Topology
+
+这一课 Parent Graph 不需要改变。
+
+仍然是：
+
+```text
+START
+  ↓
+initialize_state
+  ↓
+company_research
+  ↓
+llm_node
+  ↓
+create_research_plan
+  ↓
+investment_decision_node
+  ↓
+prepare_output
+  ↓
+END
+```
+
+变化发生在 Company Research Agent 内部。
+
+之前：
+
+```text
+Company Research Agent
+        ↓
+tool_loop_graph
+        ↓
+ALL TOOLS
+```
+
+现在：
+
+```text
+Company Research Agent
+        ↓
+Company Research Tool Loop
+        ↓
+Company Research Tools
+        ├── get_company_info
+        └── get_stock_price
+```
+
+完整结构：
+
+```text
+Parent Research Graph
+        │
+        ▼
+company_research
+        │
+        ▼
+Company Research Graph
+        │
+        ▼
+Company Research Agent
+        │
+        ▼
+Company Research Tool Loop
+        │
+        ├───────────────┐
+        ▼               ▼
+get_company_info   get_stock_price
+        │               │
+        └───────┬───────┘
+                ▼
+             Provider
+                │
+                ▼
+     CompanyResearchResult
+```
+
+---
+
+### 4. State Design
+
+这一课**不新增 Parent Graph State 字段**。
+
+这是有意的。
+
+Lesson 3 已经完成：
+
+```text
+Child Graph
+    ↓
+CompanyResearchResult
+    ↓
+Parent Graph State
+```
+
+Lesson 4 只改变：
+
+```text
+Agent
+    ↓
+Tool Availability
+```
+
+所以 State 保持：
+
+```python
+company_research_result: CompanyResearchResult | None
+```
+
+不变。
+
+这是一个重要的工程习惯：
+
+> **如果 Lesson 的目标不需要 State 变化，就不要为了“有代码改动”而修改 State。**
+
+---
+
+### 5. 先检查当前 Tool Registry
+
+当前 Phase 3 已经有：
+
+```text
+app/tools/registry.py
+```
+
+其职责是：
+
+```text
+系统级 Tool Registry
+```
+
+我们不删除它。
+
+它仍然应该存在：
+
+```text
+TOOLS
+```
+
+因为未来可能有：
+
+```text
+ALL_TOOLS
+```
+
+但是 Agent 不应该直接使用它。
+
+---
+
+### 6. 新增 Agent Tool Registry
+
+新建：
+
+```text
+app/agents/tool_sets.py
+```
+
+完整代码：
+
+```python
+from app.tools.financial import (
+    get_company_info,
+    get_stock_price,
+)
+
+
+COMPANY_RESEARCH_TOOLS = [
+    get_company_info,
+    get_stock_price,
+]
+```
+
+这里的意义非常明确：
+
+```text
+System Tool Registry
+        ↓
+所有系统能力
+
+Agent Tool Set
+        ↓
+某个 Agent 被允许使用的能力
+```
+
+因此：
+
+```python
+COMPANY_RESEARCH_TOOLS
+```
+
+不是新的 Tool。
+
+它只是：
+
+> **Tool Capability Boundary**
+
+---
+
+### 7. 修改 `app/graph/tool_loop.py`
+
+这里需要做一个重要改变。
+
+之前：
+
+```python
+llm_with_tools = llm.bind_tools(TOOLS)
+tool_node = ToolNode(TOOLS)
+```
+
+这意味着 Tool Loop 和具体 Tool Set 强绑定。
+
+Lesson 4 开始，我们把 Tool Loop 变成：
+
+> **可复用的 Tool Loop Factory**
+
+也就是：
+
+```text
+build_tool_loop_graph(tools)
+```
+
+给它什么 Tools，它就构建一个使用这些 Tools 的 Tool Loop。
+
+---
+
+#### 完整 `app/graph/tool_loop.py`
+
+```python
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import BaseMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+
+from app.llm.client import llm
+
+
+class ToolLoopState(TypedDict):
+    messages: Annotated[
+        list[BaseMessage],
+        add_messages,
+    ]
+
+
+def build_tool_loop_graph(tools):
+    llm_with_tools = llm.bind_tools(tools)
+
+    tool_node = ToolNode(tools)
+
+    def tool_loop_llm_node(
+        state: ToolLoopState,
+    ) -> dict:
+
+        response = llm_with_tools.invoke(
+            state["messages"]
+        )
+
+        return {
+            "messages": [response]
+        }
+
+    def route_after_llm(
+        state: ToolLoopState,
+    ) -> str:
+
+        last_message = state["messages"][-1]
+
+        if last_message.tool_calls:
+            return "tools"
+
+        return "end"
+
+    builder = StateGraph(ToolLoopState)
+
+    builder.add_node(
+        "llm",
+        tool_loop_llm_node,
+    )
+
+    builder.add_node(
+        "tools",
+        tool_node,
+    )
+
+    builder.add_edge(
+        START,
+        "llm",
+    )
+
+    builder.add_conditional_edges(
+        "llm",
+        route_after_llm,
+        {
+            "tools": "tools",
+            "end": END,
+        },
+    )
+
+    builder.add_edge(
+        "tools",
+        "llm",
+    )
+
+    return builder.compile()
+```
+
+注意这里我们**没有**再创建：
+
+```python
+tool_loop_graph = ...
+```
+
+因为现在 Tool Loop 不再只有一个版本。
+
+它可以有：
+
+```text
+Company Research Tool Loop
+Financial Research Tool Loop
+Market Research Tool Loop
+```
+
+等等。
+
+---
+
+### 8. 修改 `company_research.py`
+
+现在 Company Research Agent 不再使用一个默认 Tool Loop。
+
+它明确创建自己的 Tool Loop：
+
+```text
+Company Research Tools
+        ↓
+build_tool_loop_graph()
+        ↓
+Company Research Tool Loop
+```
+
+---
+
+#### 完整 `app/agents/company_research.py`
+
+```python
+from typing import TypedDict
+
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import END, START, StateGraph
+
+from app.agents.models import CompanyResearchResult
+from app.agents.tool_sets import COMPANY_RESEARCH_TOOLS
+from app.graph.tool_loop import build_tool_loop_graph
+from app.llm.client import llm
+
+
+class CompanyResearchInputState(TypedDict):
+    ticker: str
+
+
+class CompanyResearchState(TypedDict):
+    ticker: str
+    research_result: CompanyResearchResult | None
+    research_error: str
+
+
+class CompanyResearchOutputState(TypedDict):
+    research_result: CompanyResearchResult | None
+    research_error: str
+
+
+company_research_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a Company Research Agent. "
+            "Your responsibility is to research basic company "
+            "information for the given stock ticker. "
+            "Use the available tools to obtain company name, "
+            "sector, and current stock price. "
+            "Do not perform valuation. "
+            "Do not make an investment recommendation. "
+            "Do not assess investment risk. "
+            "Do not invent financial data.",
+        ),
+        (
+            "human",
+            "Research the following company and return a concise "
+            "company research result.\n\n"
+            "Ticker: {ticker}",
+        ),
+    ]
+)
+
+
+structured_company_research_llm = (
+    llm.with_structured_output(
+        CompanyResearchResult
+    )
+)
+
+
+company_research_tool_loop = build_tool_loop_graph(
+    COMPANY_RESEARCH_TOOLS
+)
+
+
+def extract_tool_results(
+    tool_result: dict,
+) -> str:
+
+    tool_messages = [
+        message
+        for message in tool_result["messages"]
+        if message.type == "tool"
+    ]
+
+    return "\n".join(
+        message.content
+        for message in tool_messages
+    )
+
+
+def company_research_agent(
+    state: CompanyResearchState,
+) -> CompanyResearchState:
+
+    ticker = state["ticker"]
+
+    prompt_value = company_research_prompt.invoke(
+        {
+            "ticker": ticker,
+        }
+    )
+
+    try:
+        tool_result = company_research_tool_loop.invoke(
+            {
+                "messages": prompt_value.messages,
+            }
+        )
+
+        research_context = extract_tool_results(
+            tool_result
+        )
+
+        structured_result = (
+            structured_company_research_llm.invoke(
+                [
+                    *prompt_value.messages,
+                    HumanMessage(
+                        content=(
+                            "Tool results:\n"
+                            f"{research_context}\n\n"
+                            "Using only these tool results, "
+                            "produce the structured company "
+                            "research result."
+                        )
+                    ),
+                ]
+            )
+        )
+
+    except Exception as exc:
+        return {
+            "research_result": None,
+            "research_error": str(exc),
+        }
+
+    return {
+        "research_result": structured_result,
+        "research_error": "",
+    }
+
+
+def build_company_research_graph():
+
+    builder = StateGraph(
+        CompanyResearchState,
+        input_schema=CompanyResearchInputState,
+        output_schema=CompanyResearchOutputState,
+    )
+
+    builder.add_node(
+        "company_research_agent",
+        company_research_agent,
+    )
+
+    builder.add_edge(
+        START,
+        "company_research_agent",
+    )
+
+    builder.add_edge(
+        "company_research_agent",
+        END,
+    )
+
+    return builder.compile()
+
+
+company_research_graph = (
+    build_company_research_graph()
+)
+```
+
+---
+
+### 9. 一个重要的架构变化
+
+之前：
+
+```text
+company_research.py
+       ↓
+tool_loop_graph
+       ↓
+TOOLS
+```
+
+现在：
+
+```text
+company_research.py
+       ↓
+COMPANY_RESEARCH_TOOLS
+       ↓
+build_tool_loop_graph()
+       ↓
+company_research_tool_loop
+```
+
+因此 Agent 自己声明：
+
+> “我需要哪些工具。”
+
+而不是 Tool Loop 决定：
+
+> “所有 Agent 都可以使用哪些工具。”
+
+这两者的职责完全不同。
+
+---
+
+### 10. 为什么不直接修改 `registry.py`
+
+这是一个很重要的问题。
+
+我们当然可以写：
+
+```python
+COMPANY_RESEARCH_TOOLS = [
+    ...
+]
+```
+
+放进：
+
+```text
+app/tools/registry.py
+```
+
+但是现在不这样做。
+
+因为：
+
+```text
+app/tools/registry.py
+```
+
+表达的是：
+
+> **系统有哪些 Tools。**
+
+而：
+
+```text
+app/agents/tool_sets.py
+```
+
+表达的是：
+
+> **某个 Agent 被授权使用哪些 Tools。**
+
+这是两个不同的概念。
+
+最终可能形成：
+
+```text
+tools/
+    registry.py
+        ↓
+    ALL_TOOLS
+
+agents/
+    tool_sets.py
+        ↓
+    COMPANY_RESEARCH_TOOLS
+    FINANCIAL_RESEARCH_TOOLS
+    MARKET_RESEARCH_TOOLS
+```
+
+这为 Phase 4 后面的多个 Research Agents 留出了自然扩展空间。
+
+---
+
+### 11. 测试设计
+
+这一课测试的重点不是再次测试：
+
+```text
+Tool 能不能调用 Provider
+```
+
+Phase 3 已经完成这个学习目标。
+
+Lesson 4 要测试：
+
+> **Company Research Agent 是否真的被限制在自己的 Tool Set 中。**
+
+所以新增：
+
+```text
+tests/test_agent_tool_boundary.py
+```
+
+---
+
+#### 完整测试代码
+
+```python
+from unittest.mock import patch
+
+from app.agents.company_research import (
+    company_research_tool_loop,
+)
+from app.agents.tool_sets import (
+    COMPANY_RESEARCH_TOOLS,
+)
+from app.graph.tool_loop import (
+    build_tool_loop_graph,
+)
+
+
+def test_company_research_tool_set_contains_company_tools():
+    tool_names = {
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    }
+
+    assert tool_names == {
+        "get_company_info",
+        "get_stock_price",
+    }
+
+
+def test_company_research_tool_loop_is_compiled():
+    assert company_research_tool_loop is not None
+
+
+def test_build_tool_loop_graph_accepts_custom_tool_set():
+    graph = build_tool_loop_graph(
+        COMPANY_RESEARCH_TOOLS
+    )
+
+    assert graph is not None
+
+
+def test_company_research_tool_loop_contains_only_allowed_tools():
+    graph = company_research_tool_loop
+
+    graph_nodes = graph.get_graph().nodes
+
+    assert "llm" in graph_nodes
+    assert "tools" in graph_nodes
+
+
+def test_company_research_tool_set_does_not_include_unrelated_tools():
+    tool_names = {
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    }
+
+    assert "get_stock_price" in tool_names
+    assert "get_company_info" in tool_names
+
+    assert "get_income_statement" not in tool_names
+    assert "get_balance_sheet" not in tool_names
+```
+
+---
+
+### 12. 这里为什么没有 Mock LLM
+
+因为这组测试主要验证：
+
+```text
+Tool Set
+    ↓
+Tool Loop Construction
+```
+
+而不是：
+
+```text
+LLM
+    ↓
+Tool Call
+```
+
+Phase 3 已经覆盖后者。
+
+我们应该避免每一个 Lesson 都重新测试之前已经验证过的能力。
+
+---
+
+### 13. 再增加一个更重要的测试
+
+我们还要验证：
+
+> Company Research Agent 使用的确实是自己的 Tool Loop，而不是旧的 global Tool Loop。
+
+增加：
+
+```python
+def test_company_research_agent_uses_company_research_tool_loop():
+    from app.agents import company_research
+
+    assert (
+        company_research.company_research_tool_loop
+        is company_research_tool_loop
+    )
+```
+
+不过这个测试实际上比较弱，因为只是验证模块对象引用。
+
+更有价值的是直接检查构建时传入的 Tool Set。
+
+因此我更推荐下面这个测试：
+
+```python
+def test_company_research_tool_loop_uses_expected_tool_set():
+    tool_names = {
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    }
+
+    assert set(
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    ) == tool_names
+```
+
+这其实还是比较弱。
+
+因此这里需要明确一个测试原则：
+
+> **不要为了测试而制造没有业务价值的测试。**
+
+前面的四个测试已经足够证明 Lesson 4 的核心概念。
+
+---
+
+### 14. 需要修改的旧测试
+
+因为 Lesson 2 时：
+
+```python
+from app.graph.tool_loop import tool_loop_graph
+```
+
+是合法的。
+
+Lesson 4 之后：
+
+```text
+tool_loop_graph
+```
+
+不再是模块级单例。
+
+因此，如果旧测试里有：
+
+```python
+from app.graph.tool_loop import tool_loop_graph
+```
+
+必须改成：
+
+```python
+from app.graph.tool_loop import build_tool_loop_graph
+```
+
+然后：
+
+```python
+graph = build_tool_loop_graph(
+    TOOLS
+)
+```
+
+注意这里需要导入：
+
+```python
+from app.tools.registry import TOOLS
+```
+
+这是因为旧测试的目标仍然是：
+
+> 用全部 Tools 测试 Tool Loop。
+
+而不是 Company Research Agent。
+
+---
+
+### 15. `test_tool_calling_loop.py` 的调整原则
+
+如果当前测试中存在：
+
+```python
+tool_loop_graph.invoke(...)
+```
+
+修改成：
+
+```python
+tool_loop_graph = build_tool_loop_graph(
+    TOOLS
+)
+
+tool_loop_graph.invoke(...)
+```
+
+或者更简洁：
+
+```python
+graph = build_tool_loop_graph(TOOLS)
+
+graph.invoke(...)
+```
+
+这里**不要修改测试的业务场景**。
+
+它仍然测试 Phase 3：
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+Tool Loop
+```
+
+只是 Tool Loop 从：
+
+```text
+Singleton
+```
+
+变成：
+
+```text
+Factory-created graph
+```
+
+---
+
+### 16. 这次修改之后的最终架构
+
+现在：
+
+```text
+app/
+│
+├── agents/
+│   ├── models.py
+│   ├── tool_sets.py
+│   └── company_research.py
+│
+├── graph/
+│   ├── graph.py
+│   ├── models.py
+│   ├── state.py
+│   ├── tool_loop.py
+│   └── nodes/
+│       └── tool_node.py
+│
+├── llm/
+│   ├── __init__.py
+│   └── client.py
+│
+├── tools/
+│   ├── financial.py
+│   └── registry.py
+│
+└── providers/
+    ├── financial.py
+    └── exceptions.py
+```
+
+逻辑关系：
+
+```text
+                         LLM Client
+                            │
+              ┌─────────────┴─────────────┐
+              │                           │
+           Graph                        Agent
+              │                           │
+              │                  Company Research
+              │                           │
+              │                    Tool Set
+              │                           │
+              │                           ▼
+              │                    Tool Loop Factory
+              │                           │
+              │                           ▼
+              │                         Tools
+              │                           │
+              │                           ▼
+              │                       Providers
+              │
+              ▼
+        Parent State
+```
+
+---
+
+### 17. Lesson 4 的核心思想
+
+到现在为止，我们已经完成了三个不同层次：
+
+#### Lesson 1
+
+```text
+Agent
+```
+
+第一次出现。
+
+#### Lesson 2
+
+```text
+Agent
+ ↓
+Compiled Tool Loop
+```
+
+把 Agent 内部执行结构固定下来。
+
+#### Lesson 3
+
+```text
+Parent Graph
+ ↓
+Agent
+ ↓
+Result
+ ↓
+Parent State
+```
+
+让 Agent 真正成为整个 Application Graph 的业务组件。
+
+#### Lesson 4
+
+现在进一步：
+
+```text
+Agent
+ ↓
+Agent-specific Tool Set
+ ↓
+Tool Loop
+```
+
+于是：
+
+> **Agent 的 Business Responsibility 开始通过 Tool Boundary 被真正落实。**
+
+这非常重要，因为到了后面的：
+
+```text
+Financial Research Agent
+Market Research Agent
+Industry Research Agent
+```
+
+我们就可以自然得到：
+
+```text
+Company Agent
+    ↓
+Company Tools
+
+Financial Agent
+    ↓
+Financial Tools
+
+Market Agent
+    ↓
+Market Tools
+```
+
+而不是：
+
+```text
+所有 Agent
+    ↓
+所有 Tools
+```
+
+---
+
+### 18. 本课 Acceptance Criteria
+
+#### Architecture
+
+* [ ] `build_tool_loop_graph(tools)` 可以接受任意 Tool Set
+* [ ] `tool_loop.py` 不再依赖全局 `TOOLS`
+* [ ] `Company Research Agent` 有自己的 Tool Set
+* [ ] `COMPANY_RESEARCH_TOOLS` 包含 `get_company_info`
+* [ ] `COMPANY_RESEARCH_TOOLS` 包含 `get_stock_price`
+* [ ] Company Research Agent 不直接使用全局 `TOOLS`
+
+#### Graph
+
+* [ ] Parent Graph topology 不发生变化
+* [ ] Company Research Graph topology 不发生变化
+* [ ] Agent 内部 Tool Loop 改为 Agent-specific Tool Loop
+
+#### Testing
+
+运行：
+
+```bash
+pytest tests/test_agent_tool_boundary.py -v
+```
+
+然后：
+
+```bash
+pytest tests/test_company_research_agent.py -v
+```
+
+然后：
+
+```bash
+pytest tests/test_company_research_parent_graph.py -v
+```
+
+最后运行受影响的 Phase 3 Tool Loop 测试：
+
+```bash
+pytest tests/test_tool_calling_loop.py -v
+```
+
+---
+
+### Lesson 4 完成后的关键理解
+
+你现在应该能够清楚区分：
+
+```text
+Tool Registry
+```
+
+和：
+
+```text
+Agent Tool Set
+```
+
+前者回答：
+
+> **系统有什么能力？**
+
+后者回答：
+
+> **这个 Agent 被允许使用哪些能力？**
+
+这是后面进入 **多个 Research Agents** 前必须建立的边界。
