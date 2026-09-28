@@ -43,3 +43,10 @@ class FinancialResearchResult(BaseModel):
     summary: str = Field(
         description="Concise factual financial research summary."
     )
+
+
+class MarketResearchResult(BaseModel):
+    ticker: str
+    market_index: str
+    market_return: float
+    summary: str

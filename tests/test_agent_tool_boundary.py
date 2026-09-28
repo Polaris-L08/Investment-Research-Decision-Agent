@@ -110,3 +110,43 @@ def test_financial_tool_set_does_not_include_company_tools():
 
     assert "get_company_info" not in tool_names
     assert "get_stock_price" not in tool_names
+
+
+from app.agents.tool_sets import (
+    COMPANY_RESEARCH_TOOLS,
+    FINANCIAL_RESEARCH_TOOLS,
+    MARKET_RESEARCH_TOOLS,
+)
+
+
+def test_market_research_tool_boundary():
+    tool_names = {
+        tool.name
+        for tool in MARKET_RESEARCH_TOOLS
+    }
+
+    assert tool_names == {
+        "get_market_index",
+        "get_market_return",
+    }
+
+
+def test_research_agent_tool_sets_are_disjoint():
+    company_tools = {
+        tool.name
+        for tool in COMPANY_RESEARCH_TOOLS
+    }
+
+    financial_tools = {
+        tool.name
+        for tool in FINANCIAL_RESEARCH_TOOLS
+    }
+
+    market_tools = {
+        tool.name
+        for tool in MARKET_RESEARCH_TOOLS
+    }
+
+    assert company_tools.isdisjoint(financial_tools)
+    assert company_tools.isdisjoint(market_tools)
+    assert financial_tools.isdisjoint(market_tools)

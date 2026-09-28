@@ -346,7 +346,7 @@ Research Quality Controller
 
 ---
 
-# 5.2 Company Research Agent
+## 5.2 Company Research Agent
 
 研究：
 
@@ -373,7 +373,7 @@ Filing / Announcement Tool
 
 ---
 
-# 5.3 Financial Research Agent
+## 5.3 Financial Research Agent
 
 这是根据你新增的 Valuation 要求，我建议独立增加的 Agent。
 
@@ -406,7 +406,7 @@ Financial Quality
 
 ---
 
-# 5.4 Market Research Agent
+## 5.4 Market Research Agent
 
 研究：
 
@@ -430,7 +430,7 @@ Relative Performance
 
 ---
 
-# 5.5 Industry / Macro Research Agent
+## 5.5 Industry / Macro Research Agent
 
 这一部分原始 Prompt 中没有单独拆出来，但随着最终要形成投资建议，我认为它值得进入正式架构。
 
@@ -454,7 +454,7 @@ Demand Environment
 
 ---
 
-# 5.6 Valuation Agent
+## 5.6 Valuation Agent
 
 这是本项目新增的核心 Agent。
 
@@ -500,7 +500,7 @@ Valuation Result
 
 ---
 
-# 5.7 Risk Analysis Agent
+## 5.7 Risk Analysis Agent
 
 输入：
 
@@ -532,7 +532,7 @@ Data Uncertainty
 
 ---
 
-# 5.8 Investment Decision Agent
+## 5.8 Investment Decision Agent
 
 这是新的最终决策层。
 
@@ -594,7 +594,7 @@ Recommendation
 
 ---
 
-# 5.9 Report Agent
+## 5.9 Report Agent
 
 最后才是：
 
@@ -1509,7 +1509,7 @@ Evaluation
 
 ---
 
-# Phase 1 — Minimal LangGraph Core
+## Phase 1 — Minimal LangGraph Core
 
 学习：
 
@@ -1536,7 +1536,7 @@ Invoke
 
 ---
 
-# Phase 2 — LLM + Structured Output
+## Phase 2 — LLM + Structured Output
 
 加入：
 
@@ -1557,7 +1557,7 @@ Structured Output
 
 ---
 
-# Phase 3 — Tool Calling
+## Phase 3 — Tool Calling
 
 加入：
 
@@ -1581,7 +1581,7 @@ Company
 
 ---
 
-# Phase 4 — Research Agents
+## Phase 4 — Research Agents
 
 加入：
 
@@ -1603,7 +1603,7 @@ Industry
 
 ---
 
-# Phase 5 — Multi-Agent Orchestration
+## Phase 5 — Multi-Agent Orchestration
 
 加入：
 
@@ -1625,7 +1625,7 @@ Routing
 
 ---
 
-# Phase 6 — Valuation
+## Phase 6 — Valuation
 
 加入：
 
@@ -1647,7 +1647,7 @@ Expected Upside
 
 ---
 
-# Phase 7 — Risk + Investment Decision
+## Phase 7 — Risk + Investment Decision
 
 加入：
 
@@ -1669,7 +1669,7 @@ Investment Decision Agent
 
 ---
 
-# Phase 8 — Report Generation
+## Phase 8 — Report Generation
 
 加入：
 
@@ -1692,7 +1692,7 @@ Uncertainty
 
 ---
 
-# Phase 9 — Checkpoint / Persistence
+## Phase 9 — Checkpoint / Persistence
 
 加入：
 
@@ -1715,7 +1715,7 @@ Resume
 
 ---
 
-# Phase 10 — Human-in-the-loop
+## Phase 10 — Human-in-the-loop
 
 加入：
 
@@ -1736,7 +1736,7 @@ resume
 
 ---
 
-# Phase 11 — Long-term Memory
+## Phase 11 — Long-term Memory
 
 加入：
 
@@ -1757,7 +1757,7 @@ Research History
 
 ---
 
-# Phase 12 — Error Recovery
+## Phase 12 — Error Recovery
 
 系统化处理：
 
@@ -1780,7 +1780,7 @@ Recovery
 
 ---
 
-# Phase 13 — Observability
+## Phase 13 — Observability
 
 加入：
 
@@ -1802,7 +1802,7 @@ LangSmith
 
 ---
 
-# Phase 14 — Evaluation
+## Phase 14 — Evaluation
 
 建立：
 
@@ -1827,7 +1827,7 @@ Regression Tests
 
 ---
 
-# Phase 15 — FastAPI Application
+## Phase 15 — FastAPI Application
 
 最后形成真正 Application Interface：
 
@@ -1850,13 +1850,13 @@ GET /research/{thread_id}/report
 
 ---
 
-# Phase 16 — End-to-End Production-style Application
+## Phase 16 — End-to-End Production-style Application
 
 最终把所有部分组合起来。
 
 ---
 
-# 20. 最终 End-to-End Scenario
+## 20. 最终 End-to-End Scenario
 
 最终必须能够执行：
 
@@ -1938,11 +1938,11 @@ Data Limitations:
 
 ---
 
-# 21. Phase 0 Acceptance Criteria
+## 21. Phase 0 Acceptance Criteria
 
 因此，现在正式定义：
 
-## Phase 0 CLOSED 条件
+# Phase 0 CLOSED 条件
 
 ```text
 Architecture

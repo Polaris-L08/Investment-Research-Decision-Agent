@@ -5904,3 +5904,965 @@ Industry Agent
 ```
 
 这部分再进入后续 Multi-Agent Orchestration，而不是在本课提前实现。
+
+
+
+## Lesson 6 — Market Research Agent
+
+### 1. Goal
+
+本课建立：
+
+```text
+Market Research Agent
+```
+
+它负责回答一个非常明确的问题：
+
+> **当前这家公司所处的市场环境如何？**
+
+但在当前阶段，我们只做一个**最小版本**。
+
+本课最终形成：
+
+```text
+Company Research Agent
+        │
+        └── CompanyResearchResult
+
+Financial Research Agent
+        │
+        └── FinancialResearchResult
+
+Market Research Agent
+        │
+        └── MarketResearchResult
+```
+
+三个 Agent：
+
+* 独立
+* 独立 Tool Set
+* 独立 State
+* 独立 Research Result
+* 独立 Tool Loop
+
+**本课不做 Agent 之间的协调。**
+
+---
+
+### 2. Why Now
+
+Phase 3 已经解决了：
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+Provider
+```
+
+Lesson 1～5 又逐渐建立：
+
+```text
+Business Responsibility
+        ↓
+Research Agent
+        ↓
+Tool Set
+        ↓
+Tool Loop
+        ↓
+Research Result
+```
+
+现在已经有两个业务 Agent：
+
+```text
+Company
+Financial
+```
+
+如果继续只增加 Company Agent 的功能，很容易重新变成一个：
+
+```text
+Super Company Agent
+```
+
+而我们的目标是建立真正的 **Domain-specific Research Agents**。
+
+因此第三个 Agent 很重要：
+
+```text
+Company
+Financial
+Market
+```
+
+这三个职责开始出现明显的领域边界。
+
+---
+
+### 3. Core Concept
+
+本课最重要的不是“再写一个 Agent”。
+
+而是理解：
+
+> **Research Agent 的边界由它负责产生的 Business Result 定义。**
+
+三个 Agent 的职责可以这样划分：
+
+| Agent              | 负责                               | 不负责        |
+| ------------------ | -------------------------------- | ---------- |
+| Company Research   | 公司身份、行业、当前价格                     | 财务分析、估值、推荐 |
+| Financial Research | Revenue、Net Income、Profit Margin | 估值、推荐      |
+| Market Research    | 市场环境、市场表现                        | 公司财务、估值、推荐 |
+
+最终：
+
+```text
+Company Research
+      ↓
+"What is this company?"
+
+Financial Research
+      ↓
+"How is this company performing financially?"
+
+Market Research
+      ↓
+"What is happening in the market?"
+```
+
+这就是后面 Multi-Agent Architecture 的基础。
+
+---
+
+### 4. 本课业务范围
+
+为了保持 Lesson 级别的小步推进，本课的 Market Research Agent 暂时只负责两个数据：
+
+```text
+market_index
+market_return
+```
+
+例如：
+
+```text
+S&P 500
++8.5%
+```
+
+再由 Agent 生成：
+
+```text
+MarketResearchResult
+```
+
+建议 Schema：
+
+```python
+class MarketResearchResult(BaseModel):
+    ticker: str
+    market_index: str
+    market_return: float
+    summary: str
+```
+
+注意：
+
+这里的 `ticker` 只是说明：
+
+> 本次 Market Research 是针对哪个股票研究上下文执行的。
+
+它并不意味着 Market Agent 已经在分析公司的财务表现。
+
+---
+
+### 5. Agent Boundary
+
+Market Research Agent 的 Prompt 必须明确边界。
+
+核心职责：
+
+```text
+You are a Market Research Agent.
+
+Your responsibility is to research the current market environment
+for the given stock research context.
+
+You may use the available tools to obtain:
+- market index
+- market return
+
+Return a concise market research result.
+
+Do not perform company financial analysis.
+Do not perform valuation.
+Do not make an investment recommendation.
+Do not assess investment risk.
+Do not invent market data.
+```
+
+这里有一个很重要的设计思想：
+
+```text
+Prompt Boundary
+        +
+Tool Boundary
+        +
+Result Schema Boundary
+        =
+Agent Responsibility Boundary
+```
+
+所以不能只依赖 Prompt。
+
+---
+
+### 6. Graph Topology
+
+本课仍然保持：
+
+```text
+START
+  │
+  ▼
+market_research_agent
+  │
+  ▼
+ END
+```
+
+Agent 内部：
+
+```text
+Market Research Agent
+        │
+        ▼
+       LLM
+        │
+        ▼
+   Tool Calling
+        │
+        ▼
+    ToolNode
+        │
+        ▼
+     Provider
+        │
+        ▼
+Market Research Result
+```
+
+与前两个 Agent 对比：
+
+```text
+Company Research Agent
+        ↓
+Company Tool Set
+        ↓
+Company Research Result
+
+
+Financial Research Agent
+        ↓
+Financial Tool Set
+        ↓
+Financial Research Result
+
+
+Market Research Agent
+        ↓
+Market Tool Set
+        ↓
+Market Research Result
+```
+
+**三个 Graph 现在仍然互相独立。**
+
+---
+
+### 7. State Design
+
+本课不要复用 Company / Financial Agent 的 State。
+
+建立：
+
+```python
+class MarketResearchInputState(TypedDict):
+    ticker: str
+```
+
+内部 State：
+
+```python
+class MarketResearchState(TypedDict):
+    ticker: str
+    research_result: MarketResearchResult | None
+    research_error: str
+```
+
+Output：
+
+```python
+class MarketResearchOutputState(TypedDict):
+    research_result: MarketResearchResult | None
+    research_error: str
+```
+
+这里再次强化 Phase 3 已经建立的原则：
+
+> **Agent 的 State 是 Agent 的执行边界，不应该把所有 Agent 的字段塞进一个万能 State。**
+
+---
+
+### 8. Exact Files
+
+本课预计修改：
+
+```text
+app/
+├── agents/
+│   ├── __init__.py
+│   ├── models.py                 ← 修改
+│   ├── tool_sets.py              ← 修改
+│   ├── company_research.py
+│   ├── financial_research.py
+│   └── market_research.py        ← 新建
+│
+├── providers/
+│   └── financial.py              ← 修改
+│
+└── tools/
+    └── financial.py              ← 修改
+
+tests/
+├── test_market_research_provider.py
+├── test_market_research_tools.py
+├── test_market_research_agent.py
+└── test_agent_tool_boundary.py   ← 修改
+```
+
+**Parent Graph 不修改。**
+
+也就是说：
+
+```text
+app/graph/graph.py
+```
+
+本课保持不动。
+
+---
+
+### 9. Step 1 — MarketResearchResult
+
+在：
+
+```text
+app/agents/models.py
+```
+
+增加：
+
+```python
+class MarketResearchResult(BaseModel):
+    ticker: str
+    market_index: str
+    market_return: float
+    summary: str
+```
+
+例如：
+
+```text
+AAPL
+S&P 500
+8.5
+Market conditions have been positive.
+```
+
+---
+
+### 10. Step 2 — Mock Provider
+
+在当前 Provider 层增加 Market 数据。
+
+例如：
+
+```python
+def get_market_index(ticker: str) -> str:
+    mock_market_index = {
+        "AAPL": "S&P 500",
+        "MSFT": "S&P 500",
+    }
+
+    try:
+        return mock_market_index[ticker.upper()]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported ticker: {ticker}") from exc
+```
+
+以及：
+
+```python
+def get_market_return(ticker: str) -> float:
+    mock_market_return = {
+        "AAPL": 8.5,
+        "MSFT": 8.5,
+    }
+
+    try:
+        return mock_market_return[ticker.upper()]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported ticker: {ticker}") from exc
+```
+
+这里的数据仍然是：
+
+```text
+Mock Provider
+```
+
+不是现实市场数据。
+
+这点和 Lesson 5 保持一致。
+
+---
+
+### 11. Step 3 — Market Tools
+
+在：
+
+```text
+app/tools/financial.py
+```
+
+增加对应 Tool：
+
+```python
+@tool
+def get_market_index(ticker: str) -> str:
+    """Get the relevant market index for the given stock ticker."""
+    return provider_get_market_index(ticker)
+```
+
+以及：
+
+```python
+@tool
+def get_market_return(ticker: str) -> float:
+    """Get the market return for the given stock ticker."""
+    return provider_get_market_return(ticker)
+```
+
+注意这里仍然遵循：
+
+```text
+Tool
+ ↓
+Provider
+```
+
+Tool 不直接保存业务数据。
+
+---
+
+### 12. Step 4 — Agent Tool Set
+
+在：
+
+```text
+app/agents/tool_sets.py
+```
+
+增加：
+
+```python
+MARKET_RESEARCH_TOOLS = [
+    get_market_index,
+    get_market_return,
+]
+```
+
+现在 Tool Boundary 变成：
+
+```text
+COMPANY_RESEARCH_TOOLS
+├── get_company_info
+└── get_stock_price
+
+
+FINANCIAL_RESEARCH_TOOLS
+├── get_revenue
+└── get_net_income
+
+
+MARKET_RESEARCH_TOOLS
+├── get_market_index
+└── get_market_return
+```
+
+这时候我们已经可以清楚看到：
+
+```text
+Global Tool Registry
+        │
+        ├── Company Agent → Company Tool Set
+        │
+        ├── Financial Agent → Financial Tool Set
+        │
+        └── Market Agent → Market Tool Set
+```
+
+这正是 Lesson 4 Tool Boundary 的进一步应用。
+
+---
+
+### 13. Step 5 — Market Research Agent
+
+新建：
+
+```text
+app/agents/market_research.py
+```
+
+整体结构保持和 Financial Agent 一致：
+
+```text
+MarketResearchInputState
+        ↓
+Market Research Agent
+        ↓
+Market Tool Loop
+        ↓
+Structured Output
+        ↓
+MarketResearchResult
+```
+
+核心代码结构：
+
+```python
+from typing import TypedDict
+
+from app.agents.models import MarketResearchResult
+from app.agents.tool_sets import MARKET_RESEARCH_TOOLS
+from app.graph.tool_loop import build_tool_loop_graph
+```
+
+建立：
+
+```python
+class MarketResearchInputState(TypedDict):
+    ticker: str
+```
+
+```python
+class MarketResearchState(TypedDict):
+    ticker: str
+    research_result: MarketResearchResult | None
+    research_error: str
+```
+
+```python
+class MarketResearchOutputState(TypedDict):
+    research_result: MarketResearchResult | None
+    research_error: str
+```
+
+然后建立专属 Tool Loop：
+
+```python
+market_research_tool_loop = build_tool_loop_graph(
+    MARKET_RESEARCH_TOOLS
+)
+```
+
+Structured Output：
+
+```python
+structured_market_research_llm = llm.with_structured_output(
+    MarketResearchResult
+)
+```
+
+Agent 的基本执行流程保持：
+
+```text
+ticker
+ ↓
+Market Research Prompt
+ ↓
+Market Tool Loop
+ ↓
+Structured Market Research LLM
+ ↓
+MarketResearchResult
+```
+
+---
+
+### 14. 一个重要设计点：不要复制粘贴错误
+
+Lesson 5 的测试已经让我们发现了一个很典型的问题：
+
+```python
+patch("...structured_llm.invoke", ...)
+```
+
+不能直接这样 patch 当前 LangChain Runnable 的 `invoke`。
+
+本课测试时继续使用：
+
+```python
+fake_structured_llm = MagicMock()
+fake_structured_llm.invoke.return_value = fake_result
+```
+
+然后：
+
+```python
+patch(
+    "...structured_market_research_llm",
+    fake_structured_llm,
+)
+```
+
+不要再使用：
+
+```python
+patch(
+    "...structured_market_research_llm.invoke",
+    ...
+)
+```
+
+这个坑 Lesson 5 已经解决，本课不要重新踩。
+
+---
+
+### 15. Tests
+
+本课测试分三个层次。
+
+#### Test 1 — Provider
+
+```text
+tests/test_market_research_provider.py
+```
+
+验证：
+
+```text
+AAPL
+ ↓
+get_market_index
+ ↓
+"S&P 500"
+```
+
+以及：
+
+```text
+AAPL
+ ↓
+get_market_return
+ ↓
+8.5
+```
+
+同时测试 unsupported ticker。
+
+---
+
+#### Test 2 — Tools
+
+```text
+tests/test_market_research_tools.py
+```
+
+验证：
+
+```text
+Tool
+ ↓
+Provider
+```
+
+以及：
+
+```text
+Tool metadata
+Tool name
+Tool invocation
+```
+
+---
+
+#### Test 3 — Agent
+
+```text
+tests/test_market_research_agent.py
+```
+
+至少覆盖：
+
+##### Result Model
+
+```text
+MarketResearchResult
+```
+
+##### Agent Tool Loop
+
+确认：
+
+```text
+Market Agent
+        ↓
+MARKET_RESEARCH_TOOLS
+```
+
+##### State Boundary
+
+只向 Agent 提供：
+
+```python
+{
+    "ticker": "AAPL"
+}
+```
+
+##### Result Mapping
+
+模拟：
+
+```python
+MarketResearchResult(...)
+```
+
+最终验证：
+
+```python
+result["research_result"] == fake_result
+```
+
+##### Error Mapping
+
+验证：
+
+```text
+Tool Loop / structured research failure
+        ↓
+research_error
+```
+
+---
+
+### 16. Tool Boundary Regression
+
+继续修改：
+
+```text
+tests/test_agent_tool_boundary.py
+```
+
+最终应该明确验证：
+
+```text
+Company Tools
+≠
+Financial Tools
+≠
+Market Tools
+```
+
+例如：
+
+```text
+Company:
+get_company_info
+get_stock_price
+
+Financial:
+get_revenue
+get_net_income
+
+Market:
+get_market_index
+get_market_return
+```
+
+特别重要的是：
+
+```text
+Market Agent
+```
+
+**不能访问：**
+
+```text
+get_revenue
+get_net_income
+```
+
+同样也不能访问：
+
+```text
+get_company_info
+get_stock_price
+```
+
+除非未来业务需求明确改变其职责。
+
+---
+
+### 17. 本课暂时不要做什么
+
+Lesson 6 做完以后，我们仍然**不要**：
+
+```text
+❌ 修改 Parent Graph
+❌ Company + Financial + Market 串联
+❌ Supervisor
+❌ Router
+❌ Parallel Agents
+❌ Fan-out
+❌ Fan-in
+❌ Research Planner
+❌ Investment Decision
+❌ Valuation
+❌ Risk Agent
+```
+
+当前架构应该保持：
+
+```text
+                    ┌─ Company Research Agent
+                    │
+START ──────────────┼─ Financial Research Agent
+                    │
+                    └─ Market Research Agent
+```
+
+但这三个 Agent **实际上还没有连接**。
+
+这正是我们现在想要的状态。
+
+---
+
+### 18. Lesson 6 Acceptance Criteria
+
+本课完成的标准：
+
+#### Architecture
+
+```text
+Market Research Agent
+        ↓
+Market Tool Set
+        ↓
+Tool Loop
+        ↓
+Mock Provider
+        ↓
+MarketResearchResult
+```
+
+#### Isolation
+
+```text
+Company Agent
+Financial Agent
+Market Agent
+```
+
+三者 Tool Set 相互隔离。
+
+#### State
+
+Market Agent 只接受：
+
+```text
+ticker
+```
+
+并输出：
+
+```text
+research_result
+research_error
+```
+
+#### Parent Graph
+
+`app/graph/graph.py` **没有为了 Market Agent 被修改**。
+
+#### Tests
+
+本课新增/修改测试全部通过。
+
+---
+
+### 19. 当前 Phase 4 的架构位置
+
+完成 Lesson 6 后，我们会得到：
+
+```text
+                    Research Agents
+                          │
+          ┌───────────────┼───────────────┐
+          │               │               │
+          ▼               ▼               ▼
+       Company         Financial        Market
+       Research        Research        Research
+          │               │               │
+          ▼               ▼               ▼
+       Company          Financial        Market
+       Tools            Tools            Tools
+          │               │               │
+          └───────────────┼───────────────┘
+                          ▼
+                    Tool / Provider
+```
+
+这一步非常关键。
+
+我们现在已经从：
+
+```text
+"如何让 LLM 调 Tool？"
+```
+
+真正进入：
+
+```text
+"如何让多个职责明确的 Agent，各自完成自己的 Research Task？"
+```
+
+而**下一阶段真正值得研究的问题**才会变成：
+
+```text
+这些 Research Agents
+如何被统一组织起来？
+```
+
+也就是后面的：
+
+```text
+Research Planner
+        ↓
+Company Research
+Financial Research
+Market Research
+Industry / Macro Research
+```
+
+再之后才是 Phase 5 的 Multi-Agent Orchestration。
+
+---

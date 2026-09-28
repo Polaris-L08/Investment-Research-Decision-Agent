@@ -113,3 +113,44 @@ class MockNetIncomeInfoProvider(NetIncomeInfoProvider):
                 f"Net income not found for ticker: {ticker}"
             )
         return self.mock_net_income[ticker]
+
+
+class MarketIndexProvider(ABC):
+    @abstractmethod
+    def get_market_index(self, ticker: str) -> str:
+        raise NotImplementedError
+
+
+class MockMarketIndexProvider(MarketIndexProvider):
+    def __init__(self):
+        self.mock_market_index = {
+            "AAPL": "S&P 500",
+            "MSFT": "S&P 500",
+        }
+
+    def get_market_index(self, ticker: str) -> str:
+        if ticker not in self.mock_market_index:
+            raise ValueError(
+                f"Market index not found for ticker: {ticker}"
+            )
+        return self.mock_market_index[ticker]
+
+
+class MarketReturnProvider(ABC):
+    @abstractmethod
+    def get_market_return(self, ticker: str) -> float:
+        raise NotImplementedError
+
+class MockMarketReturnProvider(MarketReturnProvider):
+    def __init__(self):
+        self.mock_return = {
+            "AAPL": 8.5,
+            "MSFT": 8.5,
+        }
+
+    def get_market_return(self, ticker: str) -> float:
+        if ticker not in self.mock_return:
+            raise ValueError(
+                f"Market return not found for ticker: {ticker}"
+            )
+        return self.mock_return[ticker]

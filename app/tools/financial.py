@@ -1,12 +1,16 @@
-from pydantic import BaseModel, Field
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 from app.providers.exceptions import TransientProviderError
-from app.providers.financial import MockStockPriceProvider, MockCompanyInfoProvider, RevenueInfoProvider, \
-    NetIncomeInfoProvider
+from app.providers.financial import MockStockPriceProvider, MockCompanyInfoProvider, MockRevenueInfoProvider, \
+    MockNetIncomeInfoProvider, MockMarketIndexProvider, MockMarketReturnProvider
 
 stock_price_provider = MockStockPriceProvider()
 company_info_provider = MockCompanyInfoProvider()
+revenue_info_provider = MockRevenueInfoProvider()
+net_income_info_provider = MockNetIncomeInfoProvider()
+market_index_provider = MockMarketIndexProvider()
+market_return_provider = MockMarketReturnProvider()
 
 class TransientToolError(Exception):
     """Temporary tool failure that may succeed when retried."""
@@ -57,7 +61,7 @@ class RevenueInput(BaseModel):
 def get_revenue(ticker: str) -> float:
     """Get company revenue for the given stock ticker."""
     try:
-        return RevenueInfoProvider.get_revenue(ticker)
+        return revenue_info_provider.get_revenue(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(
             str(exc)
@@ -73,7 +77,35 @@ class NetIncomeInput(BaseModel):
 def get_net_income(ticker: str) -> float:
     """Get company net income for the given stock ticker."""
     try:
-        return NetIncomeInfoProvider.get_net_income(ticker)
+        return net_income_info_provider.get_net_income(ticker)
+    except TransientProviderError as exc:
+        raise TransientToolError(
+            str(exc)
+        ) from exc
+
+
+class MarketIndexInput(BaseModel):
+    ticker: str = Field()
+
+@tool(args_schema=MarketIndexInput)
+def get_market_index(ticker: str) -> str:
+    """Get company market index for the given stock ticker."""
+    try:
+        return market_index_provider.get_market_index(ticker)
+    except TransientProviderError as exc:
+        raise TransientToolError(
+            str(exc)
+        ) from exc
+
+
+class MarketReturnInput(BaseModel):
+    ticker: str = Field()
+
+@tool(args_schema=MarketReturnInput)
+def get_market_return(ticker: str) -> float:
+    """Get company market return for the given stock ticker."""
+    try:
+        return market_return_provider.get_market_return(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(
             str(exc)
