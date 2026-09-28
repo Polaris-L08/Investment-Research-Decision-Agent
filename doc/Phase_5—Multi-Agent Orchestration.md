@@ -1817,3 +1817,829 @@ Research State
 ```
 
 也就是 **Lesson 4 — Sequential Multi-Agent Orchestration**。
+
+
+
+## Lesson 4：Sequential Multi-Agent Orchestration
+
+这一课的目标非常明确：
+
+> **把 Planner、Router、Shared State 和已有的四个 Research Agent 串成一个确定性的 Sequential Orchestrator。**
+
+---
+
+### 1. Lesson 4 解决什么问题
+
+Lesson 3 之后，我们已经有：
+
+```text
+User Query
+    ↓
+Research Planner
+    ↓
+ResearchPlan
+    ↓
+Router
+    ↓
+一个 Research Agent
+    ↓
+ResearchState
+```
+
+但仍然只能执行一次 Agent。
+
+Lesson 4 将它扩展为：
+
+```text
+User Query
+    ↓
+Research Planner
+    ↓
+ResearchPlan
+    ↓
+Sequential Orchestrator
+    │
+    ├── Company Research
+    │
+    ├── Financial Research
+    │
+    ├── Market Research
+    │
+    └── Industry / Macro Research
+    │
+    ↓
+ResearchState
+```
+
+但有一个重要规则：
+
+**只有 ResearchPlan 中选择的 Agent 才执行。**
+
+例如：
+
+```text
+ResearchPlan:
+    company
+    market
+    industry_macro
+```
+
+实际执行：
+
+```text
+Company
+   ↓
+Market
+   ↓
+Industry/Macro
+```
+
+不会执行 Financial。
+
+---
+
+### 2. Graph Topology
+
+本课最终 Graph 是：
+
+```text
+START
+  │
+  ▼
+research_planner
+  │
+  ▼
+prepare_next_research
+  │
+  ▼
+route_and_execute
+  │
+  ▼
+mark_completed
+  │
+  ▼
+prepare_next_research
+  │
+  ▼
+route_and_execute
+  │
+  ▼
+mark_completed
+  │
+  ▼
+    ...
+  │
+  ▼
+END
+```
+
+因此它实际上是一个**确定性的 Sequential Loop**：
+
+```text
+Planner
+   ↓
+找到下一个需要执行的 Research Area
+   ↓
+Router
+   ↓
+Agent
+   ↓
+记录完成
+   ↓
+寻找下一个 Research Area
+   ↓
+...
+```
+
+注意：
+
+这虽然存在 Graph loop，但它**不是 Supervisor Loop**。
+
+因为这里没有：
+
+```text
+LLM
+ ↓
+观察 State
+ ↓
+自主决定下一步
+```
+
+而是固定规则：
+
+```text
+COMPANY
+    ↓
+FINANCIAL
+    ↓
+MARKET
+    ↓
+INDUSTRY_MACRO
+```
+
+然后根据 `ResearchPlan` 跳过未选择的 Area。
+
+---
+
+### 3. 为什么不把四个 Agent 直接硬编码成固定执行
+
+例如不采用：
+
+```text
+Company
+ ↓
+Financial
+ ↓
+Market
+ ↓
+Industry
+```
+
+无条件执行。
+
+因为那样就意味着：
+
+```text
+ResearchPlan
+```
+
+实际上没有控制 Orchestration。
+
+Planner 说：
+
+```text
+只需要 Market + Financial
+```
+
+Orchestrator 却执行：
+
+```text
+Company
+Financial
+Market
+Industry
+```
+
+这是架构错误。
+
+因此本课采用：
+
+```text
+ResearchPlan
+      ↓
+selected areas
+      ↓
+固定顺序遍历
+      ↓
+只执行 selected areas
+```
+
+这同时满足：
+
+```text
+Planner = 决定 WHAT
+Orchestrator = 决定 HOW / ORDER
+Agent = 执行 DO
+```
+
+---
+
+### 4. 新增文件
+
+本课新增：
+
+```text
+app/agents/research_orchestrator.py
+```
+
+以及：
+
+```text
+tests/test_research_orchestrator.py
+```
+
+没有重新实现任何 Research Agent。
+
+---
+
+### 5. Sequential Orchestrator State
+
+使用现有：
+
+```python
+ResearchState
+```
+
+并增加：
+
+```python
+user_query: str
+completed_research_areas: list[ResearchArea]
+current_research_area: ResearchArea | None
+planning_error: str
+orchestration_error: str
+```
+
+因此运行中的 State 可以理解为：
+
+```text
+ResearchState
+├── ticker
+├── research_plan
+├── next_research_area
+│
+├── company_research
+├── financial_research
+├── market_research
+├── industry_macro_research
+│
+├── research_errors
+│
+├── completed_research_areas
+├── current_research_area
+│
+├── planning_error
+└── orchestration_error
+```
+
+其中：
+
+```text
+completed_research_areas
+```
+
+记录已经执行过的研究领域。
+
+例如：
+
+```python
+[
+    ResearchArea.COMPANY,
+    ResearchArea.FINANCIAL,
+]
+```
+
+那么下一次只会寻找：
+
+```text
+MARKET
+```
+
+或者：
+
+```text
+INDUSTRY_MACRO
+```
+
+---
+
+### 6. 固定 Research Order
+
+本课明确建立：
+
+```python
+RESEARCH_ORDER = [
+    ResearchArea.COMPANY,
+    ResearchArea.FINANCIAL,
+    ResearchArea.MARKET,
+    ResearchArea.INDUSTRY_MACRO,
+]
+```
+
+这代表的是：
+
+> **Sequential Orchestration 的执行顺序。**
+
+它不是 Planner 的职责。
+
+Planner 决定：
+
+```text
+哪些需要研究
+```
+
+Orchestrator 决定：
+
+```text
+这些需要研究的内容按照什么顺序执行
+```
+
+例如 Planner：
+
+```text
+financial
+market
+company
+```
+
+即使 LLM 输出顺序是：
+
+```text
+financial
+market
+company
+```
+
+Orchestrator 仍然按照：
+
+```text
+company
+financial
+market
+```
+
+执行。
+
+这使执行顺序成为确定性的工程规则，而不是 LLM 的随机行为。
+
+---
+
+### 7. `prepare_next_research`
+
+核心逻辑：
+
+```python
+for research_area in RESEARCH_ORDER:
+    if (
+        research_area in plan.research_areas
+        and research_area not in completed
+    ):
+        return {
+            "current_research_area": research_area
+        }
+```
+
+因此：
+
+```text
+Plan
+    ↓
+[Company, Market, Industry]
+    ↓
+固定 Order
+    ↓
+Company
+    ↓
+Market
+    ↓
+Industry
+```
+
+而不是依赖：
+
+```text
+LLM 输出 list 的顺序
+```
+
+---
+
+### 8. Router 与 Orchestrator 的关系
+
+这里非常重要。
+
+我们没有删除 Lesson 2 的 Router。
+
+现在：
+
+```text
+Sequential Orchestrator
+          ↓
+    current_research_area
+          ↓
+        Router
+          ↓
+       Agent
+```
+
+也就是说：
+
+```text
+Orchestrator
+```
+
+决定：
+
+> 下一步要研究哪个 Area。
+
+然后：
+
+```text
+Router
+```
+
+负责：
+
+> 把这个 Area 映射到具体 Agent。
+
+例如：
+
+```text
+current_research_area
+        ↓
+FINANCIAL
+        ↓
+Research Router
+        ↓
+financial_research_graph
+```
+
+所以职责仍然非常清晰：
+
+```text
+Planner
+  ↓
+ResearchPlan
+
+Orchestrator
+  ↓
+Next Area
+
+Router
+  ↓
+Agent Node
+
+Agent
+  ↓
+Research Result
+
+Shared State
+  ↓
+保存结果
+```
+
+---
+
+### 9. 为什么这是 Sequential，而不是 Parallel
+
+当前执行路径永远是：
+
+```text
+Agent A
+  ↓
+Agent B
+  ↓
+Agent C
+```
+
+后一个 Agent 只有在前一个 Agent 完成之后才会开始。
+
+例如：
+
+```text
+Company
+  ↓
+完成
+  ↓
+Financial
+  ↓
+完成
+  ↓
+Market
+```
+
+不存在：
+
+```text
+Company ─────┐
+Financial ───┼── 同时
+Market ──────┘
+```
+
+所以本课明确没有：
+
+```text
+Send
+fan-out
+parallel branches
+reducer
+join
+```
+
+这些内容留到后面的 Lesson 5/6。
+
+---
+
+### 10. Failure Handling
+
+Planner 失败：
+
+```text
+Planner
+   ↓
+planning_error
+   ↓
+orchestration_error
+   ↓
+END
+```
+
+不会继续执行 Research Agent。
+
+---
+
+Router 失败：
+
+```text
+Router
+   ↓
+routing_error
+   ↓
+orchestration_error
+   ↓
+END
+```
+
+也不会继续执行后续 Agent。
+
+---
+
+而 Agent 自己的研究失败：
+
+```text
+Financial Agent
+       ↓
+research_error
+       ↓
+research_errors["financial"]
+```
+
+这个错误由现有 Router 写入 Shared State。
+
+当前 Sequential Orchestrator **不会因为一个 Agent 的业务研究失败而自动变成 Supervisor**。
+
+也就是说：
+
+```text
+Financial Agent
+       ↓
+failure
+       ↓
+record error
+       ↓
+continue to next selected area
+```
+
+这样可以保留：
+
+```text
+Partial Research
+```
+
+信息。
+
+真正如何处理 Partial Failure，将在后续 Fan-out/Fan-in 阶段进一步讨论。
+
+---
+
+### 11. Tests
+
+新增测试覆盖了几个非常重要的行为。
+
+#### 11.1 Sequential Order
+
+Plan：
+
+```text
+company
+market
+industry_macro
+```
+
+实际执行必须是：
+
+```text
+company
+→ market
+→ industry_macro
+```
+
+而不是：
+
+```text
+industry_macro
+→ market
+→ company
+```
+
+---
+
+#### 11.2 Skip Unselected Agents
+
+Plan：
+
+```text
+financial
+```
+
+只允许：
+
+```text
+Financial Agent
+```
+
+执行。
+
+测试确保：
+
+```text
+Company ❌
+Market ❌
+Industry/Macro ❌
+Financial ✅
+```
+
+---
+
+#### 11.3 Planner Failure
+
+模拟：
+
+```text
+Planner failed.
+```
+
+必须：
+
+```text
+planning_error
+    ↓
+orchestration_error
+```
+
+并且：
+
+```text
+Router.invoke()
+```
+
+不能被调用。
+
+---
+
+#### 11.4 Routing Failure
+
+模拟 Router 返回：
+
+```text
+routing_error
+```
+
+Orchestrator 必须停止：
+
+```text
+routing_error
+    ↓
+orchestration_error
+    ↓
+END
+```
+
+不会继续执行剩余研究。
+
+---
+
+### 12. 当前代码检查
+
+Lesson 4 新代码已经完成：
+
+```bash
+python -m compileall -q app tests
+```
+
+结果：
+
+```text
+PASS
+```
+
+我没有把当前执行环境无法运行完整 pytest 的问题伪装成测试通过；你本地环境已经具备 LangGraph 依赖，因此继续使用你之前的验证方式。
+
+---
+
+### 13. Lesson 4 Acceptance Criteria
+
+| 项目                     | 状态            |
+|--------------------------|-----------------|
+| Planner → Orchestrator   | ✅              |
+| 使用已有 ResearchPlan    | ✅              |
+| 使用已有 Shared State    | ✅              |
+| Sequential execution     | ✅              |
+| 固定 Research Order      | ✅              |
+| 未选择的 Agent 不执行    | ✅              |
+| 使用已有 Router          | ✅              |
+| Agent 保持独立           | ✅              |
+| Agent 不调用 Agent       | ✅              |
+| Agent failure 显式记录   | ✅              |
+| Planner failure 显式处理 | ✅              |
+| Routing failure 显式处理 | ✅              |
+| Parallel                 | ❌ 本课不做     |
+| Fan-out                  | ❌ 本课不做     |
+| Fan-in                   | ❌ 本课不做     |
+| Reducer                  | ❌ 本课不做     |
+| Supervisor               | ❌ 本课不做     |
+| Python compile           | ✅              |
+| Lesson 4 pytest          | ⏳ 等你本地运行 |
+
+---
+
+### 14. 本课最重要的理解
+
+Phase 5 到这里，架构已经从：
+
+```text
+Planner
+   ↓
+Router
+   ↓
+Agent
+```
+
+发展成：
+
+```text
+                  ┌──────────────┐
+                  │    Planner   │
+                  └──────┬───────┘
+                         │
+                         ▼
+                  ResearchPlan
+                         │
+                         ▼
+               Sequential Orchestrator
+                         │
+              ┌──────────┴──────────┐
+              │                     │
+              ▼                     │
+            Router                  │
+              │                     │
+              ▼                     │
+             Agent                  │
+              │                     │
+              ▼                     │
+        Shared Research State       │
+              │                     │
+              └────── next ─────────┘
+```
+
+而且三个层次的职责已经明确：
+
+```text
+Planner
+    = WHAT
+
+Orchestrator
+    = WHEN / ORDER
+
+Router
+    = WHICH AGENT
+
+Agent
+    = DO THE RESEARCH
+
+State
+    = SHARED BOUNDARY
+```
+
+这是后面进入 Parallel 的基础。
+
+---
