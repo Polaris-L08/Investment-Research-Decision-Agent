@@ -1819,7 +1819,6 @@ Research State
 也就是 **Lesson 4 — Sequential Multi-Agent Orchestration**。
 
 
-
 ## Lesson 4：Sequential Multi-Agent Orchestration
 
 这一课的目标非常明确：
@@ -3719,3 +3718,957 @@ research_errors
     ↓
 需要 Reducer
 ```
+
+
+## Lesson 6：Dynamic Fan-out / Fan-in
+
+Lesson 5 的 Parallel Graph 是：
+
+> **固定的四路并行。**
+
+Lesson 6 要解决的是：
+
+> **根据 Planner 的 `ResearchPlan.research_areas` 动态决定到底启动哪些 Agent。**
+
+---
+
+### 1. Goal
+
+假设 Planner 返回：
+
+```python
+[
+    ResearchArea.COMPANY,
+    ResearchArea.FINANCIAL,
+    ResearchArea.MARKET,
+]
+```
+
+我们不应该再固定启动：
+
+```text
+Company
+Financial
+Market
+Industry/Macro
+```
+
+而应该动态产生：
+
+```text
+          ┌── Company
+          ├── Financial
+START ────┼── Market
+          └── 不启动 Industry/Macro
+```
+
+如果 Planner 返回：
+
+```python
+[
+    ResearchArea.COMPANY,
+    ResearchArea.INDUSTRY_MACRO,
+]
+```
+
+则：
+
+```text
+          ┌── Company
+START ────┤
+          └── Industry/Macro
+```
+
+这就是 **Dynamic Fan-out**。
+
+---
+
+### 2. Why Now
+
+目前我们的系统存在两个并行 Graph：
+
+#### Lesson 4
+
+Sequential：
+
+```text
+COMPANY
+   ↓
+FINANCIAL
+   ↓
+MARKET
+   ↓
+INDUSTRY_MACRO
+```
+
+#### Lesson 5
+
+Fixed Parallel：
+
+```text
+       Company
+       Financial
+START  Market
+       Industry/Macro
+```
+
+但真正的 Research Planner 已经能够产生：
+
+```python
+research_plan.research_areas
+```
+
+例如：
+
+```text
+[COMPANY, MARKET]
+```
+
+所以如果我们始终启动四个 Agent：
+
+```text
+Planner 说只需要 Company + Market
+                ↓
+却执行四个 Agent
+```
+
+那么 Planner 的决策就没有真正控制执行图。
+
+Lesson 6 要建立：
+
+```text
+Planner
+   │
+   ▼
+ResearchPlan
+   │
+   │ selected areas
+   ▼
+Dynamic Fan-out
+   │
+   ├── selected Agent
+   ├── selected Agent
+   └── selected Agent
+```
+
+---
+
+### 3. 核心概念：Send
+
+这一课第一次正式引入 LangGraph 的：
+
+```python
+Send
+```
+
+它的用途正是：
+
+> **在运行时动态创建并行任务。**
+
+概念上：
+
+```python
+Send(
+    "research_agent",
+    {
+        "research_area": ResearchArea.COMPANY,
+        ...
+    },
+)
+```
+
+可以理解成：
+
+```text
+“请启动一个 research_agent，
+并给它这一份独立的任务输入。”
+```
+
+如果有三个 ResearchArea：
+
+```text
+[
+    COMPANY,
+    FINANCIAL,
+    MARKET,
+]
+```
+
+Fan-out 可以动态生成：
+
+```text
+Send("research_agent", COMPANY)
+Send("research_agent", FINANCIAL)
+Send("research_agent", MARKET)
+```
+
+形成：
+
+```text
+             ┌── research_agent(COMPANY)
+             │
+START ───────┼── research_agent(FINANCIAL)
+             │
+             └── research_agent(MARKET)
+```
+
+---
+
+### 4. 为什么这是真正的 Fan-out
+
+Lesson 5：
+
+```text
+START
+ ├→ company_research
+ ├→ financial_research
+ ├→ market_research
+ └→ industry_macro_research
+```
+
+Graph topology 在代码里是**静态写死的**。
+
+Lesson 6：
+
+```text
+ResearchPlan
+     │
+     │ runtime data
+     ▼
+[COMPANY, FINANCIAL, MARKET]
+     │
+     ▼
+动态生成三个 Send
+```
+
+因此：
+
+> **Fan-out 的数量由运行时 State 决定。**
+
+这才是 Dynamic Fan-out。
+
+---
+
+### 5. Graph Topology
+
+这一课建议建立一个独立 Graph：
+
+```text
+START
+  │
+  ▼
+prepare_research_tasks
+  │
+  │ conditional Send
+  ├──────────────┐
+  ▼              ▼
+research_agent  research_agent
+(COMPANY)       (FINANCIAL)
+  │              │
+  └──────┬───────┘
+         │
+         ▼
+       END
+```
+
+如果运行时有三个 area：
+
+```text
+prepare_research_tasks
+        │
+        ├──→ COMPANY Agent
+        ├──→ FINANCIAL Agent
+        └──→ MARKET Agent
+```
+
+---
+
+### 6. 一个重要设计选择
+
+这里我们**不再使用 Lesson 5 的四个固定 Agent Node**：
+
+```python
+company_research
+financial_research
+market_research
+industry_macro_research
+```
+
+而建立一个统一的：
+
+```text
+research_agent
+```
+
+它收到：
+
+```python
+research_area
+```
+
+然后决定调用哪个已有 Agent Graph。
+
+注意：
+
+> 这个 `research_agent` 不是新的业务 Agent。
+
+它只是一个 **dynamic dispatch node**。
+
+真正的研究仍然由：
+
+```text
+Company Research Agent
+Financial Research Agent
+Market Research Agent
+Industry/Macro Research Agent
+```
+
+完成。
+
+---
+
+### 7. State Design
+
+这一课需要引入一个非常小的 task state。
+
+建议：
+
+```python
+class ResearchTask(TypedDict):
+    research_area: ResearchArea
+```
+
+然后动态 Agent 的输入：
+
+```python
+class DynamicResearchState(ResearchState):
+    research_area: ResearchArea
+```
+
+这里要注意：
+
+```text
+ResearchPlan
+    │
+    │ list[ResearchArea]
+    ▼
+Fan-out
+    │
+    ├── ResearchTask(COMPANY)
+    ├── ResearchTask(FINANCIAL)
+    └── ResearchTask(MARKET)
+```
+
+---
+
+### 8. Exact Files
+
+新增：
+
+```text
+app/agents/research_fanout.py
+tests/test_research_fanout.py
+```
+
+暂时不要修改：
+
+```text
+research_orchestrator.py
+research_parallel.py
+research_router.py
+```
+
+因为我们仍然是逐课学习。
+
+---
+
+### 9. `research_fanout.py`
+
+首先：
+
+```python
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
+
+from app.agents.company_research import company_research_graph
+from app.agents.financial_research import financial_research_graph
+from app.agents.industry_macro_research import (
+    industry_macro_research_graph,
+)
+from app.agents.market_research import market_research_graph
+from app.agents.models import ResearchArea, ResearchPlan
+from app.agents.research_state import ResearchState
+```
+
+定义输入：
+
+```python
+class ResearchFanoutInputState(TypedDict):
+    ticker: str
+    research_plan: ResearchPlan
+```
+
+动态 Agent State：
+
+```python
+class ResearchFanoutState(ResearchState, total=False):
+    research_area: ResearchArea
+```
+
+---
+
+### 10. Dynamic Fan-out Function
+
+核心函数：
+
+```python
+def fan_out_research(
+    state: ResearchFanoutState,
+) -> list[Send]:
+    plan = state["research_plan"]
+
+    return [
+        Send(
+            "research_agent",
+            {
+                "ticker": state["ticker"],
+                "research_area": research_area,
+            },
+        )
+        for research_area in plan.research_areas
+    ]
+```
+
+这里就是本课最核心的代码。
+
+例如：
+
+```python
+plan.research_areas = [
+    COMPANY,
+    FINANCIAL,
+    MARKET,
+]
+```
+
+那么返回：
+
+```text
+[
+    Send(... COMPANY),
+    Send(... FINANCIAL),
+    Send(... MARKET),
+]
+```
+
+LangGraph 会根据这些 `Send` 创建并行执行。
+
+---
+
+### 11. Dynamic Research Agent
+
+然后：
+
+```python
+def _run_research_agent(
+    state: ResearchFanoutState,
+) -> ResearchFanoutState:
+    research_area = state["research_area"]
+```
+
+根据 Area dispatch：
+
+```python
+if research_area == ResearchArea.COMPANY:
+    result = company_research_graph.invoke(
+        {
+            "ticker": state["ticker"],
+        }
+    )
+
+    return {
+        "company_research": result.get(
+            "company_research"
+        ),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+Financial：
+
+```python
+if research_area == ResearchArea.FINANCIAL:
+    result = financial_research_graph.invoke(
+        {
+            "ticker": state["ticker"],
+        }
+    )
+
+    return {
+        "financial_research": result.get(
+            "financial_research"
+        ),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+Market：
+
+```python
+if research_area == ResearchArea.MARKET:
+    result = market_research_graph.invoke(
+        {
+            "ticker": state["ticker"],
+        }
+    )
+
+    return {
+        "market_research": result.get(
+            "market_research"
+        ),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+Industry/Macro：
+
+```python
+if research_area == ResearchArea.INDUSTRY_MACRO:
+    result = industry_macro_research_graph.invoke(
+        {
+            "ticker": state["ticker"],
+        }
+    )
+
+    return {
+        "industry_macro_research": result.get(
+            "industry_macro_research"
+        ),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+最后：
+
+```python
+raise ValueError(
+    f"Unsupported research area: {research_area}"
+)
+```
+
+---
+
+### 12. Build Graph
+
+```python
+def build_research_fanout_graph():
+    builder = StateGraph(
+        ResearchFanoutState,
+        input_schema=ResearchFanoutInputState,
+    )
+
+    builder.add_node(
+        "research_agent",
+        _run_research_agent,
+    )
+
+    builder.add_conditional_edges(
+        START,
+        fan_out_research,
+    )
+
+    builder.add_edge(
+        "research_agent",
+        END,
+    )
+
+    return builder.compile()
+
+
+research_fanout_graph = build_research_fanout_graph()
+```
+
+这里有一个非常值得注意的变化：
+
+之前：
+
+```python
+builder.add_edge(START, ...)
+```
+
+现在：
+
+```python
+builder.add_conditional_edges(
+    START,
+    fan_out_research,
+)
+```
+
+因为返回值不再是：
+
+```text
+一个固定 node name
+```
+
+而是：
+
+```text
+多个 Send
+```
+
+---
+
+### 13. 测试一：只执行 Planner 选择的 Agent
+
+这是本课最重要的测试。
+
+```python
+def test_fanout_executes_only_selected_research_areas(
+    monkeypatch,
+):
+    executed = []
+
+    monkeypatch.setattr(
+        "app.agents.research_fanout.company_research_graph.invoke",
+        lambda state: (
+            executed.append(ResearchArea.COMPANY)
+            or {
+                "company_research": None,
+                "research_errors": {},
+            }
+        ),
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_fanout.financial_research_graph.invoke",
+        lambda state: (
+            executed.append(ResearchArea.FINANCIAL)
+            or {
+                "financial_research": None,
+                "research_errors": {},
+            }
+        ),
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_fanout.market_research_graph.invoke",
+        lambda state: (
+            executed.append(ResearchArea.MARKET)
+            or {
+                "market_research": None,
+                "research_errors": {},
+            }
+        ),
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_fanout.industry_macro_research_graph.invoke",
+        lambda state: (
+            executed.append(ResearchArea.INDUSTRY_MACRO)
+            or {
+                "industry_macro_research": None,
+                "research_errors": {},
+            }
+        ),
+    )
+
+    plan = ResearchPlan(
+        research_areas=[
+            ResearchArea.COMPANY,
+            ResearchArea.MARKET,
+        ],
+        rationale="Only company and market research are required.",
+    )
+
+    research_fanout_graph.invoke(
+        {
+            "ticker": "AAPL",
+            "research_plan": plan,
+        }
+    )
+
+    assert set(executed) == {
+        ResearchArea.COMPANY,
+        ResearchArea.MARKET,
+    }
+```
+
+尤其要确认：
+
+```text
+FINANCIAL
+INDUSTRY_MACRO
+```
+
+没有执行。
+
+---
+
+### 14. 测试二：不同 ResearchPlan 产生不同 Fan-out
+
+再测试：
+
+```python
+def test_fanout_respects_research_plan(
+    monkeypatch,
+):
+    executed = []
+
+    def mock_company(state):
+        executed.append(ResearchArea.COMPANY)
+        return {
+            "company_research": None,
+            "research_errors": {},
+        }
+
+    def mock_financial(state):
+        executed.append(ResearchArea.FINANCIAL)
+        return {
+            "financial_research": None,
+            "research_errors": {},
+        }
+
+    monkeypatch.setattr(
+        "app.agents.research_fanout.company_research_graph.invoke",
+        mock_company,
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_fanout.financial_research_graph.invoke",
+        mock_financial,
+    )
+
+    plan = ResearchPlan(
+        research_areas=[
+            ResearchArea.FINANCIAL,
+        ],
+        rationale="Financial research is sufficient.",
+    )
+
+    research_fanout_graph.invoke(
+        {
+            "ticker": "AAPL",
+            "research_plan": plan,
+        }
+    )
+
+    assert executed == [
+        ResearchArea.FINANCIAL,
+    ]
+```
+
+这里体现：
+
+```text
+ResearchPlan
+     ↓
+决定 fan-out 数量
+     ↓
+决定哪些 Agent 被启动
+```
+
+---
+
+### 15. 测试三：Reducer 仍然有效
+
+由于现在可能产生多个动态 `Send`，必须确认前一课的 Reducer 没有被破坏。
+
+```python
+def test_fanout_merges_research_errors(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.agents.research_fanout.company_research_graph.invoke",
+        lambda state: {
+            "company_research": None,
+            "research_errors": {
+                "company": "Company failed.",
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_fanout.market_research_graph.invoke",
+        lambda state: {
+            "market_research": None,
+            "research_errors": {
+                "market": "Market failed.",
+            },
+        },
+    )
+
+    plan = ResearchPlan(
+        research_areas=[
+            ResearchArea.COMPANY,
+            ResearchArea.MARKET,
+        ],
+        rationale="Company and market research are required.",
+    )
+
+    result = research_fanout_graph.invoke(
+        {
+            "ticker": "AAPL",
+            "research_plan": plan,
+        }
+    )
+
+    assert result["research_errors"] == {
+        "company": "Company failed.",
+        "market": "Market failed.",
+    }
+```
+
+---
+
+### 16. 一个关键理解：Fan-out 和 Router 的区别
+
+现在系统中已经出现两个很容易混淆的概念。
+
+#### Router
+
+上一课：
+
+```text
+next_research_area
+       ↓
+Router
+       ↓
+Company Agent
+```
+
+Router 的问题是：
+
+> **这一次应该去哪一个 Agent？**
+
+它是：
+
+```text
+1 → 1
+```
+
+---
+
+#### Fan-out
+
+本课：
+
+```text
+ResearchPlan
+    ↓
+[Company, Financial, Market]
+    ↓
+Fan-out
+    ├── Company
+    ├── Financial
+    └── Market
+```
+
+Fan-out 的问题是：
+
+> **这一次应该同时启动哪些 Agent？**
+
+它是：
+
+```text
+1 → N
+```
+
+这两个概念不能混为一谈。
+
+---
+
+### 17. 本课暂时不把 Planner 接进来
+
+虽然真实架构最终应该是：
+
+```text
+User Query
+    ↓
+Planner
+    ↓
+ResearchPlan
+    ↓
+Dynamic Fan-out
+    ↓
+Research Agents
+```
+
+但 Lesson 6 先把：
+
+```text
+ResearchPlan
+    ↓
+Dynamic Fan-out
+```
+
+独立验证。
+
+原因是教学上要把两个问题拆开：
+
+#### Planner
+
+```text
+WHAT
+```
+
+#### Fan-out
+
+```text
+HOW MANY / WHICH IN PARALLEL
+```
+
+后面再组合。
+
+---
+
+### 18. Acceptance Criteria
+
+Lesson 6 当前阶段完成标准：
+
+* `Send` 能够根据 `ResearchPlan.research_areas` 动态创建并行任务
+* 不再固定启动四个 Agent
+* Planner 选择两个 Area，就只执行两个 Agent
+* Planner 选择三个 Area，就只执行三个 Agent
+* 每个动态任务只写自己的 Dedicated State Field
+* `research_errors` Reducer 可以正确合并多个动态 Agent 的结果
+* 不引入 Supervisor
+* 不修改现有 Planner
+* 不修改现有 Router
+* 不接真实金融 API
+
+最终概念模型：
+
+```text
+                ResearchPlan
+                     │
+                     │
+              [A, B, C]
+                     │
+                     ▼
+                 Fan-out
+               /    |    \
+              /     |     \
+             ▼      ▼      ▼
+            A       B       C
+             \      |      /
+              \     |     /
+               \    |    /
+                Shared State
+```
+
+这里的 **Fan-in 可以是隐式的**：如果这些动态分支全部直接结束 Graph，就不需要人为增加一个空节点；只有在并行分支之后存在实际的后续计算节点时，才需要显式汇合到那个节点。
