@@ -97,20 +97,36 @@ def _route_and_execute(
         }
     )
 
-    return {
+    update: ResearchOrchestratorState = {
         "routed_area": result.get("routed_area"),
-        "company_research": result.get("company_research"),
-        "financial_research": result.get("financial_research"),
-        "market_research": result.get("market_research"),
-        "industry_macro_research": result.get(
-            "industry_macro_research"
-        ),
+        "routing_error": result.get("routing_error", ""),
         "research_errors": result.get(
             "research_errors",
             state.get("research_errors", {}),
         ),
-        "routing_error": result.get("routing_error", ""),
     }
+
+    if research_area == ResearchArea.COMPANY:
+        update["company_research"] = result.get(
+            "company_research"
+        )
+
+    elif research_area == ResearchArea.FINANCIAL:
+        update["financial_research"] = result.get(
+            "financial_research"
+        )
+
+    elif research_area == ResearchArea.MARKET:
+        update["market_research"] = result.get(
+            "market_research"
+        )
+
+    elif research_area == ResearchArea.INDUSTRY_MACRO:
+        update["industry_macro_research"] = result.get(
+            "industry_macro_research"
+        )
+
+    return update
 
 
 def _mark_completed(
