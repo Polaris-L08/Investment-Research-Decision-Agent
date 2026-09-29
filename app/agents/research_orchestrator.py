@@ -129,6 +129,18 @@ def _route_and_execute(
     return update
 
 
+def _route_after_routing(
+    state: ResearchOrchestratorState,
+) -> str:
+    if state.get("routing_error"):
+        return "orchestration_error"
+
+    if state.get("routed_area") != state.get("current_research_area"):
+        return "orchestration_error"
+
+    return "mark_completed"
+
+
 def _mark_completed(
     state: ResearchOrchestratorState,
 ) -> ResearchOrchestratorState:
@@ -221,7 +233,15 @@ def build_research_orchestrator_graph():
         },
     )
 
-    builder.add_edge("route_and_execute", "mark_completed")
+    builder.add_conditional_edges(
+        "route_and_execute",
+        _route_after_routing,
+        {
+            "mark_completed": "mark_completed",
+            "orchestration_error": "orchestration_error",
+        },
+    )
+
     builder.add_conditional_edges(
         "mark_completed",
         _route_after_execution,
