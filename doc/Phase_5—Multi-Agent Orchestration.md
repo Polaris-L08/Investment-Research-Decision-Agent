@@ -2643,3 +2643,1079 @@ State
 这是后面进入 Parallel 的基础。
 
 ---
+
+
+## Lesson 5：Parallel Research Agents
+
+### Part 1: Parallel Research Agents + Reducer
+
+#### 1. Goal
+
+本课只解决一个问题：
+
+> **让多个 Research Agent 真正并行执行，并把各自结果安全地合并回 Shared State。**
+
+上一课：
+
+```text
+Planner
+   ↓
+Orchestrator
+   ↓
+Company
+   ↓
+Financial
+   ↓
+Market
+   ↓
+Industry/Macro
+```
+
+是：
+
+> **Sequential Multi-Agent Orchestration**
+
+本课开始变成：
+
+```text
+                    ┌── Company ────────┐
+                    │                   │
+Planner → Fan-out ──┼── Financial ──────┼──→ Shared State
+                    │                   │
+                    ├── Market ─────────┤
+                    │                   │
+                    └── Industry/Macro ─┘
+```
+
+也就是：
+
+> **多个 Agent 同时工作。**
+
+---
+
+#### 2. Why Now
+
+Lesson 4 已经解决了：
+
+```text
+Planner
+    ↓
+ResearchPlan
+    ↓
+Orchestrator
+    ↓
+Router
+    ↓
+Agent
+    ↓
+Agent
+    ↓
+Agent
+```
+
+因此现在我们已经具备：
+
+* Planner
+* Router
+* Shared State
+* Dedicated research fields
+* Sequential Orchestration
+
+缺少的就是：
+
+> **Parallel Execution**
+
+而一旦进入 Parallel，就会产生一个 Lesson 4 中没有出现的新问题：
+
+```text
+Company Agent ──────┐
+                    │
+Financial Agent ────┼──→ 同一个 State
+                    │
+Market Agent ───────┤
+                    │
+Industry Agent ─────┘
+```
+
+多个节点可能同时产生 State Update。
+
+因此我们必须回答：
+
+> **多个并行节点写回同一个 State 时，LangGraph 应该如何合并这些 Update？**
+
+这就是 **Reducer**。
+
+---
+
+#### 3. 本课核心概念
+
+##### 3.1 Sequential State Update
+
+上一课是：
+
+```text
+Company
+   ↓
+State Update
+
+Financial
+   ↓
+State Update
+
+Market
+   ↓
+State Update
+```
+
+每次只有一个 Agent 修改 State。
+
+所以我们可以通过：
+
+```python
+return {
+    "company_research": result,
+}
+```
+
+这种方式自然完成更新。
+
+---
+
+##### 3.2 Parallel State Update
+
+本课则可能出现：
+
+```text
+Company ───────→ {
+    "company_research": ...
+}
+
+Financial ─────→ {
+    "financial_research": ...
+}
+
+Market ────────→ {
+    "market_research": ...
+}
+```
+
+这些 Update 最终都要进入：
+
+```text
+ResearchState
+```
+
+所以 State 必须知道：
+
+> 如果多个节点同时更新同一个字段，应该怎么处理？
+
+---
+
+#### 4. Reducer 是什么
+
+可以先把 Reducer 理解成：
+
+> **一个 State Field 的 Merge Policy。**
+
+例如：
+
+```python
+research_errors: Annotated[
+    dict[str, str],
+    merge_dicts,
+]
+```
+
+表示：
+
+```text
+旧值 + 新值
+      ↓
+ merge_dicts
+      ↓
+新 State
+```
+
+例如：
+
+```python
+old = {
+    "company": "error A",
+}
+
+new = {
+    "financial": "error B",
+}
+```
+
+Reducer：
+
+```python
+{
+    "company": "error A",
+    "financial": "error B",
+}
+```
+
+---
+
+#### 5. 本课一个非常重要的边界
+
+**不要把所有 State 字段都加 Reducer。**
+
+这是本课非常重要的设计原则。
+
+例如：
+
+```python
+company_research
+```
+
+理论上只有 Company Agent 写它。
+
+```python
+financial_research
+```
+
+理论上只有 Financial Agent 写它。
+
+所以这些字段：
+
+```text
+company_research
+financial_research
+market_research
+industry_macro_research
+```
+
+**暂时不需要 Reducer。**
+
+真正需要 Reducer 的典型字段是：
+
+```python
+research_errors
+```
+
+因为多个并行 Agent 都可能产生 error：
+
+```text
+Company ──────→ research_errors
+Financial ─────→ research_errors
+Market ───────→ research_errors
+```
+
+如果没有 Reducer，就可能发生：
+
+```text
+Company error
+     ↓
+Financial error
+     ↓
+Company error 消失
+```
+
+这与我们刚才解决的问题本质上类似。
+
+---
+
+#### 6. Graph Topology
+
+Lesson 5 暂时先不要做 Fan-out / Fan-in 的完整动态模式。
+
+本课第一步先建立一个**固定 Parallel Research Graph**。
+
+目标拓扑：
+
+```text
+                         ┌── company_research ──────┐
+                         │                          │
+                         ├── financial_research ────┤
+                         │                          │
+START → parallel_research ┼── market_research ───────┼──→ END
+                         │                          │
+                         └── industry_macro ────────┘
+```
+
+更准确地说，LangGraph 的节点关系是：
+
+```text
+START
+  │
+  ├────────→ company_research ──────┐
+  │                                 │
+  ├────────→ financial_research ────┤
+  │                                 │
+  ├────────→ market_research ───────┤
+  │                                 │
+  └────────→ industry_macro ────────┘
+                                    │
+                                    ▼
+                                   END
+```
+
+这一次我们第一次让：
+
+```text
+START
+ ↓
+多个节点
+```
+
+同时发生。
+
+---
+
+#### 7. State Design
+
+当前：
+
+```python
+class ResearchState(TypedDict, total=False):
+    ticker: str
+    research_plan: ResearchPlan
+    next_research_area: ResearchArea
+
+    company_research: CompanyResearchResult | None
+    financial_research: FinancialResearchResult | None
+    market_research: MarketResearchResult | None
+    industry_macro_research: IndustryMacroResearchResult | None
+
+    research_errors: dict[str, str]
+```
+
+本课重点修改：
+
+```python
+research_errors
+```
+
+因为它需要支持多个并行 Agent 的更新。
+
+---
+
+#### 8. Exact Files
+
+本课建议：
+
+##### 新增
+
+```text
+app/agents/research_parallel.py
+tests/test_research_parallel.py
+```
+
+##### 修改
+
+```text
+app/agents/research_state.py
+```
+
+其他 Agent 暂时不要动。
+
+---
+
+#### 9. 第一步：定义 Reducer
+
+在：
+
+```text
+app/agents/research_state.py
+```
+
+中增加：
+
+```python
+from typing import Annotated, TypedDict
+```
+
+然后定义：
+
+```python
+def merge_research_errors(
+    existing: dict[str, str] | None,
+    new: dict[str, str] | None,
+) -> dict[str, str]:
+    """Merge research errors from parallel research agents."""
+    merged = dict(existing or {})
+    merged.update(new or {})
+    return merged
+```
+
+然后：
+
+```python
+research_errors: Annotated[
+    dict[str, str],
+    merge_research_errors,
+]
+```
+
+所以最终：
+
+```python
+class ResearchState(TypedDict, total=False):
+    """Shared state boundary for multi-agent research orchestration."""
+
+    ticker: str
+    research_plan: ResearchPlan
+    next_research_area: ResearchArea
+
+    company_research: CompanyResearchResult | None
+    financial_research: FinancialResearchResult | None
+    market_research: MarketResearchResult | None
+    industry_macro_research: IndustryMacroResearchResult | None
+
+    research_errors: Annotated[
+        dict[str, str],
+        merge_research_errors,
+    ]
+```
+
+---
+
+#### 10. 为什么这里使用 `Annotated`
+
+这里是 LangGraph State 的一个关键语法：
+
+```python
+Annotated[
+    dict[str, str],
+    merge_research_errors,
+]
+```
+
+它表达的是：
+
+```text
+State Field
+    │
+    ├── Type
+    │    ↓
+    │  dict[str, str]
+    │
+    └── Reducer
+         ↓
+    merge_research_errors
+```
+
+也就是说：
+
+```python
+research_errors
+```
+
+不再是简单：
+
+```text
+new value replaces old value
+```
+
+而是：
+
+```text
+old value
+    +
+new value
+    ↓
+Reducer
+    ↓
+merged value
+```
+
+---
+
+#### 11. 第二步：建立 Parallel Graph
+
+新建：
+
+```text
+app/agents/research_parallel.py
+```
+
+第一版先不要把 Planner 和 Router 放进来。
+
+我们专门学习：
+
+> **Parallel Agent Execution**
+
+可以使用现有四个 Agent Graph。
+
+结构：
+
+```python
+from langgraph.graph import END, START, StateGraph
+
+from app.agents.company_research import company_research_graph
+from app.agents.financial_research import financial_research_graph
+from app.agents.industry_macro_research import (
+    industry_macro_research_graph,
+)
+from app.agents.market_research import market_research_graph
+from app.agents.research_state import ResearchState
+```
+
+然后定义四个 wrapper。
+
+例如：
+
+```python
+def _run_company(
+    state: ResearchState,
+) -> ResearchState:
+    result = company_research_graph.invoke(
+        {
+            "ticker": state["ticker"],
+        }
+    )
+
+    return {
+        "company_research": result.get("company_research"),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+Financial：
+
+```python
+def _run_financial(
+    state: ResearchState,
+) -> ResearchState:
+    result = financial_research_graph.invoke(
+        {
+            "ticker": state["ticker"],
+        }
+    )
+
+    return {
+        "financial_research": result.get(
+            "financial_research"
+        ),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+Market：
+
+```python
+def _run_market(
+    state: ResearchState,
+) -> ResearchState:
+    result = market_research_graph.invoke(
+        {
+            "ticker": state["ticker"],
+        }
+    )
+
+    return {
+        "market_research": result.get(
+            "market_research"
+        ),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+Industry/Macro：
+
+```python
+def _run_industry_macro(
+    state: ResearchState,
+) -> ResearchState:
+    result = industry_macro_research_graph.invoke(
+        {
+            "ticker": state["ticker"],
+        }
+    )
+
+    return {
+        "industry_macro_research": result.get(
+            "industry_macro_research"
+        ),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+---
+
+#### 12. 构建 Graph
+
+```python
+def build_parallel_research_graph():
+    builder = StateGraph(ResearchState)
+
+    builder.add_node("company_research", _run_company)
+    builder.add_node("financial_research", _run_financial)
+    builder.add_node("market_research", _run_market)
+    builder.add_node(
+        "industry_macro_research",
+        _run_industry_macro,
+    )
+
+    builder.add_edge(
+        START,
+        "company_research",
+    )
+    builder.add_edge(
+        START,
+        "financial_research",
+    )
+    builder.add_edge(
+        START,
+        "market_research",
+    )
+    builder.add_edge(
+        START,
+        "industry_macro_research",
+    )
+
+    builder.add_edge(
+        "company_research",
+        END,
+    )
+    builder.add_edge(
+        "financial_research",
+        END,
+    )
+    builder.add_edge(
+        "market_research",
+        END,
+    )
+    builder.add_edge(
+        "industry_macro_research",
+        END,
+    )
+
+    return builder.compile()
+
+
+research_parallel_graph = build_parallel_research_graph()
+```
+
+这里非常值得你注意：
+
+```python
+builder.add_edge(START, "company_research")
+builder.add_edge(START, "financial_research")
+builder.add_edge(START, "market_research")
+builder.add_edge(START, "industry_macro_research")
+```
+
+这四条 Edge 是并行拓扑的核心。
+
+---
+
+#### 13. 第一组测试：四个 Agent 都执行
+
+新建：
+
+```text
+tests/test_research_parallel.py
+```
+
+先测试 Graph 是否真正启动四个 Agent。
+
+可以 monkeypatch 四个 graph：
+
+```python
+def test_parallel_research_executes_all_agents(monkeypatch):
+    executed = []
+
+    def mock_company(state):
+        executed.append("company")
+        return {
+            "company_research": None,
+            "research_errors": {},
+        }
+
+    def mock_financial(state):
+        executed.append("financial")
+        return {
+            "financial_research": None,
+            "research_errors": {},
+        }
+
+    def mock_market(state):
+        executed.append("market")
+        return {
+            "market_research": None,
+            "research_errors": {},
+        }
+
+    def mock_industry_macro(state):
+        executed.append("industry_macro")
+        return {
+            "industry_macro_research": None,
+            "research_errors": {},
+        }
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.company_research_graph.invoke",
+        mock_company,
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.financial_research_graph.invoke",
+        mock_financial,
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.market_research_graph.invoke",
+        mock_market,
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.industry_macro_research_graph.invoke",
+        mock_industry_macro,
+    )
+
+    result = research_parallel_graph.invoke(
+        {
+            "ticker": "AAPL",
+        }
+    )
+
+    assert set(executed) == {
+        "company",
+        "financial",
+        "market",
+        "industry_macro",
+    }
+```
+
+注意这里**不要断言执行顺序**。
+
+这是 Parallel Graph。
+
+我们关心：
+
+```text
+全部执行
+```
+
+而不是：
+
+```text
+谁先执行
+```
+
+---
+
+#### 14. 第二组测试：四个 Dedicated Fields 都保留
+
+这是本课非常重要的测试。
+
+```python
+def test_parallel_research_preserves_all_results(monkeypatch):
+    company_result = object()
+    financial_result = object()
+    market_result = object()
+    industry_macro_result = object()
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.company_research_graph.invoke",
+        lambda state: {
+            "company_research": company_result,
+            "research_errors": {},
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.financial_research_graph.invoke",
+        lambda state: {
+            "financial_research": financial_result,
+            "research_errors": {},
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.market_research_graph.invoke",
+        lambda state: {
+            "market_research": market_result,
+            "research_errors": {},
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.industry_macro_research_graph.invoke",
+        lambda state: {
+            "industry_macro_research": industry_macro_result,
+            "research_errors": {},
+        },
+    )
+
+    result = research_parallel_graph.invoke(
+        {
+            "ticker": "AAPL",
+        }
+    )
+
+    assert result["company_research"] is company_result
+    assert result["financial_research"] is financial_result
+    assert result["market_research"] is market_result
+    assert (
+        result["industry_macro_research"]
+        is industry_macro_result
+    )
+```
+
+这个测试与刚才 Lesson 4 的 bug 有一个非常重要的区别：
+
+Lesson 4：
+
+```text
+Sequential
+→ 后一个 update 覆盖前一个错误 update
+```
+
+Lesson 5：
+
+```text
+Parallel
+→ 多个 update 同时进入 State
+→ Dedicated fields 独立保存
+```
+
+---
+
+#### 15. 第三个测试：Reducer
+
+这是本课最关键的测试。
+
+直接测试：
+
+```python
+def test_research_errors_reducer_merges_errors():
+    existing = {
+        "company": "Company research failed.",
+    }
+
+    new = {
+        "financial": "Financial research failed.",
+    }
+
+    merged = merge_research_errors(
+        existing,
+        new,
+    )
+
+    assert merged == {
+        "company": "Company research failed.",
+        "financial": "Financial research failed.",
+    }
+```
+
+然后再测试真正的 Graph：
+
+```python
+def test_parallel_research_merges_errors(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.research_parallel.company_research_graph.invoke",
+        lambda state: {
+            "company_research": None,
+            "research_errors": {
+                "company": "Company failed.",
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.financial_research_graph.invoke",
+        lambda state: {
+            "financial_research": None,
+            "research_errors": {
+                "financial": "Financial failed.",
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.market_research_graph.invoke",
+        lambda state: {
+            "market_research": None,
+            "research_errors": {
+                "market": "Market failed.",
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.agents.research_parallel.industry_macro_research_graph.invoke",
+        lambda state: {
+            "industry_macro_research": None,
+            "research_errors": {
+                "industry_macro": "Industry/macro failed.",
+            },
+        },
+    )
+
+    result = research_parallel_graph.invoke(
+        {
+            "ticker": "AAPL",
+        }
+    )
+
+    assert result["research_errors"] == {
+        "company": "Company failed.",
+        "financial": "Financial failed.",
+        "market": "Market failed.",
+        "industry_macro": "Industry/macro failed.",
+    }
+```
+
+这个测试才真正证明：
+
+```text
+                    company error
+                         │
+                         ▼
+                    ┌─────────┐
+                    │ Reducer │
+                    └────┬────┘
+                         │
+financial error ─────────┤
+                         │
+market error ────────────┤
+                         │
+industry error ──────────┘
+                         ↓
+              merged research_errors
+```
+
+---
+
+#### 16. 本课暂时不要做的事情
+
+Lesson 5 第一阶段先**不要**加入：
+
+* Research Planner
+* Router
+* 动态 ResearchPlan
+* Fan-out / Fan-in
+* Supervisor
+* Reducer for every field
+* 新 Agent
+* 新 ResearchArea
+* 复杂错误恢复
+
+本课只学习：
+
+> **Parallel execution + State Reducer**
+
+---
+
+#### 17. Acceptance Criteria
+
+完成后必须满足：
+
+##### Graph
+
+```text
+START
+ ├── Company
+ ├── Financial
+ ├── Market
+ └── Industry/Macro
+```
+
+四个 Agent 可以并行执行。
+
+##### State
+
+最终：
+
+```text
+company_research       ✓
+financial_research     ✓
+market_research        ✓
+industry_macro_research ✓
+```
+
+不会因为并行更新而互相覆盖。
+
+##### Reducer
+
+多个 Agent：
+
+```text
+research_errors
+```
+
+可以合并：
+
+```text
+company
+financial
+market
+industry_macro
+```
+
+而不是只保留最后一个。
+
+##### Tests
+
+至少通过：
+
+```text
+test_parallel_research_executes_all_agents
+test_parallel_research_preserves_all_results
+test_research_errors_reducer_merges_errors
+test_parallel_research_merges_errors
+```
+
+---
+
+#### 本课最重要的理解
+
+到这里，你应该能明确区分：
+
+```text
+Lesson 4
+Sequential
+    ↓
+一个 Agent 更新 State
+    ↓
+下一个 Agent 更新 State
+```
+
+和：
+
+```text
+Lesson 5
+Parallel
+    ↓
+多个 Agent 同时更新 State
+    ↓
+Reducer 负责定义如何合并
+```
+
+以及：
+
+```text
+Dedicated Field
+    ↓
+company_research
+financial_research
+market_research
+industry_macro_research
+```
+
+与：
+
+```text
+Shared Field
+    ↓
+research_errors
+    ↓
+需要 Reducer
+```

@@ -1,4 +1,4 @@
-from typing import TypedDict
+from typing import TypedDict, Annotated
 
 from app.agents.models import (
     CompanyResearchResult,
@@ -8,6 +8,16 @@ from app.agents.models import (
     ResearchArea,
     ResearchPlan,
 )
+
+
+def merge_research_errors(
+    existing: dict[str, str] | None,
+    new: dict[str, str] | None,
+) -> dict[str, str]:
+    """Merge research errors from parallel research agents."""
+    merged = dict(existing or {})
+    merged.update(new or {})
+    return merged
 
 
 class ResearchState(TypedDict, total=False):
@@ -22,4 +32,4 @@ class ResearchState(TypedDict, total=False):
     market_research: MarketResearchResult | None
     industry_macro_research: IndustryMacroResearchResult | None
 
-    research_errors: dict[str, str]
+    research_errors: Annotated[dict[str, str], merge_research_errors]
