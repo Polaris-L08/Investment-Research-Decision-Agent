@@ -4672,3 +4672,1393 @@ Lesson 6 当前阶段完成标准：
 ```
 
 这里的 **Fan-in 可以是隐式的**：如果这些动态分支全部直接结束 Graph，就不需要人为增加一个空节点；只有在并行分支之后存在实际的后续计算节点时，才需要显式汇合到那个节点。
+
+
+
+## Lesson 7：Supervisor / Agent Coordination
+
+### 1. Lesson Goal
+
+本课只完成一个目标：
+
+> **建立一个项目范围内的 Supervisor，用于协调已有 Research Agents 的执行。**
+
+到 Lesson 6 为止，我们已经拥有：
+
+```text
+Research Planner
+      ↓
+Research Plan
+      ↓
+Dynamic Fan-out
+      ↓
+┌───────────────┐
+│ Company       │
+│ Financial     │
+│ Market        │
+│ IndustryMacro │
+└───────────────┘
+      ↓
+    END
+```
+
+现在的问题是：
+
+> **谁负责决定整个 Research Workflow 应该如何推进？**
+
+Lesson 7 引入：
+
+```text
+Supervisor
+```
+
+但这里有一个非常重要的边界：
+
+**我们不是在构建一个通用 Supervisor Framework。**
+
+也不做：
+
+* Agent Registry
+* Workflow Engine
+* Event Bus
+* Scheduler
+* Runtime
+* Generic Agent Manager
+
+Supervisor 只是本项目中的一个**研究协调节点**。
+
+---
+
+### 2. Why Now
+
+Phase 5 的学习路线现在已经非常清晰：
+
+```text
+Lesson 1
+Research Planner
+    ↓
+Lesson 2
+Agent Routing
+    ↓
+Lesson 3
+Shared State
+    ↓
+Lesson 4
+Sequential Multi-Agent
+    ↓
+Lesson 5
+Parallel Research + Reducer
+    ↓
+Lesson 6
+Dynamic Fan-out / Fan-in
+    ↓
+Lesson 7
+Supervisor / Agent Coordination
+```
+
+前六课解决的是：
+
+> **如何执行多个 Agent。**
+
+Lesson 7 开始解决：
+
+> **如何协调多个 Agent。**
+
+这是一个重要的架构层次变化。
+
+---
+
+### 3. Supervisor 和之前的 Orchestrator / Router 有什么区别？
+
+这是 Lesson 7 最重要的概念。
+
+#### Router
+
+Router 解决：
+
+> **当前这个 Research Area 应该交给哪个 Agent？**
+
+例如：
+
+```text
+ResearchArea.COMPANY
+        ↓
+Company Research Agent
+```
+
+它是：
+
+```text
+1 → 1
+```
+
+---
+
+#### Orchestrator
+
+Lesson 4 的 Orchestrator 解决：
+
+> **按照固定顺序，把 Research Plan 中的任务一个一个执行。**
+
+例如：
+
+```text
+COMPANY
+   ↓
+FINANCIAL
+   ↓
+MARKET
+   ↓
+INDUSTRY_MACRO
+```
+
+它关注的是：
+
+```text
+执行顺序
+```
+
+---
+
+### 4. Supervisor
+
+Supervisor 解决的是更高一层的问题：
+
+> **当前整个 Research Workflow 应该采取什么动作？**
+
+例如：
+
+```text
+Supervisor
+    │
+    ├── execute COMPANY
+    │
+    ├── execute FINANCIAL
+    │
+    ├── execute MARKET
+    │
+    └── finish
+```
+
+因此可以理解为：
+
+```text
+Planner
+    ↓
+WHAT research is needed?
+
+Supervisor
+    ↓
+WHAT should happen next?
+
+Router
+    ↓
+WHICH agent executes it?
+
+Agent
+    ↓
+DO the research
+```
+
+这是整个 Phase 5 最重要的架构分层。
+
+---
+
+### 5. 本 Lesson 的 Supervisor 不使用 LLM
+
+这里特别重要。
+
+**Lesson 7 暂时不让 Supervisor 使用 LLM。**
+
+Supervisor 是一个确定性的协调器。
+
+原因是我们现在首先要学习：
+
+```text
+Supervisor = Coordination
+```
+
+而不是：
+
+```text
+Supervisor = LLM decides everything
+```
+
+如果现在直接引入 LLM Supervisor，会同时混入：
+
+* structured output
+* agent selection
+* routing
+* loop control
+* termination
+* error handling
+
+这样会掩盖真正需要学习的 LangGraph Supervisor topology。
+
+因此本课：
+
+```text
+Supervisor = deterministic state machine
+```
+
+---
+
+### 6. Lesson 7 的具体目标
+
+我们建立一个：
+
+```text
+Research Supervisor
+```
+
+它负责：
+
+1. 检查 Research Plan；
+2. 检查已经完成的 Research Areas；
+3. 决定下一个需要执行的 Research Area；
+4. 调用现有 Research Agent；
+5. 更新 completed areas；
+6. 继续协调；
+7. 所有计划完成后结束。
+
+因此它本质上是一个：
+
+```text
+Supervisor Loop
+```
+
+---
+
+### 7. Graph Topology
+
+本课的 Graph Topology **必须理解清楚**。
+
+```text
+                    ┌─────────────────────┐
+                    │                     │
+                    │     Supervisor      │
+                    │                     │
+                    └──────────┬──────────┘
+                               │
+                               ↓
+                      select_next_area
+                         /          \
+                        /            \
+                  has area          done
+                     ↓                ↓
+              route_and_execute      END
+                     │
+                     ↓
+               update_progress
+                     │
+                     └──────────────→ Supervisor
+```
+
+更完整地表示：
+
+```text
+START
+  ↓
+Supervisor
+  ↓
+select_next_area
+  ├──────────────→ END
+  │
+  ↓
+route_and_execute
+  ↓
+update_progress
+  ↓
+Supervisor
+  └──────────────→ select_next_area
+```
+
+这里真正重要的是：
+
+> **Supervisor 本身形成一个 loop。**
+
+---
+
+### 8. 为什么不是直接复用 Lesson 4 Orchestrator？
+
+这是一个非常好的架构问题。
+
+Lesson 4：
+
+```text
+for area in fixed_order:
+    route(area)
+    execute(area)
+```
+
+它是一个：
+
+```text
+程序式 orchestration loop
+```
+
+而 Lesson 7：
+
+```text
+Supervisor
+    ↓
+decide next action
+    ↓
+execute
+    ↓
+update state
+    ↓
+Supervisor
+```
+
+它把：
+
+```text
+"下一步做什么"
+```
+
+显式建模成了 Graph State + Graph Node。
+
+这正是 Supervisor Pattern 的核心。
+
+---
+
+### 9. Exact Files
+
+本课只新增/修改以下文件：
+
+```text
+app/
+└── agents/
+    ├── research_supervisor.py      ← 新增
+    └── research_state.py           ← 通常无需修改
+
+tests/
+└── test_research_supervisor.py     ← 新增
+```
+
+本课：
+
+**不要修改：**
+
+```text
+research_planner.py
+research_router.py
+research_orchestrator.py
+research_parallel.py
+research_fanout.py
+```
+
+它们已经分别承担自己的职责。
+
+---
+
+### 10. Supervisor State Design
+
+新增：
+
+```python
+from typing import TypedDict
+
+from app.agents.models import ResearchArea, ResearchPlan
+from app.agents.research_state import ResearchState
+
+
+class ResearchSupervisorInputState(TypedDict):
+    ticker: str
+    research_plan: ResearchPlan
+
+
+class ResearchSupervisorState(ResearchState, total=False):
+    completed_research_areas: list[ResearchArea]
+    current_research_area: ResearchArea | None
+    supervisor_error: str
+
+
+class ResearchSupervisorOutputState(ResearchState, total=False):
+    completed_research_areas: list[ResearchArea]
+    current_research_area: ResearchArea | None
+    supervisor_error: str
+```
+
+这里需要特别注意：
+
+```python
+completed_research_areas
+```
+
+和 Lesson 4 的：
+
+```python
+completed_areas
+```
+
+概念类似，但这里建议使用更明确的名称：
+
+```text
+completed_research_areas
+```
+
+因为这个 State 是 Supervisor 专属 State。
+
+---
+
+### 11. Supervisor 的核心职责
+
+Supervisor 需要有一个函数：
+
+```python
+def select_next_research_area(
+    state: ResearchSupervisorState,
+) -> ResearchSupervisorState:
+```
+
+逻辑非常简单：
+
+```text
+ResearchPlan.research_areas
+        ↓
+排除 completed_research_areas
+        ↓
+如果还有
+    ↓
+current_research_area
+如果没有
+    ↓
+workflow finished
+```
+
+例如：
+
+```python
+research_plan = [
+    COMPANY,
+    FINANCIAL,
+    MARKET,
+]
+```
+
+第一次：
+
+```text
+completed = []
+
+next = COMPANY
+```
+
+第二次：
+
+```text
+completed = [COMPANY]
+
+next = FINANCIAL
+```
+
+第三次：
+
+```text
+completed = [COMPANY, FINANCIAL]
+
+next = MARKET
+```
+
+第四次：
+
+```text
+completed = [COMPANY, FINANCIAL, MARKET]
+
+next = None
+```
+
+结束。
+
+---
+
+### 12. Supervisor Selection Function
+
+在：
+
+```text
+app/agents/research_supervisor.py
+```
+
+加入：
+
+```python
+def select_next_research_area(
+    state: ResearchSupervisorState,
+) -> ResearchSupervisorState:
+    plan = state["research_plan"]
+    completed = set(
+        state.get("completed_research_areas", [])
+    )
+
+    for research_area in plan.research_areas:
+        if research_area not in completed:
+            return {
+                "current_research_area": research_area,
+                "supervisor_error": "",
+            }
+
+    return {
+        "current_research_area": None,
+        "supervisor_error": "",
+    }
+```
+
+这里故意使用：
+
+```python
+for research_area in plan.research_areas:
+```
+
+而不是重新定义一个固定顺序。
+
+因此 Supervisor 尊重：
+
+```text
+ResearchPlan
+```
+
+而不是自己重新决定研究范围。
+
+---
+
+### 13. 为什么这是一个重要设计？
+
+因为：
+
+```text
+Planner
+```
+
+仍然负责：
+
+```text
+WHAT
+```
+
+Supervisor 只负责：
+
+```text
+WHAT NEXT
+```
+
+例如 Planner 给：
+
+```text
+[MARKET, COMPANY]
+```
+
+Supervisor 就应该：
+
+```text
+MARKET
+    ↓
+COMPANY
+```
+
+而不能偷偷改成：
+
+```text
+COMPANY
+    ↓
+FINANCIAL
+    ↓
+MARKET
+```
+
+否则 Supervisor 就越权成为 Planner。
+
+---
+
+### 14. Routing
+
+下一步我们需要根据：
+
+```python
+current_research_area
+```
+
+选择已有 Research Agent。
+
+这里**不要重新实现 Agent**。
+
+可以直接复用之前的 Router 思路。
+
+建议：
+
+```python
+def route_and_execute(
+    state: ResearchSupervisorState,
+) -> ResearchSupervisorState:
+```
+
+根据：
+
+```python
+state["current_research_area"]
+```
+
+调用：
+
+```text
+company_research_graph
+financial_research_graph
+market_research_graph
+industry_macro_research_graph
+```
+
+例如：
+
+```python
+if research_area == ResearchArea.COMPANY:
+    result = company_research_graph.invoke(
+        {"ticker": state["ticker"]}
+    )
+
+    return {
+        "company_research": result.get("company_research"),
+        "research_errors": result.get(
+            "research_errors",
+            {},
+        ),
+    }
+```
+
+其他三个 Agent 同理。
+
+---
+
+### 15. 一个非常重要的 State 原则
+
+不要犯 Lesson 4 曾经出现过的错误：
+
+**不要每次返回全部四个 Research Result 字段。**
+
+错误：
+
+```python
+return {
+    "company_research": result.get(...),
+    "financial_research": None,
+    "market_research": None,
+    "industry_macro_research": None,
+}
+```
+
+因为这会造成：
+
+```text
+Company
+ ↓
+company_research = result
+financial_research = None
+market_research = None
+```
+
+之后：
+
+```text
+Financial
+ ↓
+company_research = None
+financial_research = result
+```
+
+从而把之前的结果覆盖掉。
+
+Supervisor 必须遵循：
+
+> **Each Agent writes only its own dedicated result field.**
+
+---
+
+### 16. Progress Update
+
+执行完 Agent 后，需要记录：
+
+```python
+completed_research_areas
+```
+
+增加：
+
+```python
+def mark_completed(
+    state: ResearchSupervisorState,
+) -> ResearchSupervisorState:
+    current = state.get("current_research_area")
+
+    if current is None:
+        return {
+            "supervisor_error": (
+                "No current research area to mark as completed."
+            )
+        }
+
+    completed = list(
+        state.get("completed_research_areas", [])
+    )
+
+    if current not in completed:
+        completed.append(current)
+
+    return {
+        "completed_research_areas": completed,
+        "current_research_area": None,
+        "supervisor_error": "",
+    }
+```
+
+这样 State 会形成：
+
+```text
+[]
+ ↓
+[COMPANY]
+ ↓
+[COMPANY, FINANCIAL]
+ ↓
+[COMPANY, FINANCIAL, MARKET]
+```
+
+---
+
+### 17. Conditional Routing
+
+Supervisor Graph 的核心条件：
+
+```python
+def supervisor_should_continue(
+    state: ResearchSupervisorState,
+) -> str:
+    if state.get("supervisor_error"):
+        return "error"
+
+    if state.get("current_research_area") is None:
+        return "done"
+
+    return "execute"
+```
+
+然后：
+
+```python
+builder.add_conditional_edges(
+    "supervisor",
+    supervisor_should_continue,
+    {
+        "execute": "route_and_execute",
+        "done": END,
+        "error": END,
+    },
+)
+```
+
+---
+
+### 18. Graph Definition
+
+完整 Graph：
+
+```python
+from langgraph.graph import END, START, StateGraph
+```
+
+然后：
+
+```python
+def build_research_supervisor_graph():
+    builder = StateGraph(
+        ResearchSupervisorState,
+        input_schema=ResearchSupervisorInputState,
+        output_schema=ResearchSupervisorOutputState,
+    )
+
+    builder.add_node(
+        "supervisor",
+        select_next_research_area,
+    )
+
+    builder.add_node(
+        "route_and_execute",
+        route_and_execute,
+    )
+
+    builder.add_node(
+        "mark_completed",
+        mark_completed,
+    )
+
+    builder.add_edge(
+        START,
+        "supervisor",
+    )
+
+    builder.add_conditional_edges(
+        "supervisor",
+        supervisor_should_continue,
+        {
+            "execute": "route_and_execute",
+            "done": END,
+            "error": END,
+        },
+    )
+
+    builder.add_edge(
+        "route_and_execute",
+        "mark_completed",
+    )
+
+    builder.add_edge(
+        "mark_completed",
+        "supervisor",
+    )
+
+    return builder.compile()
+```
+
+最后：
+
+```python
+research_supervisor_graph = (
+    build_research_supervisor_graph()
+)
+```
+
+---
+
+### 19. 一个潜在问题：Agent Failure
+
+这里继续沿用 Phase 5 前面已经建立的原则。
+
+Agent 可能返回：
+
+```python
+{
+    "research_errors": {
+        "company": "..."
+    }
+}
+```
+
+Supervisor 不应该：
+
+```text
+except Exception:
+    pass
+```
+
+也不应该静默吞掉错误。
+
+如果 Agent Graph 本身已经按照项目规范把错误写入：
+
+```python
+research_errors
+```
+
+Supervisor 可以继续协调剩余 Research Areas。
+
+这和 Lesson 4 的原则保持一致：
+
+> **Research Agent failure is a research result condition, not necessarily a workflow crash.**
+
+---
+
+### 20. 测试文件
+
+你刚才指出了 Lesson 6 测试文件路径的问题，所以这次明确给出**完整文件路径和完整测试内容**。
+
+创建：
+
+```text
+tests/test_research_supervisor.py
+```
+
+建议完整测试文件：
+
+```python
+from app.agents.models import ResearchArea, ResearchPlan
+from app.agents.research_supervisor import (
+    research_supervisor_graph,
+)
+
+
+def test_supervisor_executes_all_planned_research_areas(
+    monkeypatch,
+):
+    executed = []
+
+    def fake_company(state):
+        executed.append(ResearchArea.COMPANY)
+        return {
+            "company_research": "company result",
+            "research_errors": {},
+        }
+
+    def fake_financial(state):
+        executed.append(ResearchArea.FINANCIAL)
+        return {
+            "financial_research": "financial result",
+            "research_errors": {},
+        }
+
+    def fake_market(state):
+        executed.append(ResearchArea.MARKET)
+        return {
+            "market_research": "market result",
+            "research_errors": {},
+        }
+
+    def fake_industry_macro(state):
+        executed.append(ResearchArea.INDUSTRY_MACRO)
+        return {
+            "industry_macro_research": "industry result",
+            "research_errors": {},
+        }
+
+    monkeypatch.setattr(
+        "app.agents.research_supervisor.company_research_graph.invoke",
+        fake_company,
+    )
+    monkeypatch.setattr(
+        "app.agents.research_supervisor.financial_research_graph.invoke",
+        fake_financial,
+    )
+    monkeypatch.setattr(
+        "app.agents.research_supervisor.market_research_graph.invoke",
+        fake_market,
+    )
+    monkeypatch.setattr(
+        "app.agents.research_supervisor.industry_macro_research_graph.invoke",
+        fake_industry_macro,
+    )
+
+    result = research_supervisor_graph.invoke(
+        {
+            "ticker": "AAPL",
+            "research_plan": ResearchPlan(
+                research_areas=[
+                    ResearchArea.COMPANY,
+                    ResearchArea.FINANCIAL,
+                    ResearchArea.MARKET,
+                ],
+                rationale=(
+                    "Company, financial, and market research "
+                    "are required."
+                ),
+            ),
+        }
+    )
+
+    assert executed == [
+        ResearchArea.COMPANY,
+        ResearchArea.FINANCIAL,
+        ResearchArea.MARKET,
+    ]
+
+    assert result["completed_research_areas"] == [
+        ResearchArea.COMPANY,
+        ResearchArea.FINANCIAL,
+        ResearchArea.MARKET,
+    ]
+
+
+def test_supervisor_respects_research_plan(
+    monkeypatch,
+):
+    executed = []
+
+    def fake_company(state):
+        executed.append(ResearchArea.COMPANY)
+        return {
+            "company_research": "company result",
+            "research_errors": {},
+        }
+
+    def fake_market(state):
+        executed.append(ResearchArea.MARKET)
+        return {
+            "market_research": "market result",
+            "research_errors": {},
+        }
+
+    monkeypatch.setattr(
+        "app.agents.research_supervisor.company_research_graph.invoke",
+        fake_company,
+    )
+    monkeypatch.setattr(
+        "app.agents.research_supervisor.market_research_graph.invoke",
+        fake_market,
+    )
+
+    result = research_supervisor_graph.invoke(
+        {
+            "ticker": "AAPL",
+            "research_plan": ResearchPlan(
+                research_areas=[
+                    ResearchArea.COMPANY,
+                    ResearchArea.MARKET,
+                ],
+                rationale=(
+                    "Only company and market research "
+                    "are required."
+                ),
+            ),
+        }
+    )
+
+    assert executed == [
+        ResearchArea.COMPANY,
+        ResearchArea.MARKET,
+    ]
+
+    assert result["financial_research"] is None
+    assert result["industry_macro_research"] is None
+
+
+def test_supervisor_preserves_agent_results(
+    monkeypatch,
+):
+    def fake_company(state):
+        return {
+            "company_research": "company result",
+            "research_errors": {},
+        }
+
+    def fake_financial(state):
+        return {
+            "financial_research": "financial result",
+            "research_errors": {},
+        }
+
+    monkeypatch.setattr(
+        "app.agents.research_supervisor.company_research_graph.invoke",
+        fake_company,
+    )
+    monkeypatch.setattr(
+        "app.agents.research_supervisor.financial_research_graph.invoke",
+        fake_financial,
+    )
+
+    result = research_supervisor_graph.invoke(
+        {
+            "ticker": "AAPL",
+            "research_plan": ResearchPlan(
+                research_areas=[
+                    ResearchArea.COMPANY,
+                    ResearchArea.FINANCIAL,
+                ],
+                rationale=(
+                    "Both company and financial research "
+                    "are required."
+                ),
+            ),
+        }
+    )
+
+    assert result["company_research"] == "company result"
+    assert result["financial_research"] == "financial result"
+```
+
+---
+
+### 21. 为什么这三个测试足够作为 Lesson 7 起点？
+
+三个测试分别验证三个核心性质。
+
+#### Test 1 — Coordination
+
+```text
+Supervisor
+    ↓
+COMPANY
+    ↓
+FINANCIAL
+    ↓
+MARKET
+```
+
+验证 Supervisor 真正能够循环协调多个 Agent。
+
+---
+
+#### Test 2 — Plan Respect
+
+验证：
+
+```text
+ResearchPlan
+```
+
+是 Supervisor 的边界。
+
+如果 Planner 只要求：
+
+```text
+COMPANY
+MARKET
+```
+
+Supervisor 不应该偷偷执行：
+
+```text
+FINANCIAL
+INDUSTRY_MACRO
+```
+
+---
+
+#### Test 3 — Shared State Preservation
+
+验证：
+
+```text
+Company Result
+        +
+Financial Result
+```
+
+不会互相覆盖。
+
+这是 Phase 5 Shared State 原则的最终验证之一。
+
+---
+
+### 22. Acceptance Criteria
+
+Lesson 7 只有在下面全部成立后才算完成。
+
+#### A. Supervisor topology
+
+必须存在：
+
+```text
+START
+ ↓
+Supervisor
+ ↓
+conditional
+ ├── execute
+ │     ↓
+ │ route_and_execute
+ │     ↓
+ │ mark_completed
+ │     ↓
+ │ Supervisor
+ │
+ └── done
+       ↓
+      END
+```
+
+---
+
+#### B. Supervisor 不创建新 Agent
+
+只能协调已有：
+
+```text
+Company Research Agent
+Financial Research Agent
+Market Research Agent
+Industry/Macro Research Agent
+```
+
+---
+
+#### C. Supervisor 尊重 ResearchPlan
+
+例如：
+
+```text
+[COMPANY, MARKET]
+```
+
+只能执行：
+
+```text
+COMPANY
+MARKET
+```
+
+---
+
+#### D. Supervisor 正确循环
+
+例如：
+
+```text
+completed=[]
+```
+
+最终：
+
+```text
+completed=[
+    COMPANY,
+    FINANCIAL,
+    MARKET,
+]
+```
+
+---
+
+#### E. Dedicated Result Fields 不互相覆盖
+
+最终必须能够同时存在：
+
+```python
+company_research
+financial_research
+market_research
+industry_macro_research
+```
+
+---
+
+#### F. 没有人工构造的空 Fan-in
+
+Supervisor 和 Fan-out 是两个不同概念。
+
+Lesson 6：
+
+```text
+Dynamic Fan-out
+```
+
+Lesson 7：
+
+```text
+Supervisor Loop
+```
+
+不要为了形式上的“Fan-in”增加：
+
+```text
+empty fan_in node
+```
+
+---
+
+### 23. Phase 5 完成后的整体架构
+
+Lesson 7 完成后，Phase 5 的学习成果应该可以总结成：
+
+```text
+                    Research Request
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │ Research Planner │
+                  └────────┬────────┘
+                           │
+                           ▼
+                    ResearchPlan
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+          ▼                ▼                ▼
+       Router         Orchestrator      Fan-out
+          │                │                │
+          │                │                │
+          ▼                ▼                ▼
+       Agent A          Agent A        Agent A
+                        ↓              Agent B
+                       Agent B         Agent C
+                        ↓              Agent D
+                       Agent C
+```
+
+以及最终：
+
+```text
+                    Supervisor
+                         │
+              ┌──────────┴──────────┐
+              │                     │
+          next area                done
+              │                     │
+              ▼                     ▼
+           Router                  END
+              │
+              ▼
+        Research Agent
+              │
+              ▼
+        Shared State
+              │
+              ▼
+          Supervisor
+```
+
+---
+
+### 24. Phase 5 的最终知识地图
+
+完成 Lesson 7 后，你应该能够区分：
+
+| Component         | 核心职责                              |
+|-------------------|---------------------------------------|
+| Research Planner  | 决定需要哪些研究                      |
+| Router            | 决定当前 Research Area 交给哪个 Agent |
+| Shared State      | Agent 之间的数据边界                  |
+| Orchestrator      | 顺序协调 Agent                        |
+| Parallel Research | 固定并行执行多个 Agent                |
+| Reducer           | 合并并行 State Update                 |
+| Dynamic Fan-out   | 根据运行时 State 动态创建并行任务     |
+| Supervisor        | 协调整个 Agent Workflow               |
+
+其中最重要的架构分层是：
+
+```text
+Planner
+   ↓
+WHAT
+
+Supervisor
+   ↓
+WHAT NEXT
+
+Router
+   ↓
+WHICH AGENT
+
+Agent
+   ↓
+DO THE WORK
+
+Reducer
+   ↓
+MERGE RESULTS
+```
+
+这实际上就是 Phase 5 的核心学习成果。
+
+---
+
+### 25. 本课暂时不要做的事情
+
+即使 Supervisor 已经完成，也**不要顺手继续扩展**：
+
+```text
+❌ LLM Supervisor
+❌ Generic Supervisor Framework
+❌ Agent Registry
+❌ Dynamic Agent Discovery
+❌ Retry Framework
+❌ Workflow Engine
+❌ Checkpoint
+❌ Memory
+❌ HITL
+❌ Observability
+❌ Evaluation
+❌ Valuation
+❌ Risk
+❌ Investment Decision
+❌ Final Report
+```
+
+Phase 5 的范围到这里就结束。
+
