@@ -4,6 +4,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.financial_calculations import calculate_profit_margin
 from app.agents.models import FinancialResearchResult
 from app.agents.tool_sets import FINANCIAL_RESEARCH_TOOLS
 from app.graph.tool_loop import build_tool_loop_graph
@@ -34,8 +35,9 @@ financial_research_prompt = ChatPromptTemplate.from_messages(
             "performance for the given stock ticker. "
             "Use the available tools to obtain revenue and "
             "net income. "
-            "Calculate profit margin as net income divided by "
-            "revenue. "
+            "Return revenue and net income from the available data. "
+            "The application will calculate profit margin "
+            "deterministically. "
             "Do not perform valuation. "
             "Do not make an investment recommendation. "
             "Do not assess investment risk. "
@@ -112,11 +114,19 @@ def financial_research_agent(
                             f"{research_context}\n\n"
                             "Using only these tool results, "
                             "produce the structured financial "
-                            "research result."
+                            "research result. "
+                            "Do not calculate profit margin; "
+                            "the application will calculate it "
+                            "deterministically."
                         )
                     ),
                 ]
             )
+        )
+
+        structured_result.profit_margin = calculate_profit_margin(
+            structured_result.revenue,
+            structured_result.net_income,
         )
 
     except Exception as exc:

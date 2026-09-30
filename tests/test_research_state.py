@@ -63,3 +63,20 @@ def test_shared_state_uses_dedicated_result_fields():
     assert state["company_research"] == company_result
     assert state["financial_research"] == financial_result
     assert state["company_research"] is not state["financial_research"]
+
+
+def test_shared_research_state_does_not_expose_valuation_internals():
+    state: ResearchState = {
+        "ticker": "AAPL",
+        "company_research": None,
+        "financial_research": None,
+        "market_research": None,
+        "industry_macro_research": None,
+        "research_errors": {},
+        "valuation_analysis": None,
+        "valuation_error": "",
+    }
+
+    assert "valuation_inputs" not in state
+    assert "valuation_assumptions" not in state
+    assert "valuation_analysis" in state

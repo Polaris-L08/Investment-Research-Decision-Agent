@@ -73,3 +73,30 @@ def test_financial_research_agent_maps_tool_result():
     assert result["research_error"] == ""
 
     fake_tool_loop.invoke.assert_called_once()
+
+
+def test_financial_research_agent_calculates_profit_margin_deterministically():
+    llm_result = FinancialResearchResult(
+        ticker="AAPL",
+        revenue=100000.0,
+        net_income=25000.0,
+        profit_margin=999.0,
+        summary="Financial research.",
+    )
+
+    fake_tool_loop = MagicMock()
+    fake_tool_loop.invoke.return_value = {"messages": []}
+
+    fake_structured_llm = MagicMock()
+    fake_structured_llm.invoke.return_value = llm_result
+
+    with patch(
+        "app.agents.financial_research.financial_research_tool_loop",
+        fake_tool_loop,
+    ), patch(
+        "app.agents.financial_research.structured_financial_research_llm",
+        fake_structured_llm,
+    ):
+        result = financial_research_graph.invoke({"ticker": "AAPL"})
+
+    assert result["research_result"].profit_margin == 0.25
