@@ -3173,3 +3173,991 @@ Decision        → InvestmentDecision
 > **先建立可靠的 Domain Contract，再进行 Application-level orchestration。**
 
 ---
+
+
+## Lesson 4：Investment Decision Agent
+
+Lesson 3 已通过。现在进入 **Phase 7 的最后一个 Agent 实现 Lesson**。
+
+本课的核心不是“让 LLM 随便给出 Buy/Sell”，而是建立一个严格的 **Decision Domain Boundary**：
+
+```text
+Research Results
+       │
+       ├──────────────┐
+       │              │
+       ↓              ↓
+ValuationResult   RiskAnalysis
+       │              │
+       └──────┬───────┘
+              ↓
+   Investment Decision Agent
+              ↓
+     InvestmentDecision
+```
+
+其中：
+
+* Research 提供事实基础
+* Valuation 提供价格/估值信息
+* Risk 提供风险信息
+* Decision Agent 综合这些信息
+* `InvestmentDecision` 是唯一结构化输出
+
+**本课完成后，Phase 7 只剩 Lesson 5：Integration + Contract Validation。**
+
+---
+
+### 1. Goal
+
+本课完成：
+
+1. 建立 Investment Decision Agent
+2. 建立独立 Decision Graph
+3. 将 Research / Valuation / Risk 作为输入
+4. 使用 Structured Output 输出 `InvestmentDecision`
+5. 保持 `expected_upside` 的确定性校验
+6. 处理 LLM 调用错误
+7. 测试 Decision Agent 的 Contract
+
+最终 Graph：
+
+```text
+START
+  ↓
+make_investment_decision
+  ↓
+END
+```
+
+---
+
+### 2. Why Now
+
+目前 Phase 7 已经有：
+
+```text
+Lesson 1
+Risk Domain Model
+        ↓
+RiskAnalysis
+
+
+Lesson 2
+Risk Analysis Agent
+        ↓
+RiskAnalysis
+
+
+Lesson 3
+Investment Decision Domain Model
+        ↓
+InvestmentDecision
+```
+
+现在只缺：
+
+```text
+RiskAnalysis
+      +
+Research
+      +
+Valuation
+      ↓
+Decision Agent
+      ↓
+InvestmentDecision
+```
+
+所以这是自然的下一步。
+
+---
+
+### 3. Domain Boundary
+
+Decision Agent **可以做什么**：
+
+* 综合已有 Research
+* 综合 Valuation
+* 综合 Risk
+* 形成 investment thesis
+* 选择 recommendation
+* 选择 investment horizon
+* 判断 conviction
+* 提取 key catalysts
+* 提取 key risks
+* 提取 invalidation conditions
+* 提取 supporting evidence
+
+Decision Agent **不能做什么**：
+
+```text
+❌ 新的 Web Search
+❌ 新的 Research
+❌ 调用金融数据 API
+❌ 修改 ValuationResult
+❌ 重新计算 valuation
+❌ 修改 RiskAnalysis
+❌ 创建新的 Risk Analysis
+❌ 创建 Report
+❌ 执行交易
+```
+
+尤其注意：
+
+> Decision Agent 是消费者，不是 Research / Valuation / Risk 的替代品。
+
+---
+
+### 4. 一个关键架构问题：Expected Upside
+
+这里必须特别处理 Lesson 3 中已经确定的 Contract。
+
+`InvestmentDecision` 中：
+
+```python
+current_price
+target_price
+expected_upside
+```
+
+必须满足：
+
+```text
+expected_upside
+=
+(target_price - current_price) / current_price
+```
+
+因此 Decision Agent 虽然使用 LLM：
+
+```text
+LLM
+ ↓
+InvestmentDecision
+```
+
+但最终：
+
+```text
+InvestmentDecision
+        ↓
+Pydantic validator
+        ↓
+expected_upside consistency
+```
+
+如果 LLM 返回：
+
+```text
+current_price = 180
+target_price = 216
+expected_upside = 0.50
+```
+
+则 Model 应该拒绝它。
+
+这非常重要，因为它保证：
+
+> **LLM 可以负责判断，但不能绕过 Domain Validation。**
+
+---
+
+### 5. Graph Topology
+
+本课 Graph 非常简单：
+
+```text
+START
+  │
+  ▼
+make_investment_decision
+  │
+  ▼
+ END
+```
+
+没有：
+
+```text
+Router
+Supervisor
+Tool
+Fan-out
+Reducer
+```
+
+因为 Decision Agent 当前只是一个确定的单节点 Agent。
+
+---
+
+### 6. State Design
+
+我们采用和 Lesson 2 Risk Agent 一致的三层 Contract：
+
+#### Input
+
+```python
+InvestmentDecisionInputState
+```
+
+只包含 Decision Agent 真正需要的输入。
+
+#### Internal
+
+```python
+InvestmentDecisionGraphState
+```
+
+包含输入 + 输出 + error。
+
+#### Output
+
+```python
+InvestmentDecisionOutputState
+```
+
+只暴露 Decision Result 和 Error。
+
+整体：
+
+```text
+Input
+  ↓
+Graph State
+  ↓
+Decision Node
+  ↓
+Output
+```
+
+---
+
+### 7. Exact Files
+
+新增：
+
+```text
+app/agents/investment_decision.py
+tests/test_investment_decision_agent.py
+```
+
+注意：
+
+**不要修改：**
+
+```text
+app/investment/models.py
+app/risk/models.py
+app/valuation/models.py
+app/agents/models.py
+app/graph/state.py
+```
+
+---
+
+### 8. Complete Code
+
+#### `app/agents/investment_decision.py`
+
+完整文件：
+
+```python
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+)
+from app.investment.models import InvestmentDecision
+from app.risk.models import RiskAnalysis
+from app.valuation.models import ValuationResult
+from app.llm.client import llm
+
+
+class InvestmentDecisionInputState(TypedDict):
+    """Input contract for the investment decision graph."""
+
+    ticker: str
+    company_research: CompanyResearchResult
+    financial_research: FinancialResearchResult
+    market_research: MarketResearchResult
+    industry_macro_research: IndustryMacroResearchResult
+    valuation: ValuationResult
+    risk_analysis: RiskAnalysis
+
+
+class InvestmentDecisionGraphState(TypedDict, total=False):
+    """Internal state used by the investment decision graph."""
+
+    ticker: str
+    company_research: CompanyResearchResult
+    financial_research: FinancialResearchResult
+    market_research: MarketResearchResult
+    industry_macro_research: IndustryMacroResearchResult
+    valuation: ValuationResult
+    risk_analysis: RiskAnalysis
+
+    investment_decision: InvestmentDecision | None
+    decision_error: str | None
+
+
+class InvestmentDecisionOutputState(TypedDict):
+    """Output contract for the investment decision graph."""
+
+    investment_decision: InvestmentDecision | None
+    decision_error: str | None
+
+
+def make_investment_decision(
+    state: InvestmentDecisionGraphState,
+) -> dict:
+    """Generate a structured investment decision from existing analysis."""
+
+    structured_llm = llm.with_structured_output(InvestmentDecision)
+
+    prompt = f"""
+You are an investment decision analysis agent.
+
+Your task is to produce a structured investment decision based ONLY
+on the supplied research, valuation, and risk analysis.
+
+You must NOT perform new web searches.
+You must NOT invent facts that are not supported by the supplied evidence.
+You must NOT modify the supplied valuation.
+You must NOT modify the supplied risk analysis.
+You must NOT perform a new valuation calculation.
+
+Your responsibility is to synthesize the available evidence into
+an investment decision.
+
+Ticker:
+{state["ticker"]}
+
+Company Research:
+{state["company_research"].model_dump_json(indent=2)}
+
+Financial Research:
+{state["financial_research"].model_dump_json(indent=2)}
+
+Market Research:
+{state["market_research"].model_dump_json(indent=2)}
+
+Industry / Macro Research:
+{state["industry_macro_research"].model_dump_json(indent=2)}
+
+Valuation:
+{state["valuation"].model_dump_json(indent=2)}
+
+Risk Analysis:
+{state["risk_analysis"].model_dump_json(indent=2)}
+
+Decision requirements:
+
+1. Produce exactly one structured investment decision.
+2. Select one recommendation from:
+   - Strong Buy
+   - Buy
+   - Hold
+   - Reduce
+   - Sell
+3. Select one investment horizon from:
+   - Short Term
+   - Medium Term
+   - Long Term
+4. Select one conviction level from:
+   - Low
+   - Medium
+   - High
+5. Use the supplied current price and target price.
+6. Do not invent a new target price.
+7. The expected upside must be mathematically consistent with
+   current price and target price.
+8. Summarize the investment thesis using the supplied evidence.
+9. Identify the key catalysts supported by the research.
+10. Identify the key risks supported by the risk analysis.
+11. Identify conditions that would invalidate the investment thesis.
+12. Provide supporting evidence from the supplied research,
+    valuation, and risk analysis.
+13. Do not produce a report.
+14. Do not provide portfolio allocation or trading instructions.
+"""
+
+    try:
+        investment_decision = structured_llm.invoke(prompt)
+
+        return {
+            "investment_decision": investment_decision,
+            "decision_error": None,
+        }
+
+    except Exception as exc:
+        return {
+            "investment_decision": None,
+            "decision_error": str(exc),
+        }
+
+
+def build_investment_decision_graph():
+    """Build and compile the investment decision graph."""
+
+    graph = StateGraph(
+        InvestmentDecisionGraphState,
+        input_schema=InvestmentDecisionInputState,
+        output_schema=InvestmentDecisionOutputState,
+    )
+
+    graph.add_node(
+        "make_investment_decision",
+        make_investment_decision,
+    )
+
+    graph.add_edge(
+        START,
+        "make_investment_decision",
+    )
+
+    graph.add_edge(
+        "make_investment_decision",
+        END,
+    )
+
+    return graph.compile()
+```
+
+---
+
+### 9. 为什么这里直接使用 `llm`
+
+这里特别按照你刚才指出的实际项目基线：
+
+```python
+from app.llm.client import llm
+```
+
+而不是我之前错误使用的：
+
+```python
+get_llm()
+```
+
+这与当前项目的实际 LLM Client Contract 保持一致。
+
+测试时也应该：
+
+```python
+patch("app.agents.investment_decision.llm", ...)
+```
+
+而不是 mock 一个不存在的 `get_llm()`。
+
+---
+
+### 10. Complete Test
+
+新建：
+
+`tests/test_investment_decision_agent.py`
+
+完整内容如下。
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.agents.investment_decision import (
+    InvestmentDecisionInputState,
+    build_investment_decision_graph,
+)
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+)
+from app.investment.models import (
+    InvestmentConviction,
+    InvestmentDecision,
+    InvestmentHorizon,
+    InvestmentRecommendation,
+)
+from app.risk.models import (
+    RiskAnalysis,
+    RiskCategory,
+    RiskImpact,
+    RiskItem,
+    RiskLikelihood,
+    RiskSeverity,
+)
+from app.valuation.models import (
+    ValuationAssumptions,
+    ValuationInputs,
+    ValuationMetadata,
+    ValuationMethod,
+    ValuationResult,
+)
+
+
+def make_company_research() -> CompanyResearchResult:
+    return CompanyResearchResult(
+        ticker="NVDA",
+        company_name="NVIDIA Corporation",
+        sector="Semiconductors",
+        current_price=180.0,
+        summary=(
+            "NVIDIA designs GPUs and accelerated computing platforms "
+            "serving data center and other computing markets."
+        ),
+    )
+
+
+def make_financial_research() -> FinancialResearchResult:
+    return FinancialResearchResult(
+        ticker="NVDA",
+        revenue=100.0,
+        net_income=30.0,
+        profit_margin=0.30,
+        summary=(
+            "The company has strong revenue and net income "
+            "with a high profit margin."
+        ),
+    )
+
+
+def make_market_research() -> MarketResearchResult:
+    return MarketResearchResult(
+        ticker="NVDA",
+        market_index="NASDAQ",
+        market_return=0.08,
+        summary=(
+            "The stock has experienced positive market performance "
+            "within the broader technology market."
+        ),
+    )
+
+
+def make_industry_macro_research() -> IndustryMacroResearchResult:
+    return IndustryMacroResearchResult(
+        ticker="NVDA",
+        industry="Semiconductors",
+        industry_growth=0.15,
+        macro_environment="Growth-oriented technology investment environment",
+        macro_growth=0.03,
+        summary=(
+            "The semiconductor industry benefits from AI infrastructure "
+            "investment but remains exposed to macroeconomic conditions."
+        ),
+    )
+
+
+def make_valuation() -> ValuationResult:
+    return ValuationResult(
+        ticker="NVDA",
+        method=ValuationMethod.PE,
+        inputs=ValuationInputs(
+            earnings_per_share=6.0,
+        ),
+        assumptions=ValuationAssumptions(
+            multiple=30.0,
+            rationale="Illustrative P/E multiple assumption.",
+        ),
+        implied_value_per_share=180.0,
+        target_price=216.0,
+        current_price=180.0,
+        expected_upside=0.20,
+        metadata=ValuationMetadata(
+            currency="USD",
+            model_version="phase6-v1",
+        ),
+    )
+
+
+def make_risk_analysis() -> RiskAnalysis:
+    return RiskAnalysis(
+        ticker="NVDA",
+        risks=[
+            RiskItem(
+                category=RiskCategory.VALUATION,
+                title="Valuation Multiple Compression",
+                description=(
+                    "A contraction in the valuation multiple could reduce "
+                    "the expected investment return."
+                ),
+                severity=RiskSeverity.HIGH,
+                likelihood=RiskLikelihood.MEDIUM,
+                impact=RiskImpact.HIGH,
+                evidence=[
+                    "The valuation relies on an assumed P/E multiple.",
+                ],
+            ),
+            RiskItem(
+                category=RiskCategory.INDUSTRY,
+                title="Competitive Pressure",
+                description=(
+                    "Intensifying competition could reduce market share "
+                    "or pricing power."
+                ),
+                severity=RiskSeverity.MEDIUM,
+                likelihood=RiskLikelihood.MEDIUM,
+                impact=RiskImpact.MEDIUM,
+                evidence=[
+                    "The semiconductor industry has competitive dynamics."
+                ],
+            ),
+        ],
+        overall_risk_level=RiskSeverity.HIGH,
+        key_risks=[
+            "Valuation Multiple Compression",
+            "Competitive Pressure",
+        ],
+        uncertainty_notes=[
+            "Long-term demand growth remains uncertain.",
+        ],
+    )
+
+
+def make_investment_decision() -> InvestmentDecision:
+    return InvestmentDecision(
+        ticker="NVDA",
+        recommendation=InvestmentRecommendation.BUY,
+        investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+        current_price=180.0,
+        target_price=216.0,
+        expected_upside=0.20,
+        conviction=InvestmentConviction.MEDIUM,
+        investment_thesis=(
+            "The investment case is supported by strong financial "
+            "performance, favorable industry conditions, and upside "
+            "to the valuation target, while significant valuation "
+            "and competitive risks remain."
+        ),
+        key_catalysts=[
+            "Continued AI infrastructure investment",
+            "Strong demand for accelerated computing",
+        ],
+        key_risks=[
+            "Valuation Multiple Compression",
+            "Competitive Pressure",
+        ],
+        invalidation_conditions=[
+            "Material deterioration in growth expectations",
+            "Sustained loss of competitive position",
+        ],
+        supporting_evidence=[
+            "Strong financial performance",
+            "Positive semiconductor industry outlook",
+            "Valuation target above the current price",
+            "Identified valuation and competitive risks",
+        ],
+    )
+
+
+def make_input_state() -> InvestmentDecisionInputState:
+    return {
+        "ticker": "NVDA",
+        "company_research": make_company_research(),
+        "financial_research": make_financial_research(),
+        "market_research": make_market_research(),
+        "industry_macro_research": make_industry_macro_research(),
+        "valuation": make_valuation(),
+        "risk_analysis": make_risk_analysis(),
+    }
+
+
+def make_mock_llm(return_value=None) -> MagicMock:
+    mock_llm = MagicMock()
+
+    structured_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = structured_llm
+
+    if return_value is not None:
+        structured_llm.invoke.return_value = return_value
+
+    return mock_llm
+
+
+def test_investment_decision_graph_returns_structured_decision():
+    expected_decision = make_investment_decision()
+    mock_llm = make_mock_llm(expected_decision)
+
+    with patch(
+        "app.agents.investment_decision.llm",
+        mock_llm,
+    ):
+        graph = build_investment_decision_graph()
+        result = graph.invoke(make_input_state())
+
+    assert result["decision_error"] is None
+    assert isinstance(
+        result["investment_decision"],
+        InvestmentDecision,
+    )
+
+    decision = result["investment_decision"]
+
+    assert decision.ticker == "NVDA"
+    assert decision.recommendation == InvestmentRecommendation.BUY
+    assert decision.investment_horizon == InvestmentHorizon.MEDIUM_TERM
+    assert decision.conviction == InvestmentConviction.MEDIUM
+
+
+def test_investment_decision_preserves_valuation_values():
+    expected_decision = make_investment_decision()
+    mock_llm = make_mock_llm(expected_decision)
+
+    with patch(
+        "app.agents.investment_decision.llm",
+        mock_llm,
+    ):
+        graph = build_investment_decision_graph()
+        result = graph.invoke(make_input_state())
+
+    decision = result["investment_decision"]
+
+    assert decision.current_price == 180.0
+    assert decision.target_price == 216.0
+    assert decision.expected_upside == 0.20
+
+
+def test_investment_decision_preserves_thesis_and_evidence():
+    expected_decision = make_investment_decision()
+    mock_llm = make_mock_llm(expected_decision)
+
+    with patch(
+        "app.agents.investment_decision.llm",
+        mock_llm,
+    ):
+        graph = build_investment_decision_graph()
+        result = graph.invoke(make_input_state())
+
+    decision = result["investment_decision"]
+
+    assert decision.investment_thesis
+    assert decision.key_catalysts
+    assert decision.key_risks
+    assert decision.invalidation_conditions
+    assert decision.supporting_evidence
+
+
+def test_investment_decision_graph_captures_llm_error():
+    mock_llm = MagicMock()
+
+    structured_llm = MagicMock()
+    structured_llm.invoke.side_effect = RuntimeError(
+        "LLM failure"
+    )
+    mock_llm.with_structured_output.return_value = structured_llm
+
+    with patch(
+        "app.agents.investment_decision.llm",
+        mock_llm,
+    ):
+        graph = build_investment_decision_graph()
+        result = graph.invoke(make_input_state())
+
+    assert result["investment_decision"] is None
+    assert result["decision_error"] == "LLM failure"
+```
+
+---
+
+### 11. 为什么 Test 中 `InvestmentDecision` 是合法的
+
+我们给：
+
+```text
+current_price = 180
+target_price = 216
+```
+
+因此：
+
+```text
+(216 - 180) / 180
+= 36 / 180
+= 0.20
+```
+
+所以：
+
+```python
+expected_upside=0.20
+```
+
+通过 Lesson 3 的 Domain Validation。
+
+这同时验证了：
+
+```text
+Decision Agent
+       ↓
+InvestmentDecision
+       ↓
+Domain Validation
+```
+
+之间的 Contract 是兼容的。
+
+---
+
+### 12. Acceptance Criteria
+
+Lesson 4 必须满足：
+
+#### Agent
+
+* [ ] Investment Decision Agent 存在
+* [ ] 使用现有 `llm`
+* [ ] 使用 `with_structured_output(InvestmentDecision)`
+* [ ] 不引入 `get_llm()`
+* [ ] 不进行外部 Research
+* [ ] 不修改 Valuation
+* [ ] 不修改 Risk
+
+#### Graph
+
+* [ ] `START → make_investment_decision → END`
+* [ ] 有明确 Input State
+* [ ] 有明确 Output State
+* [ ] Graph 可以 `invoke()`
+
+#### Output
+
+* [ ] 返回 `InvestmentDecision`
+* [ ] recommendation 正确
+* [ ] horizon 正确
+* [ ] conviction 正确
+* [ ] price information 正确
+* [ ] thesis 正确
+* [ ] catalysts 正确
+* [ ] risks 正确
+* [ ] invalidation conditions 正确
+* [ ] evidence 正确
+
+#### Error Handling
+
+* [ ] LLM exception 不直接让节点崩溃
+* [ ] `investment_decision=None`
+* [ ] `decision_error` 保存异常信息
+
+---
+
+### 13. Out of Scope
+
+本课仍然**不做**：
+
+```text
+❌ Phase 7 Integration
+❌ Research + Valuation + Risk + Decision 总 Graph
+❌ Supervisor
+❌ Report
+❌ Checkpoint
+❌ HITL
+❌ Memory
+❌ Error Recovery Framework
+❌ Observability
+❌ Evaluation Framework
+❌ FastAPI
+❌ Portfolio Optimization
+❌ Trading
+```
+
+尤其不要因为现在已经有：
+
+```text
+Research
+Valuation
+Risk
+Decision
+```
+
+就马上创建：
+
+```text
+InvestmentApplicationGraph
+```
+
+**那是 Lesson 5 / 后续 Application Integration 的事情。**
+
+---
+
+### 14. Phase 7 当前结构
+
+完成 Lesson 4 后，Phase 7 的结构会是：
+
+```text
+                         Phase 7
+                            │
+             ┌──────────────┴──────────────┐
+             │                             │
+             ▼                             ▼
+       Risk Domain                   Decision Domain
+             │                             │
+             ▼                             ▼
+        RiskAnalysis               InvestmentDecision
+             ▲                             ▲
+             │                             │
+       Risk Agent                  Decision Agent
+             ▲                             ▲
+             │                             │
+     Research + Valuation      Research + Valuation + Risk
+```
+
+也就是说：
+
+```text
+Lesson 1
+Risk Model                    ✓
+
+Lesson 2
+Risk Agent                    ✓
+
+Lesson 3
+Investment Decision Model    ✓
+
+Lesson 4
+Investment Decision Agent    ← 当前
+
+Lesson 5
+Phase 7 Integration          → 下一课
+```
+
+---
+
+### 15. 本课最重要的理解
+
+到这里，你应该能够明确区分四个层次：
+
+```text
+Research
+    ↓
+提供事实与分析
+
+
+Valuation
+    ↓
+提供估值结果
+
+
+Risk
+    ↓
+提供风险分析
+
+
+Investment Decision
+    ↓
+综合前面的信息形成投资判断
+```
+
+而不是：
+
+```text
+LLM
+ ↓
+什么都做
+```
+
+这是整个项目从“LangGraph Demo”逐步走向真正可运行 Investment Research & Decision Agent 的关键。
