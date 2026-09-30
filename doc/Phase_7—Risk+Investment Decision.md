@@ -1024,3 +1024,1294 @@ InvestmentDecision
 这正是我们后面能够进行可靠 Integration 和 Evaluation 的基础。
 
 ---
+
+
+## Lesson 2 — Risk Analysis
+
+Lesson 1 已经建立了稳定的 Risk Domain Contract：
+
+```text
+RiskItem
+    ↓
+RiskAnalysis
+```
+
+现在进入 Lesson 2。这里第一次让 **LLM 真正参与 Risk Domain**，但仍然严格遵守：
+
+```text
+Research + Valuation
+        ↓
+    Risk Agent
+        ↓
+   RiskAnalysis
+```
+
+而不是让 Risk Agent 重新搜索外部世界。
+
+---
+
+### 1. Goal
+
+本 Lesson 的目标是建立一个独立的 **Risk Analysis Agent Graph**。
+
+完成后应该能够执行：
+
+```text
+CompanyResearchResult
+FinancialResearchResult
+MarketResearchResult
+IndustryMacroResearchResult
+ValuationResult
+        │
+        ▼
+   Risk Agent
+        │
+        ▼
+   RiskAnalysis
+```
+
+也就是说，我们第一次把：
+
+```text
+Phase 5 Research
++
+Phase 6 Valuation
++
+Phase 7 Risk Domain
+```
+
+连接到一个新的 Agent。
+
+但这个连接仍然是**教学阶段的局部 Graph**，不是最终 Application Graph。
+
+---
+
+### 2. Why Now
+
+Lesson 1 已经回答：
+
+> Risk Analysis 长什么样？
+
+现在需要回答：
+
+> 谁负责生成 Risk Analysis？
+
+答案是：
+
+```text
+Risk Agent
+```
+
+因此：
+
+```text
+Lesson 1
+Domain Contract
+       ↓
+Lesson 2
+Agent Implementation
+```
+
+这个顺序非常重要。
+
+如果先写 Agent 再设计 Schema，很容易出现：
+
+```text
+LLM 输出什么
+→ Schema 再去适应什么
+```
+
+我们现在采用相反方向：
+
+```text
+Domain Contract
+→ Agent
+→ Structured Output
+```
+
+---
+
+### 3. Core Concepts
+
+本 Lesson 有五个重点。
+
+---
+
+#### 3.1 Risk Agent 的职责
+
+Risk Agent 负责：
+
+```text
+Analyze existing evidence
+        ↓
+Identify risks
+        ↓
+Classify risks
+        ↓
+Assess likelihood / impact / severity
+        ↓
+Return RiskAnalysis
+```
+
+它**不负责**：
+
+```text
+Search
+Fetch API
+Research
+Valuation calculation
+Investment recommendation
+Report generation
+```
+
+---
+
+### 4. Risk Agent 的输入
+
+Risk Agent 接收：
+
+```text
+CompanyResearchResult
+FinancialResearchResult
+MarketResearchResult
+IndustryMacroResearchResult
+ValuationResult
+```
+
+这几个对象分别代表：
+
+```text
+Company
+Financial
+Market
+Industry / Macro
+Valuation
+```
+
+这是非常重要的设计。
+
+Risk Agent 不应该接收一个已经拼接好的：
+
+```text
+mega_string
+```
+
+而应该保留 Domain Boundary：
+
+```text
+company_research
+financial_research
+market_research
+industry_macro_research
+valuation
+```
+
+这样后续 Evaluation 才能够知道：
+
+```text
+这个风险是根据哪一类信息产生的？
+```
+
+---
+
+### 5. Risk Agent 的输出
+
+输出严格限定为：
+
+```text
+RiskAnalysis
+```
+
+即：
+
+```text
+Risk Agent
+     ↓
+Structured Output
+     ↓
+RiskAnalysis
+```
+
+不会输出：
+
+```text
+str
+dict
+JSON string
+Markdown
+```
+
+再由我们手工解析。
+
+这和 Phase 2 / Phase 6 的 Structured Output 原则保持一致。
+
+---
+
+### 6. Graph Topology
+
+本 Lesson 第一次建立 Risk Graph。
+
+拓扑：
+
+```text
+              RiskInputState
+                    │
+                    ▼
+              Risk Agent
+                    │
+                    ▼
+             RiskOutputState
+```
+
+更具体：
+
+```text
+START
+  │
+  ▼
+analyze_risk
+  │
+  ▼
+ END
+```
+
+没有：
+
+```text
+Research Agent
+Valuation Agent
+Search Tool
+Supervisor
+Router
+```
+
+因为这些都不是 Risk Agent 的职责。
+
+---
+
+### 7. State Design
+
+这里建议使用三个概念：
+
+```text
+RiskInputState
+RiskGraphState
+RiskOutputState
+```
+
+与 Phase 6 Valuation 的设计保持一致。
+
+---
+
+#### 7.1 RiskInputState
+
+外部输入：
+
+```python
+class RiskInputState(TypedDict):
+    ticker: str
+    company_research: CompanyResearchResult
+    financial_research: FinancialResearchResult
+    market_research: MarketResearchResult
+    industry_macro_research: IndustryMacroResearchResult
+    valuation: ValuationResult
+```
+
+---
+
+#### 7.2 RiskGraphState
+
+内部 Graph State：
+
+```python
+class RiskGraphState(TypedDict, total=False):
+    ticker: str
+    company_research: CompanyResearchResult
+    financial_research: FinancialResearchResult
+    market_research: MarketResearchResult
+    industry_macro_research: IndustryMacroResearchResult
+    valuation: ValuationResult
+
+    risk_analysis: RiskAnalysis | None
+    risk_error: str | None
+```
+
+---
+
+#### 7.3 RiskOutputState
+
+Graph 输出：
+
+```python
+class RiskOutputState(TypedDict):
+    risk_analysis: RiskAnalysis | None
+    risk_error: str | None
+```
+
+这里和 Phase 6 的思路保持一致：
+
+```text
+Input
+ ↓
+Graph State
+ ↓
+Output
+```
+
+---
+
+### 8. 一个重要设计：为什么 ValuationResult 直接作为 Input？
+
+我们不重新传：
+
+```text
+target_price
+current_price
+expected_upside
+```
+
+而是直接：
+
+```python
+valuation: ValuationResult
+```
+
+原因是：
+
+```text
+ValuationResult
+```
+
+本身就是 Phase 6 的 Domain Contract。
+
+它已经包含：
+
+```text
+method
+inputs
+assumptions
+implied_value_per_share
+target_price
+current_price
+expected_upside
+metadata
+```
+
+因此 Risk Agent 可以知道：
+
+```text
+这个投资 Thesis 建立在什么 valuation 基础上？
+```
+
+而不需要 Risk Layer 自己重新构造 valuation。
+
+---
+
+### 9. Exact Files
+
+本 Lesson 新增：
+
+```text
+app/agents/risk.py
+tests/test_risk_agent.py
+```
+
+可能需要读取现有：
+
+```text
+app/agents/models.py
+app/valuation/models.py
+app/risk/models.py
+app/agents/llm.py
+```
+
+但**不修改这些已有文件**，除非你的当前实际源码与我们之前检查的 Phase 6 基线存在差异。
+
+---
+
+### 10. Implementation — `app/agents/risk.py`
+
+新建完整文件：
+
+```python
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+)
+from app.agents.llm import get_llm
+from app.risk.models import RiskAnalysis
+from app.valuation.models import ValuationResult
+
+
+class RiskInputState(TypedDict):
+    """Input contract for the risk analysis graph."""
+
+    ticker: str
+    company_research: CompanyResearchResult
+    financial_research: FinancialResearchResult
+    market_research: MarketResearchResult
+    industry_macro_research: IndustryMacroResearchResult
+    valuation: ValuationResult
+
+
+class RiskGraphState(TypedDict, total=False):
+    """Internal state used by the risk analysis graph."""
+
+    ticker: str
+    company_research: CompanyResearchResult
+    financial_research: FinancialResearchResult
+    market_research: MarketResearchResult
+    industry_macro_research: IndustryMacroResearchResult
+    valuation: ValuationResult
+
+    risk_analysis: RiskAnalysis | None
+    risk_error: str | None
+
+
+class RiskOutputState(TypedDict):
+    """Output contract for the risk analysis graph."""
+
+    risk_analysis: RiskAnalysis | None
+    risk_error: str | None
+
+
+def analyze_risk(state: RiskGraphState) -> dict:
+    """Analyze investment risks from existing research and valuation."""
+
+    llm = get_llm().with_structured_output(RiskAnalysis)
+
+    prompt = f"""
+You are an investment risk analysis agent.
+
+Your task is to analyze the existing research and valuation evidence
+and identify the major risks that could affect the investment thesis.
+
+You must NOT perform new web searches.
+You must NOT invent facts that are not supported by the supplied evidence.
+You must NOT generate an investment recommendation.
+You must only produce a structured risk analysis.
+
+Ticker:
+{state["ticker"]}
+
+Company Research:
+{state["company_research"].model_dump_json(indent=2)}
+
+Financial Research:
+{state["financial_research"].model_dump_json(indent=2)}
+
+Market Research:
+{state["market_research"].model_dump_json(indent=2)}
+
+Industry / Macro Research:
+{state["industry_macro_research"].model_dump_json(indent=2)}
+
+Valuation:
+{state["valuation"].model_dump_json(indent=2)}
+
+Risk analysis requirements:
+
+1. Identify material risks relevant to the investment thesis.
+2. Classify each risk using the available risk categories.
+3. Assess likelihood, impact, and severity using the defined enums.
+4. Provide evidence supporting each identified risk.
+5. Highlight the most important risks in key_risks.
+6. Explicitly identify important uncertainties or limitations in
+   uncertainty_notes.
+7. Do not generate Buy, Sell, Hold, or any other investment recommendation.
+8. Do not create a new target price or modify the supplied valuation.
+"""
+
+    try:
+        risk_analysis = llm.invoke(prompt)
+
+        return {
+            "risk_analysis": risk_analysis,
+            "risk_error": None,
+        }
+
+    except Exception as exc:
+        return {
+            "risk_analysis": None,
+            "risk_error": str(exc),
+        }
+
+
+def build_risk_graph():
+    """Build and compile the risk analysis graph."""
+
+    graph = StateGraph(
+        RiskGraphState,
+        input_schema=RiskInputState,
+        output_schema=RiskOutputState,
+    )
+
+    graph.add_node("analyze_risk", analyze_risk)
+
+    graph.add_edge(START, "analyze_risk")
+    graph.add_edge("analyze_risk", END)
+
+    return graph.compile()
+```
+
+---
+
+### 11. 为什么这里仍然使用 `try / except`？
+
+这是一个值得特别说明的地方。
+
+这里允许：
+
+```python
+try:
+    ...
+except Exception:
+    ...
+```
+
+但这**不是 Phase 12 Error Recovery Framework**。
+
+当前只是最基本的：
+
+```text
+Agent execution
+        ↓
+success
+    OR
+error captured in state
+```
+
+目的是让 Graph 能够返回：
+
+```text
+risk_analysis
+risk_error
+```
+
+而不是因为 LLM provider 或 structured output 异常直接导致 Graph 崩溃。
+
+Phase 12 才会正式建立：
+
+```text
+Retry
+Fallback
+Partial Result
+Recovery
+Escalation
+```
+
+---
+
+### 12. 为什么 Prompt 中明确禁止 Recommendation？
+
+这是 Phase 7 一个非常重要的 Domain Boundary。
+
+Risk Agent：
+
+```text
+Risk
+```
+
+Decision Agent：
+
+```text
+Investment Decision
+```
+
+所以 Risk Agent 不能输出：
+
+```text
+BUY
+```
+
+即使它认为：
+
+```text
+风险较低
+```
+
+也只能表达：
+
+```text
+overall_risk_level = Low
+```
+
+而不是：
+
+```text
+recommendation = Buy
+```
+
+最终：
+
+```text
+RiskAnalysis
+        ↓
+InvestmentDecision Agent
+```
+
+由 Decision Agent 完成综合判断。
+
+---
+
+### 13. 为什么 Prompt 中禁止修改 Valuation？
+
+同样：
+
+```text
+Valuation Agent
+```
+
+负责：
+
+```text
+Target Price
+Expected Upside
+```
+
+Risk Agent 负责：
+
+```text
+Valuation Risk
+```
+
+例如：
+
+```text
+The investment thesis depends on a relatively high P/E multiple.
+```
+
+而不是：
+
+```text
+Target price should actually be 85.
+```
+
+否则会破坏：
+
+```text
+Research
+   ↓
+Valuation
+   ↓
+Risk
+```
+
+的数据契约。
+
+---
+
+### 14. Tests — `tests/test_risk_agent.py`
+
+这里采用项目已有的测试风格：
+
+```text
+Real LLM
++
+Deterministic Mock Inputs
+```
+
+但我们需要避免测试依赖真实金融 API。
+
+因此创建 deterministic fixtures。
+
+完整测试文件：
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+)
+from app.agents.risk import (
+    RiskInputState,
+    build_risk_graph,
+)
+from app.risk.models import (
+    RiskAnalysis,
+    RiskCategory,
+    RiskImpact,
+    RiskItem,
+    RiskLikelihood,
+    RiskSeverity,
+)
+from app.valuation.models import (
+    ValuationAssumptions,
+    ValuationInputs,
+    ValuationMethod,
+    ValuationMetadata,
+    ValuationResult,
+)
+
+
+def make_company_research() -> CompanyResearchResult:
+    return CompanyResearchResult(
+        ticker="NVDA",
+        company_name="NVIDIA Corporation",
+        current_price=180.0,
+        business_summary=(
+            "NVIDIA designs GPUs and accelerated computing platforms "
+            "serving data center and other computing markets."
+        ),
+        key_products=[
+            "Data center GPUs",
+            "Accelerated computing platforms",
+        ],
+        competitive_advantages=[
+            "Strong software ecosystem",
+            "Broad accelerated computing platform",
+        ],
+        risks=[
+            "Competitive pressure",
+            "Dependence on data center demand",
+        ],
+    )
+
+
+def make_financial_research() -> FinancialResearchResult:
+    return FinancialResearchResult(
+        ticker="NVDA",
+        revenue=100.0,
+        net_income=30.0,
+        profit_margin=0.30,
+        revenue_growth=0.25,
+        earnings_growth=0.30,
+        financial_strength="Strong",
+        key_financial_trends=[
+            "Strong revenue growth",
+            "Expanding profitability",
+        ],
+    )
+
+
+def make_market_research() -> MarketResearchResult:
+    return MarketResearchResult(
+        ticker="NVDA",
+        current_price=180.0,
+        price_change_1d=0.02,
+        price_change_1w=0.04,
+        price_change_1m=0.08,
+        market_sentiment="Positive",
+        key_market_factors=[
+            "Strong AI infrastructure demand",
+            "Elevated technology sector expectations",
+        ],
+    )
+
+
+def make_industry_macro_research() -> IndustryMacroResearchResult:
+    return IndustryMacroResearchResult(
+        ticker="NVDA",
+        industry="Semiconductors",
+        industry_growth_outlook="Strong",
+        competitive_dynamics="Highly competitive",
+        macro_factors=[
+            "AI infrastructure investment",
+            "Interest rate sensitivity",
+        ],
+        regulatory_factors=[
+            "Export restrictions",
+        ],
+    )
+
+
+def make_valuation() -> ValuationResult:
+    return ValuationResult(
+        ticker="NVDA",
+        method=ValuationMethod.PE,
+        inputs=ValuationInputs(
+            eps=6.0,
+        ),
+        assumptions=ValuationAssumptions(
+            assumed_pe=30.0,
+        ),
+        implied_value_per_share=180.0,
+        target_price=180.0,
+        current_price=180.0,
+        expected_upside=0.0,
+        metadata=ValuationMetadata(
+            model_version="phase6-v1",
+        ),
+    )
+
+
+def make_risk_analysis() -> RiskAnalysis:
+    return RiskAnalysis(
+        ticker="NVDA",
+        risks=[
+            RiskItem(
+                category=RiskCategory.VALUATION,
+                title="Valuation Multiple Compression",
+                description=(
+                    "A contraction in the valuation multiple could reduce "
+                    "the expected investment return."
+                ),
+                severity=RiskSeverity.HIGH,
+                likelihood=RiskLikelihood.MEDIUM,
+                impact=RiskImpact.HIGH,
+                evidence=[
+                    "The valuation relies on an assumed P/E multiple.",
+                ],
+            ),
+            RiskItem(
+                category=RiskCategory.INDUSTRY,
+                title="Competitive Pressure",
+                description=(
+                    "Intensifying competition could reduce market share "
+                    "or pricing power."
+                ),
+                severity=RiskSeverity.MEDIUM,
+                likelihood=RiskLikelihood.MEDIUM,
+                impact=RiskImpact.MEDIUM,
+                evidence=[
+                    "The semiconductor industry has strong competitive dynamics."
+                ],
+            ),
+        ],
+        overall_risk_level=RiskSeverity.HIGH,
+        key_risks=[
+            "Valuation Multiple Compression",
+            "Competitive Pressure",
+        ],
+        uncertainty_notes=[
+            "Long-term demand growth remains uncertain.",
+        ],
+    )
+
+
+def make_input_state() -> RiskInputState:
+    return {
+        "ticker": "NVDA",
+        "company_research": make_company_research(),
+        "financial_research": make_financial_research(),
+        "market_research": make_market_research(),
+        "industry_macro_research": make_industry_macro_research(),
+        "valuation": make_valuation(),
+    }
+
+
+def test_risk_agent_graph_returns_structured_risk_analysis():
+    expected_analysis = make_risk_analysis()
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_llm
+    mock_llm.invoke.return_value = expected_analysis
+
+    with patch("app.agents.risk.get_llm", return_value=mock_llm):
+        graph = build_risk_graph()
+
+        result = graph.invoke(make_input_state())
+
+    assert result["risk_error"] is None
+    assert isinstance(result["risk_analysis"], RiskAnalysis)
+    assert result["risk_analysis"].ticker == "NVDA"
+    assert len(result["risk_analysis"].risks) == 2
+    assert result["risk_analysis"].overall_risk_level == RiskSeverity.HIGH
+
+
+def test_risk_agent_graph_preserves_structured_risk_items():
+    expected_analysis = make_risk_analysis()
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_llm
+    mock_llm.invoke.return_value = expected_analysis
+
+    with patch("app.agents.risk.get_llm", return_value=mock_llm):
+        graph = build_risk_graph()
+
+        result = graph.invoke(make_input_state())
+
+    risks = result["risk_analysis"].risks
+
+    assert risks[0].category == RiskCategory.VALUATION
+    assert risks[0].severity == RiskSeverity.HIGH
+    assert risks[0].likelihood == RiskLikelihood.MEDIUM
+    assert risks[0].impact == RiskImpact.HIGH
+    assert risks[0].evidence
+
+
+def test_risk_agent_graph_preserves_uncertainty_notes():
+    expected_analysis = make_risk_analysis()
+
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_llm
+    mock_llm.invoke.return_value = expected_analysis
+
+    with patch("app.agents.risk.get_llm", return_value=mock_llm):
+        graph = build_risk_graph()
+
+        result = graph.invoke(make_input_state())
+
+    assert result["risk_analysis"].uncertainty_notes == [
+        "Long-term demand growth remains uncertain.",
+    ]
+
+
+def test_risk_agent_graph_captures_llm_error():
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = mock_llm
+    mock_llm.invoke.side_effect = RuntimeError("LLM failure")
+
+    with patch("app.agents.risk.get_llm", return_value=mock_llm):
+        graph = build_risk_graph()
+
+        result = graph.invoke(make_input_state())
+
+    assert result["risk_analysis"] is None
+    assert result["risk_error"] == "LLM failure"
+```
+
+---
+
+### 15. 这里有一个测试设计上的重要点
+
+测试中：
+
+```python
+mock_llm.invoke.return_value = expected_analysis
+```
+
+而不是：
+
+```python
+mock_llm.invoke.return_value = {
+    ...
+}
+```
+
+这是为了验证：
+
+```text
+Risk Agent
+    ↓
+RiskAnalysis
+```
+
+这个 Domain Contract。
+
+我们不是在测试：
+
+```text
+LLM 能不能生成 JSON
+```
+
+而是在测试：
+
+```text
+Graph 能否消费并输出 RiskAnalysis
+```
+
+真正的 LLM Structured Output 行为已经在 Phase 2 建立过基础。
+
+---
+
+### 16. Graph 的输入输出契约
+
+完成后：
+
+```text
+RiskInputState
+```
+
+输入：
+
+```text
+ticker
+company_research
+financial_research
+market_research
+industry_macro_research
+valuation
+```
+
+经过：
+
+```text
+analyze_risk
+```
+
+输出：
+
+```text
+RiskOutputState
+```
+
+包含：
+
+```text
+risk_analysis
+risk_error
+```
+
+因此：
+
+```text
+                ┌──────────────────────┐
+                │   RiskInputState     │
+                ├──────────────────────┤
+                │ ticker               │
+                │ company_research     │
+                │ financial_research   │
+                │ market_research      │
+                │ industry_macro       │
+                │ valuation            │
+                └──────────┬───────────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ Risk Agent  │
+                    └──────┬──────┘
+                           │
+                           ▼
+                ┌──────────────────────┐
+                │  RiskOutputState     │
+                ├──────────────────────┤
+                │ risk_analysis        │
+                │ risk_error           │
+                └──────────────────────┘
+```
+
+---
+
+### 17. 为什么现在不使用 Supervisor？
+
+Phase 5 已经教过：
+
+```text
+Supervisor
+Router
+Fan-out
+Reducer
+```
+
+但是本 Lesson 不需要。
+
+现在的任务是：
+
+```text
+Existing Evidence
+      ↓
+One Domain Agent
+```
+
+如果此时引入：
+
+```text
+Risk Supervisor
+Risk Router
+Risk Researcher
+Risk Reducer
+```
+
+只是增加 Graph Complexity，并没有增加业务能力。
+
+这是一个很重要的工程判断：
+
+> **不要因为 LangGraph 提供了某个机制，就强行把它放进每一个 Graph。**
+
+---
+
+### 18. 为什么 Risk Agent 不直接接 `ResearchState`？
+
+这里尤其重要。
+
+我们不写：
+
+```python
+def analyze_risk(state: ResearchState):
+```
+
+因为：
+
+```text
+ResearchState
+```
+
+是 Phase 5 的 Research Domain / Teaching State。
+
+而 Risk Agent 的正式业务输入应该是：
+
+```text
+Research Results
++
+Valuation Result
+```
+
+也就是：
+
+```text
+Domain Output
+→
+Domain Input
+```
+
+而不是：
+
+```text
+Graph A Internal State
+→
+Graph B Internal State
+```
+
+这正是后期建立 Subgraph Contract 时非常重要的原则。
+
+---
+
+### 19. Lesson 2 Acceptance Criteria
+
+本 Lesson 完成条件：
+
+```text
+Risk Agent
+
+[ ] app/agents/risk.py exists
+[ ] RiskInputState exists
+[ ] RiskGraphState exists
+[ ] RiskOutputState exists
+[ ] Risk Agent consumes all four research domains
+[ ] Risk Agent consumes ValuationResult
+[ ] Risk Agent uses structured output
+[ ] Risk Agent produces RiskAnalysis
+[ ] Risk Agent does not generate recommendation
+[ ] Risk Agent does not modify valuation
+[ ] LLM error is represented in risk_error
+
+
+Graph
+
+[ ] START → analyze_risk → END
+[ ] Graph compiles
+[ ] Graph invocation works
+
+
+Tests
+
+[ ] Risk Agent test passes
+[ ] Existing Lesson 1 tests pass
+[ ] Phase 5 regression passes
+[ ] Phase 6 regression passes
+```
+
+---
+
+### 20. Out of Scope
+
+Lesson 2 明确不做：
+
+```text
+❌ Investment Decision
+❌ Recommendation
+❌ Investment Horizon
+❌ Target Price calculation
+❌ Expected Upside calculation
+❌ New valuation model
+❌ Web Search
+❌ Financial API
+❌ Market API
+❌ Risk Supervisor
+❌ Risk Router
+❌ Dynamic Fan-out
+❌ Risk Recovery Framework
+❌ Persistence
+❌ HITL
+❌ Memory
+❌ Report
+❌ Final Top-Level Graph
+```
+
+特别是：
+
+```text
+Risk Agent
+    ↓
+Buy / Hold / Sell
+```
+
+**禁止。**
+
+正确的是：
+
+```text
+Risk Agent
+    ↓
+RiskAnalysis
+```
+
+然后 Lesson 4 才会：
+
+```text
+Research
++
+Valuation
++
+Risk
+    ↓
+Investment Decision Agent
+```
+
+---
+
+### 21. Key Understanding
+
+完成 Lesson 2 后，目前的 Domain Pipeline 会变成：
+
+```text
+Research
+    │
+    ├── CompanyResearchResult
+    ├── FinancialResearchResult
+    ├── MarketResearchResult
+    └── IndustryMacroResearchResult
+    │
+    ▼
+Valuation
+    │
+    ▼
+ValuationResult
+    │
+    ▼
+Risk Agent
+    │
+    ▼
+RiskAnalysis
+```
+
+注意这里还没有：
+
+```text
+Recommendation
+```
+
+因此目前系统回答的是：
+
+```text
+What did we learn?
+        ↓
+What is it worth?
+        ↓
+What can go wrong?
+```
+
+下一阶段 Lesson 3 才建立：
+
+```text
+What structured investment conclusion
+should represent all of this?
+```
+
+也就是：
+
+```text
+InvestmentDecision
+```
+
+---
