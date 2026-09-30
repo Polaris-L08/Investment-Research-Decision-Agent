@@ -1208,3 +1208,918 @@ State
 > **Valuation 如何成为现有 Research/Supervisor 架构中的一个真正节点，而不是一个孤立的 Python demo？**
 
 但 `Target Price` 和 `Expected Upside` 仍然留到 **Lesson 4**。
+
+
+## Lesson 3：Valuation Agent Integration
+
+Lesson 2 已确认通过，现在正式完成 **Lesson 3：将 Valuation 接入 LangGraph**。
+
+本课的核心不是增加新的估值模型，而是把：
+
+```text
+ValuationInputs
+        +
+ValuationAssumptions
+        ↓
+P/E Calculation
+        ↓
+ValuationResult
+```
+
+真正放入 LangGraph State/Node 体系。
+
+---
+
+### 1. 本课目标
+
+完成：
+
+```text
+ResearchState
+      ↓
+Valuation Agent
+      ↓
+Deterministic P/E Calculation
+      ↓
+ValuationResult
+      ↓
+ResearchState
+```
+
+因此 Lesson 3 结束后，Valuation 不再只是：
+
+```python
+calculate_pe_implied_value(...)
+```
+
+而是一个真正可以被 LangGraph 调用的 Agent/Node。
+
+---
+
+### 2. 一个重要的架构决定
+
+检查当前 Phase 5 源码后发现：
+
+```python
+FinancialResearchResult
+```
+
+目前只有：
+
+```text
+revenue
+net_income
+profit_margin
+```
+
+并没有：
+
+```text
+earnings_per_share
+shares_outstanding
+```
+
+而当前 Financial Tool 也没有提供 EPS。
+
+因此本课**没有擅自修改 Phase 5 Financial Research Agent**，更没有：
+
+```text
+net_income / 某个虚构 shares outstanding
+```
+
+来制造 EPS。
+
+这很重要。
+
+否则虽然表面上可以让 Valuation 自动运行，但实际上是在**伪造估值输入**。
+
+所以本课采用：
+
+```text
+ValuationInputs
+ValuationAssumptions
+```
+
+作为明确的上游 State 输入。
+
+也就是说：
+
+> Lesson 3 负责“Valuation 如何进入 LangGraph”，而不是偷偷解决“EPS 数据从哪里来”这个尚未定义的数据供应问题。
+
+后续如果需要建立正式的 valuation input assembly/provider，会在适当阶段设计，而不是在本课越界。
+
+---
+
+### 3. Graph Topology
+
+本课第一次建立 Valuation Graph。
+
+```text
+             START
+               │
+               ▼
+       ┌─────────────────┐
+       │ Valuation Agent │
+       └────────┬────────┘
+                │
+                ▼
+       Valuation Calculation
+                │
+                ▼
+        ValuationResult
+                │
+                ▼
+               END
+```
+
+从 State 角度：
+
+```text
+ResearchState
+     │
+     ├── ticker
+     ├── company_research
+     ├── financial_research
+     ├── market_research
+     ├── industry_macro_research
+     │
+     ├── valuation_inputs
+     ├── valuation_assumptions
+     │
+     ▼
+Valuation Agent
+     │
+     ▼
+valuation_analysis
+```
+
+这里有一个非常重要的特点：
+
+**Research State 中原有的研究结果不会被 Valuation Agent 覆盖。**
+
+Valuation 只是增加自己的：
+
+```text
+valuation_analysis
+valuation_error
+```
+
+---
+
+### 4. State Design
+
+`ResearchState` 新增：
+
+```python
+valuation_inputs: ValuationInputs | None
+valuation_assumptions: ValuationAssumptions | None
+valuation_analysis: ValuationResult | None
+valuation_error: str
+```
+
+完整 State 仍然是：
+
+```text
+ResearchState
+├── ticker
+├── research_plan
+├── next_research_area
+│
+├── company_research
+├── financial_research
+├── market_research
+├── industry_macro_research
+│
+├── research_errors
+│
+├── valuation_inputs
+├── valuation_assumptions
+├── valuation_analysis
+└── valuation_error
+```
+
+注意：
+
+```text
+valuation_analysis
+```
+
+是 Valuation 的**结果字段**。
+
+而：
+
+```text
+valuation_inputs
+valuation_assumptions
+```
+
+是 Valuation 的**输入字段**。
+
+这与 Lesson 1 的 Domain Model 保持一致。
+
+---
+
+### 5. 新增文件
+
+新增：
+
+```text
+app/agents/valuation.py
+tests/test_valuation_agent.py
+```
+
+修改：
+
+```text
+app/agents/research_state.py
+```
+
+没有修改：
+
+```text
+Research Planner
+Research Router
+Research Supervisor
+Research Orchestrator
+Research Fan-out
+Company Research
+Financial Research
+Market Research
+Industry/Macro Research
+```
+
+---
+
+### 6. Complete Code
+
+#### `app/agents/valuation.py`
+
+```python
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from app.agents.research_state import ResearchState
+from app.valuation.calculations import calculate_pe_implied_value
+from app.valuation.models import (
+    ValuationAssumptions,
+    ValuationInputs,
+    ValuationMetadata,
+    ValuationMethod,
+    ValuationResult,
+)
+
+
+class ValuationInputState(ResearchState, total=False):
+    """Input boundary for the valuation graph."""
+
+    valuation_inputs: ValuationInputs
+    valuation_assumptions: ValuationAssumptions
+
+
+class ValuationOutputState(ResearchState, total=False):
+    """Output boundary for the valuation graph."""
+
+    valuation_analysis: ValuationResult | None
+    valuation_error: str
+
+
+def valuation_agent(
+    state: ResearchState,
+) -> ResearchState:
+    """Run the deterministic valuation model from shared research state."""
+
+    ticker = state.get("ticker")
+    inputs = state.get("valuation_inputs")
+    assumptions = state.get("valuation_assumptions")
+
+    if not ticker:
+        return {
+            "valuation_analysis": None,
+            "valuation_error": "Ticker is required for valuation.",
+        }
+
+    if inputs is None:
+        return {
+            "valuation_analysis": None,
+            "valuation_error": "Valuation inputs are required.",
+        }
+
+    if assumptions is None:
+        return {
+            "valuation_analysis": None,
+            "valuation_error": "Valuation assumptions are required.",
+        }
+
+    try:
+        implied_value = calculate_pe_implied_value(
+            inputs,
+            assumptions,
+        )
+
+        result = ValuationResult(
+            ticker=ticker,
+            method=ValuationMethod.PE,
+            inputs=inputs,
+            assumptions=assumptions,
+            implied_value_per_share=implied_value,
+            metadata=ValuationMetadata(
+                currency="USD",
+                model_version="pe-v1",
+            ),
+        )
+
+    except Exception as exc:
+        return {
+            "valuation_analysis": None,
+            "valuation_error": str(exc),
+        }
+
+    return {
+        "valuation_analysis": result,
+        "valuation_error": "",
+    }
+
+
+def build_valuation_graph():
+    """Build the Phase 6 valuation graph."""
+
+    builder = StateGraph(
+        ResearchState,
+        input_schema=ValuationInputState,
+        output_schema=ValuationOutputState,
+    )
+
+    builder.add_node(
+        "valuation_agent",
+        valuation_agent,
+    )
+
+    builder.add_edge(
+        START,
+        "valuation_agent",
+    )
+
+    builder.add_edge(
+        "valuation_agent",
+        END,
+    )
+
+    return builder.compile()
+
+
+valuation_graph = build_valuation_graph()
+```
+
+---
+
+### 7. `ResearchState`
+
+完整修改后的：
+
+#### `app/agents/research_state.py`
+
+```python
+from typing import TypedDict, Annotated
+
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+    ResearchArea,
+    ResearchPlan,
+)
+from app.valuation.models import (
+    ValuationAssumptions,
+    ValuationInputs,
+    ValuationResult,
+)
+
+
+def merge_research_errors(
+    existing: dict[str, str] | None,
+    new: dict[str, str] | None,
+) -> dict[str, str]:
+    """Merge research errors from parallel research agents."""
+    merged = dict(existing or {})
+    merged.update(new or {})
+    return merged
+
+
+class ResearchState(TypedDict, total=False):
+    """Shared state boundary for multi-agent research orchestration."""
+
+    ticker: str
+    research_plan: ResearchPlan
+    next_research_area: ResearchArea
+
+    company_research: CompanyResearchResult | None
+    financial_research: FinancialResearchResult | None
+    market_research: MarketResearchResult | None
+    industry_macro_research: IndustryMacroResearchResult | None
+
+    research_errors: Annotated[dict[str, str], merge_research_errors]
+
+    # Phase 6 valuation state
+    valuation_inputs: ValuationInputs | None
+    valuation_assumptions: ValuationAssumptions | None
+    valuation_analysis: ValuationResult | None
+    valuation_error: str
+```
+
+这里的：
+
+```python
+# Phase 6 valuation state
+```
+
+是对 Phase 5 Shared State 的**扩展**，不是重构。
+
+---
+
+### 8. Complete Tests
+
+#### `tests/test_valuation_agent.py`
+
+```python
+from app.agents.valuation import (
+    build_valuation_graph,
+    valuation_agent,
+    valuation_graph,
+)
+from app.agents.research_state import ResearchState
+from app.valuation.models import (
+    ValuationAssumptions,
+    ValuationInputs,
+    ValuationMethod,
+)
+
+
+def make_state() -> ResearchState:
+    return {
+        "ticker": "AAPL",
+        "valuation_inputs": ValuationInputs(
+            earnings_per_share=10.0,
+        ),
+        "valuation_assumptions": ValuationAssumptions(
+            multiple=20.0,
+            rationale="Use a 20x P/E multiple for this test valuation.",
+        ),
+        "company_research": None,
+        "financial_research": None,
+        "market_research": None,
+        "industry_macro_research": None,
+        "research_errors": {},
+    }
+
+
+def test_valuation_graph_is_compiled():
+    assert valuation_graph is not None
+    assert build_valuation_graph() is not None
+
+
+def test_valuation_agent_returns_structured_valuation_result():
+    result = valuation_agent(make_state())
+
+    valuation = result["valuation_analysis"]
+
+    assert valuation is not None
+    assert valuation.ticker == "AAPL"
+    assert valuation.method is ValuationMethod.PE
+    assert valuation.inputs.earnings_per_share == 10.0
+    assert valuation.assumptions.multiple == 20.0
+    assert valuation.implied_value_per_share == 200.0
+    assert result["valuation_error"] == ""
+
+
+def test_valuation_agent_requires_inputs():
+    state = make_state()
+    state.pop("valuation_inputs")
+
+    result = valuation_agent(state)
+
+    assert result["valuation_analysis"] is None
+    assert result["valuation_error"] == "Valuation inputs are required."
+
+
+def test_valuation_agent_requires_assumptions():
+    state = make_state()
+    state.pop("valuation_assumptions")
+
+    result = valuation_agent(state)
+
+    assert result["valuation_analysis"] is None
+    assert result["valuation_error"] == "Valuation assumptions are required."
+
+
+def test_valuation_graph_preserves_research_state():
+    state = make_state()
+    state["research_errors"] = {"company": "test error"}
+
+    result = valuation_graph.invoke(state)
+
+    assert result["ticker"] == "AAPL"
+    assert result["research_errors"] == {"company": "test error"}
+    assert result["valuation_analysis"].implied_value_per_share == 200.0
+    assert result["valuation_error"] == ""
+```
+
+---
+
+### 9. 测试设计
+
+本课实际验证四层。
+
+#### ① Graph 编译
+
+```text
+valuation_graph
+```
+
+能够正常建立。
+
+#### ② Agent 执行
+
+验证：
+
+```text
+ValuationInputs
++
+ValuationAssumptions
+↓
+Valuation Agent
+↓
+ValuationResult
+```
+
+#### ③ 输入缺失
+
+没有：
+
+```text
+valuation_inputs
+```
+
+必须失败，而不是偷偷使用默认值。
+
+同样：
+
+```text
+valuation_assumptions
+```
+
+缺失也必须失败。
+
+这对最终工业级 Agent 很重要。
+
+我们不希望系统出现：
+
+```text
+missing valuation assumption
+        ↓
+偷偷默认 20x
+```
+
+这种不可追踪行为。
+
+#### ④ State 保留
+
+验证：
+
+```text
+research_errors
+ticker
+```
+
+等原有 State 内容仍然存在。
+
+因此 Valuation Node 是：
+
+```text
+State augmentation
+```
+
+而不是：
+
+```text
+State replacement
+```
+
+---
+
+### 10. 为什么没有把 Valuation 接到 Research Supervisor
+
+这是本课另一个重要边界。
+
+当前 Phase 5 Supervisor 的职责是：
+
+```text
+研究协调
+```
+
+即：
+
+```text
+Planner
+   ↓
+Research Supervisor
+   ↓
+Research Agent
+```
+
+而 Phase 6 的 Valuation 是研究完成之后的下一阶段：
+
+```text
+Research
+   ↓
+Valuation
+```
+
+因此现在不应该把：
+
+```text
+Valuation
+```
+
+塞进：
+
+```text
+ResearchArea
+```
+
+或者：
+
+```text
+ResearchPlan.research_areas
+```
+
+否则会造成概念污染：
+
+```text
+ResearchArea.COMPANY
+ResearchArea.FINANCIAL
+ResearchArea.MARKET
+ResearchArea.INDUSTRY_MACRO
+ResearchArea.VALUATION
+```
+
+然后让 Research Supervisor 同时负责：
+
+```text
+Research + Valuation
+```
+
+这会违反当前 Phase 5 的领域边界。
+
+现在保持：
+
+```text
+Research Supervisor
+        │
+        ▼
+Research Results
+        │
+        ▼
+Valuation Graph
+        │
+        ▼
+Valuation Result
+```
+
+更干净。
+
+后续 Phase 5 的 Supervisor 在最终工业架构中当然还会演化成更强的跨阶段协调器，但那属于路线图后面的工作，而不是现在偷偷塞回 Phase 5。
+
+---
+
+### 11. 为什么 Valuation Agent 没有 LLM
+
+这也是有意的。
+
+当前：
+
+```text
+Valuation Agent
+      ↓
+calculate_pe_implied_value()
+```
+
+而不是：
+
+```text
+Valuation Agent
+      ↓
+LLM
+      ↓
+"我认为价值是 $200"
+```
+
+因为 Lesson 2 已经建立：
+
+```text
+Deterministic Calculation
+```
+
+Lesson 3 的职责只是把它接入 LangGraph。
+
+因此：
+
+```text
+LangGraph
+    = orchestration
+
+Valuation Agent
+    = domain execution boundary
+
+Calculation
+    = deterministic mathematics
+```
+
+三个层次被保留下来。
+
+这对于后续：
+
+```text
+Phase 9 Persistence
+Phase 10 HITL
+Phase 12 Error Recovery
+Phase 13 Observability
+Phase 14 Evaluation
+```
+
+都会更有价值。
+
+---
+
+### 12. 本课与最终工业版本的关系
+
+现在是第一版：
+
+```text
+ResearchState
+   ↓
+Valuation Agent
+   ↓
+P/E
+   ↓
+ValuationResult
+```
+
+最终会逐步演化成：
+
+```text
+Research Results
+        ↓
+Valuation Input Assembly
+        ↓
+Valuation Model Selection
+        ↓
+┌─────────────────────────┐
+│ P/E                     │
+│ Forward P/E             │
+│ EV/EBITDA               │
+│ DCF                     │
+│ FCF Yield               │
+│ Peer Comparison         │
+│ Historical Valuation    │
+└────────────┬────────────┘
+             ↓
+       Valuation Analysis
+             ↓
+       Target Price
+             ↓
+      Expected Upside
+```
+
+但这些不应该在 Lesson 3 一次性实现。
+
+---
+
+### 13. 当前 Lesson 3 状态
+
+```text
+Phase 6
+│
+├── Lesson 1
+│   └── Valuation Domain Model        ✅
+│
+├── Lesson 2
+│   └── Deterministic Calculation     ✅
+│
+├── Lesson 3
+│   └── LangGraph Integration         ✅
+│
+└── Lesson 4
+    └── Target Price + Upside         ⏳
+```
+
+Lesson 3 的最终数据流：
+
+```text
+ResearchState
+     │
+     │ valuation_inputs
+     │ valuation_assumptions
+     │
+     ▼
+┌──────────────────┐
+│ Valuation Agent  │
+└────────┬─────────┘
+         │
+         ▼
+calculate_pe_implied_value()
+         │
+         ▼
+┌──────────────────┐
+│ ValuationResult  │
+└────────┬─────────┘
+         │
+         ▼
+ResearchState
+```
+
+---
+
+### 14. Acceptance Criteria
+
+| 要求                            | 状态        |
+|---------------------------------|-------------|
+| Valuation Agent 存在            | ✅          |
+| LangGraph Graph 建立            | ✅          |
+| ResearchState → Valuation Agent | ✅          |
+| Valuation Agent 调用确定性模型  | ✅          |
+| ValuationResult 写入 State      | ✅          |
+| 原有 Research State 保留        | ✅          |
+| 缺少 valuation inputs 时失败    | ✅          |
+| 缺少 assumptions 时失败         | ✅          |
+| LLM 不参与数学计算              | ✅          |
+| Target Price                    | ⏳ Lesson 4 |
+| Expected Upside                 | ⏳ Lesson 4 |
+| Risk                            | ⏳ Phase 7  |
+| Investment Decision             | ⏳ Phase 7  |
+
+---
+
+### 15. 关于测试
+
+当前执行环境没有安装 `langgraph` / `langchain_core`，所以我无法在这个环境中实际执行新增的 LangGraph 测试；这是环境依赖问题，不应被误报为代码测试失败。
+
+我已经完成：
+
+```bash
+python -m compileall -q app tests
+```
+
+语法检查通过。
+
+你本地环境已经能够运行前两课测试，因此请在你的 `.venv` 中运行：
+
+```bash
+pytest -q
+```
+
+这一次尤其需要确认**全量测试**，因为我们第一次修改了共享的：
+
+```text
+app/agents/research_state.py
+```
+
+如果全量测试通过，则 Phase 5 + Phase 6 Lesson 1–3 的回归链条完整保持。
+
+---
+
+### 16. 下一课
+
+测试通过后，进入最后一个 Phase 6 Lesson：
+
+**Lesson 4 — Target Price + Expected Upside**
+
+届时才加入：
+
+```text
+ValuationResult
+       ↓
+Target Price
+       ↓
+Current Price
+       ↓
+Expected Upside
+```
+
+核心公式严格确定为：
+
+$$
+Expected\ Upside
+=
+\frac{Target\ Price-Current\ Price}
+{Current\ Price}
+$$
+
+不会让 LLM 自己计算。
+
+Lesson 4 完成并通过计算测试后，Phase 6 才正式关闭，然后进入 **Phase 7 — Risk + Investment Decision**。
+
+---
+
+
