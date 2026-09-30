@@ -727,3 +727,1015 @@ from app.report import InvestmentReport
 ```
 
 ---
+
+
+## Lesson 2：Deterministic Report Assembly
+
+本课开始真正建立：
+
+```text
+Phase 7 Results
+      ↓
+Deterministic Assembly
+      ↓
+InvestmentReport
+```
+
+核心原则只有一个：
+
+> **Lesson 2 不产生新的投资事实，只负责把已经存在的事实组织成 `InvestmentReport`。**
+
+---
+
+### 1. 本课完成后的架构
+
+Phase 7 已经产生：
+
+```text
+CompanyResearchResult
+FinancialResearchResult
+MarketResearchResult
+IndustryMacroResearchResult
+          │
+          ├──────────────┐
+          │              │
+          ▼              ▼
+   ValuationResult   RiskAnalysis
+          │              │
+          └──────┬───────┘
+                 ▼
+        InvestmentDecision
+                 │
+                 ▼
+       build_investment_report()
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ InvestmentReport│
+        └─────────────────┘
+```
+
+这里的 `build_investment_report()` 是一个**纯确定性函数**：
+
+* 不调用 LLM
+* 不调用 Agent
+* 不调用 Graph
+* 不进行网络请求
+* 不进行估值计算
+* 不重新计算风险
+* 不重新生成投资决策
+
+---
+
+### 2. 创建 `app/report/assembly.py`
+
+新建：
+
+```text
+app/report/assembly.py
+```
+
+完整代码：
+
+```python
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+)
+from app.investment.models import InvestmentDecision
+from app.report.models import InvestmentReport
+from app.risk.models import RiskAnalysis
+from app.valuation.models import ValuationResult
+
+
+def _validate_ticker_consistency(
+    ticker: str,
+    company_research: CompanyResearchResult,
+    financial_research: FinancialResearchResult,
+    market_research: MarketResearchResult,
+    industry_macro_research: IndustryMacroResearchResult,
+    valuation: ValuationResult,
+    risk_analysis: RiskAnalysis,
+    investment_decision: InvestmentDecision,
+) -> None:
+    """Ensure every Phase 7 result belongs to the same investment."""
+
+    sources = {
+        "company_research": company_research.ticker,
+        "financial_research": financial_research.ticker,
+        "market_research": market_research.ticker,
+        "industry_macro_research": industry_macro_research.ticker,
+        "valuation": valuation.ticker,
+        "risk_analysis": risk_analysis.ticker,
+        "investment_decision": investment_decision.ticker,
+    }
+
+    mismatches = {
+        name: source_ticker
+        for name, source_ticker in sources.items()
+        if source_ticker != ticker
+    }
+
+    if mismatches:
+        details = ", ".join(
+            f"{name}={source_ticker}"
+            for name, source_ticker in mismatches.items()
+        )
+        raise ValueError(
+            f"All report inputs must use ticker '{ticker}'. "
+            f"Mismatched inputs: {details}"
+        )
+
+
+def _validate_cross_domain_contract(
+    valuation: ValuationResult,
+    risk_analysis: RiskAnalysis,
+    investment_decision: InvestmentDecision,
+) -> None:
+    """Ensure the existing Phase 7 cross-domain contracts remain consistent."""
+
+    if (
+        valuation.current_price
+        != investment_decision.current_price
+    ):
+        raise ValueError(
+            "Valuation current_price must match "
+            "InvestmentDecision current_price."
+        )
+
+    if valuation.target_price != investment_decision.target_price:
+        raise ValueError(
+            "Valuation target_price must match "
+            "InvestmentDecision target_price."
+        )
+
+    if valuation.expected_upside != investment_decision.expected_upside:
+        raise ValueError(
+            "Valuation expected_upside must match "
+            "InvestmentDecision expected_upside."
+        )
+
+    if risk_analysis.key_risks != investment_decision.key_risks:
+        raise ValueError(
+            "RiskAnalysis key_risks must match "
+            "InvestmentDecision key_risks."
+        )
+
+
+def build_investment_report(
+    company_research: CompanyResearchResult,
+    financial_research: FinancialResearchResult,
+    market_research: MarketResearchResult,
+    industry_macro_research: IndustryMacroResearchResult,
+    valuation: ValuationResult,
+    risk_analysis: RiskAnalysis,
+    investment_decision: InvestmentDecision,
+) -> InvestmentReport:
+    """
+    Deterministically assemble Phase 7 results into an InvestmentReport.
+
+    This function does not create new business facts. It only validates
+    existing cross-domain contracts and maps existing results into the
+    report domain.
+    """
+
+    ticker = investment_decision.ticker
+
+    _validate_ticker_consistency(
+        ticker=ticker,
+        company_research=company_research,
+        financial_research=financial_research,
+        market_research=market_research,
+        industry_macro_research=industry_macro_research,
+        valuation=valuation,
+        risk_analysis=risk_analysis,
+        investment_decision=investment_decision,
+    )
+
+    _validate_cross_domain_contract(
+        valuation=valuation,
+        risk_analysis=risk_analysis,
+        investment_decision=investment_decision,
+    )
+
+    return InvestmentReport(
+        ticker=ticker,
+        title=f"{ticker} Investment Research Report",
+        executive_summary=investment_decision.investment_thesis,
+        company_overview=company_research.summary,
+        financial_summary=financial_research.summary,
+        market_summary=market_research.summary,
+        industry_macro_summary=industry_macro_research.summary,
+        valuation_summary=(
+            f"Valuation target price: "
+            f"{valuation.target_price:.2f}; "
+            f"current price: "
+            f"{valuation.current_price:.2f}; "
+            f"expected upside: "
+            f"{valuation.expected_upside:.2%}."
+        ),
+        risk_summary=(
+            f"Overall risk level: "
+            f"{risk_analysis.overall_risk_level.value}. "
+            f"Key risks: "
+            f"{', '.join(risk_analysis.key_risks)}."
+        ),
+        investment_decision_summary=(
+            f"Recommendation: "
+            f"{investment_decision.recommendation.value}; "
+            f"horizon: "
+            f"{investment_decision.investment_horizon.value}; "
+            f"conviction: "
+            f"{investment_decision.conviction.value}."
+        ),
+        valuation=valuation,
+        risk_analysis=risk_analysis,
+        investment_decision=investment_decision,
+    )
+```
+
+---
+
+### 3. 为什么采用显式参数？
+
+这里特意没有设计：
+
+```python
+class ReportInput(BaseModel):
+    ...
+```
+
+然后：
+
+```python
+build_investment_report(report_input)
+```
+
+原因是当前 Phase 7 已经有明确的 Domain Models：
+
+```text
+CompanyResearchResult
+FinancialResearchResult
+MarketResearchResult
+IndustryMacroResearchResult
+ValuationResult
+RiskAnalysis
+InvestmentDecision
+```
+
+如果现在为了 assembler 再创造：
+
+```python
+ReportInput
+```
+
+实际上是在增加一个没有业务含义的中间 Domain。
+
+目前没有必要。
+
+所以我们让函数直接表达它真正需要什么：
+
+```python
+build_investment_report(
+    company_research,
+    financial_research,
+    market_research,
+    industry_macro_research,
+    valuation,
+    risk_analysis,
+    investment_decision,
+)
+```
+
+这也让依赖关系非常清晰。
+
+---
+
+### 4. 为什么需要 `_validate_ticker_consistency()`？
+
+这是工业级 Agent 系统里非常重要的一层防护。
+
+理论上所有结果都应该属于：
+
+```text
+NVDA
+```
+
+但如果未来某个 Agent 出现：
+
+```text
+CompanyResearchResult       → NVDA
+FinancialResearchResult     → NVDA
+MarketResearchResult        → NVDA
+IndustryMacroResearchResult → NVDA
+ValuationResult             → NVDA
+RiskAnalysis                → NVDA
+InvestmentDecision          → AAPL
+```
+
+我们绝对不能继续生成：
+
+```text
+NVDA Investment Research Report
+```
+
+因为那会产生跨股票污染。
+
+因此 assembler 是一个很合适的**Domain Boundary Validation Point**。
+
+---
+
+### 5. 为什么还需要 `_validate_cross_domain_contract()`？
+
+因为 Phase 7 已经建立了明确的跨 Domain Contract。
+
+例如：
+
+```text
+Valuation
+    │
+    ├── current_price
+    ├── target_price
+    └── expected_upside
+              │
+              ▼
+     InvestmentDecision
+```
+
+所以：
+
+```python
+valuation.current_price
+```
+
+和：
+
+```python
+investment_decision.current_price
+```
+
+必须一致。
+
+同样：
+
+```text
+RiskAnalysis.key_risks
+            │
+            ▼
+InvestmentDecision.key_risks
+```
+
+也必须一致。
+
+这里**不是重新计算这些数据**。
+
+我们只是检查：
+
+> Phase 7 已经建立的 Contract 在进入 Report Domain 时仍然成立。
+
+---
+
+### 6. 一个非常重要的设计点：Executive Summary
+
+这里我让：
+
+```python
+executive_summary=investment_decision.investment_thesis
+```
+
+而不是重新生成一段新的文本。
+
+这是故意的。
+
+因为目前还没有：
+
+```text
+Report LLM
+```
+
+也没有：
+
+```text
+Report Writer
+```
+
+因此 Lesson 2 阶段不应该假装自己具备高级报告写作能力。
+
+当前：
+
+```text
+InvestmentDecision.investment_thesis
+                 ↓
+          executive_summary
+```
+
+只是一个**确定性映射**。
+
+未来 Lesson 3/后续 Report Generation 阶段，如果需要 LLM 进行真正的报告写作，我们再明确引入：
+
+```text
+Structured facts
+      ↓
+Report generation
+      ↓
+Narrative
+```
+
+而不是现在提前把两层混在一起。
+
+---
+
+### 7. 三个 Summary 的来源
+
+当前采用：
+
+#### Company
+
+```python
+company_overview = company_research.summary
+```
+
+#### Financial
+
+```python
+financial_summary = financial_research.summary
+```
+
+#### Market
+
+```python
+market_summary = market_research.summary
+```
+
+#### Industry / Macro
+
+```python
+industry_macro_summary = industry_macro_research.summary
+```
+
+这四个完全是 Phase 7 已经存在的研究结果。
+
+---
+
+#### Valuation Summary
+
+这里采用确定性模板：
+
+```text
+Valuation target price: 216.00;
+current price: 180.00;
+expected upside: 20.00%.
+```
+
+这些数字全部来自：
+
+```python
+ValuationResult
+```
+
+没有重新计算。
+
+---
+
+#### Risk Summary
+
+同样：
+
+```text
+Overall risk level: High.
+Key risks: Valuation Multiple Compression, Competitive Pressure.
+```
+
+来源：
+
+```python
+RiskAnalysis
+```
+
+---
+
+#### Investment Decision Summary
+
+来源：
+
+```python
+InvestmentDecision
+```
+
+例如：
+
+```text
+Recommendation: Buy;
+horizon: Medium Term;
+conviction: Medium.
+```
+
+---
+
+### 8. 创建 Lesson 2 测试
+
+新建：
+
+```text
+tests/test_report_assembly.py
+```
+
+建议完整使用下面的测试：
+
+```python
+import pytest
+
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+)
+from app.investment.models import (
+    InvestmentConviction,
+    InvestmentDecision,
+    InvestmentHorizon,
+    InvestmentRecommendation,
+)
+from app.report.assembly import build_investment_report
+from app.report.models import InvestmentReport
+from app.risk.models import (
+    RiskAnalysis,
+    RiskCategory,
+    RiskImpact,
+    RiskItem,
+    RiskLikelihood,
+    RiskSeverity,
+)
+from app.valuation.models import (
+    ValuationAssumptions,
+    ValuationInputs,
+    ValuationMetadata,
+    ValuationMethod,
+    ValuationResult,
+)
+
+
+def make_company_research(
+    ticker: str = "NVDA",
+) -> CompanyResearchResult:
+    return CompanyResearchResult(
+        ticker=ticker,
+        company_name="NVIDIA Corporation",
+        sector="Semiconductors",
+        current_price=180.0,
+        summary=(
+            "NVIDIA designs GPUs and accelerated computing platforms."
+        ),
+    )
+
+
+def make_financial_research(
+    ticker: str = "NVDA",
+) -> FinancialResearchResult:
+    return FinancialResearchResult(
+        ticker=ticker,
+        revenue=100.0,
+        net_income=30.0,
+        profit_margin=0.30,
+        summary="The company has strong financial performance.",
+    )
+
+
+def make_market_research(
+    ticker: str = "NVDA",
+) -> MarketResearchResult:
+    return MarketResearchResult(
+        ticker=ticker,
+        market_index="NASDAQ",
+        market_return=0.08,
+        summary="The broader technology market remains positive.",
+    )
+
+
+def make_industry_macro_research(
+    ticker: str = "NVDA",
+) -> IndustryMacroResearchResult:
+    return IndustryMacroResearchResult(
+        ticker=ticker,
+        industry="Semiconductors",
+        industry_growth=0.15,
+        macro_environment="Growth-oriented technology environment",
+        macro_growth=0.03,
+        summary="AI infrastructure supports semiconductor demand.",
+    )
+
+
+def make_valuation(
+    ticker: str = "NVDA",
+) -> ValuationResult:
+    return ValuationResult(
+        ticker=ticker,
+        method=ValuationMethod.PE,
+        inputs=ValuationInputs(
+            earnings_per_share=6.0,
+        ),
+        assumptions=ValuationAssumptions(
+            multiple=36.0,
+            rationale="Illustrative P/E multiple assumption.",
+        ),
+        implied_value_per_share=216.0,
+        target_price=216.0,
+        current_price=180.0,
+        expected_upside=0.20,
+        metadata=ValuationMetadata(
+            currency="USD",
+            model_version="phase7-v1",
+        ),
+    )
+
+
+def make_risk_analysis(
+    ticker: str = "NVDA",
+) -> RiskAnalysis:
+    return RiskAnalysis(
+        ticker=ticker,
+        risks=[
+            RiskItem(
+                category=RiskCategory.VALUATION,
+                title="Valuation Multiple Compression",
+                description=(
+                    "A contraction in the valuation multiple "
+                    "could reduce expected returns."
+                ),
+                severity=RiskSeverity.HIGH,
+                likelihood=RiskLikelihood.MEDIUM,
+                impact=RiskImpact.HIGH,
+                evidence=[
+                    "The valuation relies on an assumed P/E multiple."
+                ],
+            )
+        ],
+        overall_risk_level=RiskSeverity.HIGH,
+        key_risks=[
+            "Valuation Multiple Compression",
+        ],
+        uncertainty_notes=[
+            "Long-term demand remains uncertain.",
+        ],
+    )
+
+
+def make_investment_decision(
+    ticker: str = "NVDA",
+    key_risks: list[str] | None = None,
+) -> InvestmentDecision:
+    if key_risks is None:
+        key_risks = [
+            "Valuation Multiple Compression",
+        ]
+
+    return InvestmentDecision(
+        ticker=ticker,
+        recommendation=InvestmentRecommendation.BUY,
+        investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+        current_price=180.0,
+        target_price=216.0,
+        expected_upside=0.20,
+        conviction=InvestmentConviction.MEDIUM,
+        investment_thesis=(
+            "Strong financial performance and industry conditions "
+            "support the investment thesis."
+        ),
+        key_catalysts=[
+            "Continued AI infrastructure investment",
+        ],
+        key_risks=key_risks,
+        invalidation_conditions=[
+            "Material deterioration in growth expectations",
+        ],
+        supporting_evidence=[
+            "Strong financial performance",
+            "Valuation target above current price",
+        ],
+    )
+
+
+def build_inputs():
+    return {
+        "company_research": make_company_research(),
+        "financial_research": make_financial_research(),
+        "market_research": make_market_research(),
+        "industry_macro_research": make_industry_macro_research(),
+        "valuation": make_valuation(),
+        "risk_analysis": make_risk_analysis(),
+        "investment_decision": make_investment_decision(),
+    }
+
+
+def test_build_investment_report_returns_report():
+    report = build_investment_report(**build_inputs())
+
+    assert isinstance(report, InvestmentReport)
+    assert report.ticker == "NVDA"
+
+
+def test_build_investment_report_maps_research_summaries():
+    report = build_investment_report(**build_inputs())
+
+    assert report.company_overview == (
+        "NVIDIA designs GPUs and accelerated computing platforms."
+    )
+    assert report.financial_summary == (
+        "The company has strong financial performance."
+    )
+    assert report.market_summary == (
+        "The broader technology market remains positive."
+    )
+    assert report.industry_macro_summary == (
+        "AI infrastructure supports semiconductor demand."
+    )
+
+
+def test_build_investment_report_preserves_domain_objects():
+    inputs = build_inputs()
+
+    report = build_investment_report(**inputs)
+
+    assert report.valuation is inputs["valuation"]
+    assert report.risk_analysis is inputs["risk_analysis"]
+    assert report.investment_decision is inputs["investment_decision"]
+
+
+def test_build_investment_report_preserves_phase7_facts():
+    report = build_investment_report(**build_inputs())
+
+    assert report.valuation.current_price == 180.0
+    assert report.valuation.target_price == 216.0
+    assert report.valuation.expected_upside == 0.20
+
+    assert (
+        report.investment_decision.recommendation
+        == InvestmentRecommendation.BUY
+    )
+    assert (
+        report.investment_decision.investment_horizon
+        == InvestmentHorizon.MEDIUM_TERM
+    )
+    assert (
+        report.investment_decision.conviction
+        == InvestmentConviction.MEDIUM
+    )
+
+    assert report.risk_analysis.key_risks == [
+        "Valuation Multiple Compression",
+    ]
+
+
+def test_build_investment_report_rejects_ticker_mismatch():
+    inputs = build_inputs()
+    inputs["valuation"] = make_valuation(ticker="AAPL")
+
+    with pytest.raises(ValueError, match="ticker"):
+        build_investment_report(**inputs)
+
+
+def test_build_investment_report_rejects_valuation_decision_mismatch():
+    inputs = build_inputs()
+
+    inputs["investment_decision"] = InvestmentDecision(
+        ticker="NVDA",
+        recommendation=InvestmentRecommendation.BUY,
+        investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+        current_price=180.0,
+        target_price=225.0,
+        expected_upside=0.25,
+        conviction=InvestmentConviction.MEDIUM,
+        investment_thesis="Test thesis.",
+        key_catalysts=["Test catalyst."],
+        key_risks=["Valuation Multiple Compression"],
+        invalidation_conditions=["Test invalidation."],
+        supporting_evidence=["Test evidence."],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="target_price",
+    ):
+        build_investment_report(**inputs)
+
+
+def test_build_investment_report_rejects_risk_decision_mismatch():
+    inputs = build_inputs()
+
+    inputs["investment_decision"] = make_investment_decision(
+        key_risks=["Different risk"],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="key_risks",
+    ):
+        build_investment_report(**inputs)
+```
+
+---
+
+### 9. 为什么测试 `is` 而不是只测试 `==`？
+
+这里：
+
+```python
+assert report.valuation is inputs["valuation"]
+```
+
+而不是：
+
+```python
+assert report.valuation == inputs["valuation"]
+```
+
+这是有意的。
+
+我们希望明确证明：
+
+> Assembly 没有重新构造一个新的 `ValuationResult`。
+
+而是：
+
+```text
+Phase 7 ValuationResult
+          │
+          │ same object
+          ▼
+InvestmentReport.valuation
+```
+
+同理：
+
+```python
+report.risk_analysis is inputs["risk_analysis"]
+report.investment_decision is inputs["investment_decision"]
+```
+
+这进一步强化了 Source of Truth 的设计。
+
+---
+
+### 10. 一个值得注意的地方：没有加入 `current_price` 参数
+
+你可能会注意到：
+
+```python
+build_investment_report(...)
+```
+
+没有：
+
+```python
+current_price
+target_price
+expected_upside
+recommendation
+```
+
+这是正确的。
+
+因为这些东西已经包含在：
+
+```text
+ValuationResult
+InvestmentDecision
+```
+
+中。
+
+如果 assembler 接受：
+
+```python
+current_price=180
+```
+
+就会产生：
+
+```text
+ValuationResult.current_price = 180
+        │
+        ├── assembler.current_price = 180
+        │
+        └── InvestmentDecision.current_price = 180
+```
+
+这会增加冗余输入和不一致的可能。
+
+---
+
+### 11. Lesson 2 的职责边界
+
+现在我们已经形成一个非常清晰的分层：
+
+#### Phase 7
+
+负责：
+
+```text
+Research
+Valuation
+Risk
+Investment Decision
+```
+
+---
+
+#### Phase 8 Lesson 1
+
+负责：
+
+```text
+InvestmentReport Domain Model
+```
+
+---
+
+#### Phase 8 Lesson 2
+
+负责：
+
+```text
+Phase 7 Results
+       ↓
+validate contracts
+       ↓
+assemble
+       ↓
+InvestmentReport
+```
+
+---
+
+#### 后续 Report Generation
+
+才负责：
+
+```text
+InvestmentReport
+       ↓
+Report generation
+       ↓
+Markdown / HTML / PDF / ...
+```
+
+这条边界非常重要。
+
+---
+
+### 12. 本课验收条件
+
+Lesson 2 完成后必须满足：
+
+#### Assembly
+
+* [ ] 存在 `app/report/assembly.py`
+* [ ] 存在 `build_investment_report()`
+* [ ] 函数是确定性的
+* [ ] 不调用 LLM
+* [ ] 不调用 Agent
+* [ ] 不调用 Graph
+* [ ] 不进行外部 I/O
+
+#### Data Integrity
+
+* [ ] 所有输入 ticker 必须一致
+* [ ] `ValuationResult.current_price` 与 `InvestmentDecision.current_price` 一致
+* [ ] `target_price` 一致
+* [ ] `expected_upside` 一致
+* [ ] `RiskAnalysis.key_risks` 与 `InvestmentDecision.key_risks` 一致
+
+#### Source of Truth
+
+* [ ] Report 使用原有 `ValuationResult`
+* [ ] Report 使用原有 `RiskAnalysis`
+* [ ] Report 使用原有 `InvestmentDecision`
+* [ ] 不复制这些 Domain Model 的业务字段
+* [ ] 不重新计算 `expected_upside`
+
+#### Research Mapping
+
+* [ ] Company summary → `company_overview`
+* [ ] Financial summary → `financial_summary`
+* [ ] Market summary → `market_summary`
+* [ ] Industry/Macro summary → `industry_macro_summary`
+
+#### Tests
+
+至少通过：
+
+```text
+✓ report assembly
+✓ research summary mapping
+✓ domain object preservation
+✓ Phase 7 fact preservation
+✓ ticker mismatch rejection
+✓ valuation/decision mismatch rejection
+✓ risk/decision mismatch rejection
+```
+
+---
+
