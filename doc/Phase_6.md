@@ -690,15 +690,9 @@ ValuationResult
 ---
 
 
-## Phase 6 — Lesson 2 完成
+## Lesson 2: Valuation Calculation
 
-Lesson 1 测试通过后，本课严格按照既定路线进入 **Valuation Calculation**。
-
-本课没有修改 Phase 5，也没有提前进入 Lesson 3 的 LangGraph Agent Integration。
-
----
-
-# 1. Lesson 2 Goal
+### 1. Goal
 
 建立第一个**确定性的估值计算模型**：
 
@@ -733,7 +727,7 @@ P/E = 20
 
 ---
 
-# 2. 本课新增文件
+### 2. 本课新增文件
 
 ```text
 app/
@@ -764,7 +758,7 @@ test_valuation_calculations.py
 
 ---
 
-# 3. Graph Topology
+### 3. Graph Topology
 
 本课**仍然不修改 LangGraph topology**。
 
@@ -812,9 +806,9 @@ START → Valuation Agent → END
 
 ---
 
-# 4. Complete Code
+### 4. Complete Code
 
-## `app/valuation/calculations.py`
+#### `app/valuation/calculations.py`
 
 ```python
 from app.valuation.models import ValuationAssumptions, ValuationInputs
@@ -861,9 +855,9 @@ def calculate_pe_implied_value(llm_output: str) -> ...
 
 ---
 
-# 5. Complete Calculation Tests
+### 5. Complete Calculation Tests
 
-## `tests/test_valuation_calculations.py`
+#### `tests/test_valuation_calculations.py`
 
 ```python
 import pytest
@@ -920,7 +914,7 @@ def test_calculate_pe_implied_value_matches_formula(eps, multiple, expected):
 
 ---
 
-# 6. `app/valuation/__init__.py`
+### 6. `app/valuation/__init__.py`
 
 现在导出计算函数：
 
@@ -952,7 +946,7 @@ from app.valuation import calculate_pe_implied_value
 
 ---
 
-# 7. 为什么计算函数不返回 `ValuationResult`
+### 7. 为什么计算函数不返回 `ValuationResult`
 
 这是本课一个重要的架构决定。
 
@@ -1038,7 +1032,7 @@ ValuationResult
 
 ---
 
-# 8. LLM 不参与数学计算
+### 8. LLM 不参与数学计算
 
 这一点对最终工业级系统非常重要。
 
@@ -1079,7 +1073,7 @@ LLM 将来可以负责：
 
 ---
 
-# 9. Test Result
+### 9. Test Result
 
 本次运行：
 
@@ -1117,7 +1111,7 @@ python -m compileall -q app tests
 
 ---
 
-# 10. Boundary Check
+### 10. Boundary Check
 
 本课完成后，当前 `app/valuation` 中没有：
 
@@ -1154,18 +1148,18 @@ Phase 6
 
 ---
 
-# 11. Lesson 2 Acceptance Criteria
+### 11. Lesson 2 Acceptance Criteria
 
-| 要求                          | 状态         |
-| --------------------------- | ---------- |
-| 第一个估值模型实现                   | ✅          |
-| 使用结构化输入                     | ✅          |
-| 计算确定性                       | ✅          |
-| 已知输入得到已知结果                  | ✅          |
+| 要求                        | 状态        |
+|-----------------------------|-------------|
+| 第一个估值模型实现          | ✅          |
+| 使用结构化输入              | ✅          |
+| 计算确定性                  | ✅          |
+| 已知输入得到已知结果        | ✅          |
 | Unit Test                   | ✅          |
-| Assumptions 显式存在            | ✅          |
-| 不依赖 LLM 进行数学计算              | ✅          |
-| 不依赖真实金融 API                 | ✅          |
+| Assumptions 显式存在        | ✅          |
+| 不依赖 LLM 进行数学计算     | ✅          |
+| 不依赖真实金融 API          | ✅          |
 | LangGraph Agent Integration | ⏳ Lesson 3 |
 | Target Price                | ⏳ Lesson 4 |
 | Expected Upside             | ⏳ Lesson 4 |
@@ -1177,7 +1171,7 @@ Phase 6
 
 ---
 
-# 12. 下一步：Lesson 3
+### 12. 下一步：Lesson 3
 
 下一课才开始把目前独立存在的：
 
@@ -1214,7 +1208,3 @@ State
 > **Valuation 如何成为现有 Research/Supervisor 架构中的一个真正节点，而不是一个孤立的 Python demo？**
 
 但 `Target Price` 和 `Expected Upside` 仍然留到 **Lesson 4**。
-
-本次 Lesson 2 的源码包也已经整理好：
-
-[下载 Phase 6 Lesson 2 源码](sandbox:/mnt/data/Investment-Research-Decision-Agent_After_Phase6_Lesson2.tar)
