@@ -2315,3 +2315,861 @@ InvestmentDecision
 ```
 
 ---
+
+
+## Lesson 3：Investment Decision Domain Model
+
+Lesson 2 已通过测试。现在进入 **Lesson 3**。
+
+这一课非常重要，因为它定义的是 **Risk 之后、Report 之前的最终投资决策 Contract**。我们先把它做成一个纯 Pydantic Domain Model；下一课才让 LLM 负责生成它。
+
+---
+
+### 1. Goal
+
+本课只完成：
+
+> 建立 `InvestmentDecision` Domain Model。
+
+它需要表达：
+
+* 投资建议
+* 投资期限
+* 当前价格
+* 目标价格
+* 预期收益
+* 决策信心
+* 投资逻辑
+* 催化剂
+* 主要风险
+* 失效条件
+* 支持证据
+
+目标结构：
+
+```text
+Research
+   │
+Valuation
+   │
+Risk
+   │
+   └──────────────┐
+                  ↓
+        InvestmentDecision
+```
+
+但注意：
+
+**本课还没有 Decision Agent。**
+
+---
+
+### 2. Why Now
+
+Phase 7 当前的领域边界是：
+
+```text
+Research
+    ↓
+Valuation
+    ↓
+Risk
+    ↓
+Investment Decision
+    ↓
+Report
+```
+
+前面三个 Domain 已经分别有自己的 Contract：
+
+```text
+Research Result
+ValuationResult
+RiskAnalysis
+```
+
+现在需要定义最后一个：
+
+```text
+InvestmentDecision
+```
+
+这样 Lesson 4 的 Decision Agent 就不需要直接输出一堆散乱的字符串，而是：
+
+```text
+LLM
+ ↓
+structured output
+ ↓
+InvestmentDecision
+```
+
+这也是我们整个项目一直坚持的：
+
+> **LLM 负责判断和生成语义内容，Domain Model 负责定义系统真正接受什么。**
+
+---
+
+### 3. Core Concepts
+
+#### 3.1 Recommendation
+
+定义：
+
+```text
+Strong Buy
+Buy
+Hold
+Reduce
+Sell
+```
+
+使用 Enum，而不是普通字符串。
+
+原因是：
+
+```python
+recommendation="Strong Buuy"
+```
+
+这种错误应该在 Domain Boundary 被直接拒绝。
+
+---
+
+#### 3.2 Investment Horizon
+
+定义：
+
+```text
+Short Term
+Medium Term
+Long Term
+```
+
+同样使用 Enum。
+
+---
+
+#### 3.3 Conviction
+
+定义：
+
+```text
+Low
+Medium
+High
+```
+
+注意：
+
+**Conviction 不是 Recommendation。**
+
+例如：
+
+```text
+Recommendation = Buy
+Conviction = Low
+```
+
+完全可能成立。
+
+它们表达不同维度：
+
+* Recommendation：采取什么投资立场
+* Conviction：对该判断的信心程度
+
+---
+
+### 4. Expected Upside 的特殊处理
+
+这是本课最重要的一个设计点。
+
+我们已经在 Phase 6 定义：
+
+```text
+expected_upside
+=
+(target_price - current_price) / current_price
+```
+
+因此 Decision Model **不能允许 LLM 随便填写一个与价格不一致的数字**。
+
+例如：
+
+```text
+current_price = 100
+target_price = 120
+expected_upside = 0.50
+```
+
+这是不一致的。
+
+正确应该是：
+
+```text
+(120 - 100) / 100 = 0.20
+```
+
+所以本 Model 会进行 **Contract Validation**：
+
+```text
+current_price
+target_price
+      ↓
+expected_upside
+      ↓
+必须数学一致
+```
+
+注意，这并不是让 LLM 做计算。
+
+依然遵循：
+
+> **LLM ≠ Calculator**
+
+LLM 可以提出：
+
+```text
+target_price = 120
+```
+
+但系统必须通过 deterministic validation 确保：
+
+```text
+expected_upside = 20%
+```
+
+---
+
+### 5. Graph Topology
+
+本课：
+
+```text
+No Graph
+```
+
+也就是：
+
+```text
+Domain Model
+    ↓
+Pydantic Validation
+    ↓
+InvestmentDecision
+```
+
+没有：
+
+```text
+START
+END
+Node
+Edge
+LLM
+Tool
+```
+
+这是故意的。
+
+我们先建立 Domain Contract，再建立 Agent。
+
+---
+
+### 6. State Design
+
+本课：
+
+```text
+No State
+```
+
+因为 `InvestmentDecision` 本身不是 LangGraph State。
+
+它是未来 Graph State 中的一个 **domain object**。
+
+未来可能成为：
+
+```python
+class InvestmentState(TypedDict):
+    ...
+    investment_decision: InvestmentDecision
+```
+
+但这是未来 Integration 阶段的事情。
+
+**现在不要修改 `app/graph/state.py`。**
+
+---
+
+### 7. Exact Files
+
+新增：
+
+```text
+app/
+└── investment/
+    ├── __init__.py
+    └── models.py
+
+tests/
+└── test_investment_decision_models.py
+```
+
+本课不修改：
+
+```text
+app/agents/
+app/risk/
+app/valuation/
+app/graph/
+```
+
+---
+
+### 8. Complete Code
+
+#### 8.1 `app/investment/__init__.py`
+
+新建：
+
+```python
+"""Investment decision domain models."""
+```
+
+---
+
+#### 8.2 `app/investment/models.py`
+
+完整内容：
+
+```python
+from enum import Enum
+from math import isclose
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class InvestmentRecommendation(str, Enum):
+    """Investment recommendation."""
+
+    STRONG_BUY = "Strong Buy"
+    BUY = "Buy"
+    HOLD = "Hold"
+    REDUCE = "Reduce"
+    SELL = "Sell"
+
+
+class InvestmentHorizon(str, Enum):
+    """Expected investment holding horizon."""
+
+    SHORT_TERM = "Short Term"
+    MEDIUM_TERM = "Medium Term"
+    LONG_TERM = "Long Term"
+
+
+class InvestmentConviction(str, Enum):
+    """Confidence level in the investment decision."""
+
+    LOW = "Low"
+    MEDIUM = "Medium"
+    HIGH = "High"
+
+
+class InvestmentDecision(BaseModel):
+    """Structured investment decision produced from research, valuation, and risk analysis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str = Field(
+        min_length=1,
+        description="Stock ticker symbol.",
+    )
+
+    recommendation: InvestmentRecommendation = Field(
+        description="Investment recommendation.",
+    )
+
+    investment_horizon: InvestmentHorizon = Field(
+        description="Expected investment holding horizon.",
+    )
+
+    current_price: float = Field(
+        gt=0,
+        description="Current stock price used by the decision.",
+    )
+
+    target_price: float = Field(
+        gt=0,
+        description="Target price used by the decision.",
+    )
+
+    expected_upside: float = Field(
+        description=(
+            "Expected upside/downside expressed as a decimal. "
+            "Must equal (target_price - current_price) / current_price."
+        ),
+    )
+
+    conviction: InvestmentConviction = Field(
+        description="Confidence level in the investment decision.",
+    )
+
+    investment_thesis: str = Field(
+        min_length=1,
+        description="Core rationale supporting the investment decision.",
+    )
+
+    key_catalysts: list[str] = Field(
+        min_length=1,
+        description="Important factors that could improve the investment outcome.",
+    )
+
+    key_risks: list[str] = Field(
+        min_length=1,
+        description="Important risks that could impair the investment thesis.",
+    )
+
+    invalidation_conditions: list[str] = Field(
+        min_length=1,
+        description="Conditions that would invalidate the investment thesis.",
+    )
+
+    supporting_evidence: list[str] = Field(
+        min_length=1,
+        description="Evidence supporting the investment decision.",
+    )
+
+    @model_validator(mode="after")
+    def validate_expected_upside(self) -> "InvestmentDecision":
+        """Ensure expected upside is mathematically consistent with prices."""
+
+        calculated_upside = (
+            self.target_price - self.current_price
+        ) / self.current_price
+
+        if not isclose(
+            self.expected_upside,
+            calculated_upside,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                "expected_upside must equal "
+                "(target_price - current_price) / current_price"
+            )
+
+        return self
+```
+
+---
+
+### 9. Why `model_validator`
+
+这里使用 Pydantic v2 的：
+
+```python
+@model_validator(mode="after")
+```
+
+而不是：
+
+```python
+@field_validator("expected_upside")
+```
+
+原因是：
+
+`expected_upside` 的合法性依赖三个字段：
+
+```text
+current_price
+target_price
+expected_upside
+```
+
+这是一个典型的 **cross-field validation**。
+
+因此使用 model-level validation 更符合领域模型语义。
+
+---
+
+### 10. Complete Tests
+
+新建：
+
+`tests/test_investment_decision_models.py`
+
+完整内容：
+
+```python
+import pytest
+from pydantic import ValidationError
+
+from app.investment.models import (
+    InvestmentConviction,
+    InvestmentDecision,
+    InvestmentHorizon,
+    InvestmentRecommendation,
+)
+
+
+def make_valid_decision() -> InvestmentDecision:
+    return InvestmentDecision(
+        ticker="NVDA",
+        recommendation=InvestmentRecommendation.BUY,
+        investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+        current_price=180.0,
+        target_price=216.0,
+        expected_upside=0.20,
+        conviction=InvestmentConviction.HIGH,
+        investment_thesis=(
+            "The investment thesis is supported by strong growth "
+            "prospects and favorable industry demand."
+        ),
+        key_catalysts=[
+            "Continued AI infrastructure investment",
+            "Strong demand for accelerated computing",
+        ],
+        key_risks=[
+            "Competitive pressure",
+            "Valuation multiple compression",
+        ],
+        invalidation_conditions=[
+            "Material deterioration in growth expectations",
+            "Sustained loss of competitive position",
+        ],
+        supporting_evidence=[
+            "Strong financial growth",
+            "Positive industry outlook",
+            "Valuation analysis",
+        ],
+    )
+
+
+def test_investment_decision_accepts_valid_model():
+    decision = make_valid_decision()
+
+    assert decision.ticker == "NVDA"
+    assert decision.recommendation == InvestmentRecommendation.BUY
+    assert decision.investment_horizon == InvestmentHorizon.MEDIUM_TERM
+    assert decision.conviction == InvestmentConviction.HIGH
+    assert decision.current_price == 180.0
+    assert decision.target_price == 216.0
+    assert decision.expected_upside == 0.20
+
+
+def test_investment_recommendation_enum_values():
+    assert InvestmentRecommendation.STRONG_BUY.value == "Strong Buy"
+    assert InvestmentRecommendation.BUY.value == "Buy"
+    assert InvestmentRecommendation.HOLD.value == "Hold"
+    assert InvestmentRecommendation.REDUCE.value == "Reduce"
+    assert InvestmentRecommendation.SELL.value == "Sell"
+
+
+def test_investment_horizon_enum_values():
+    assert InvestmentHorizon.SHORT_TERM.value == "Short Term"
+    assert InvestmentHorizon.MEDIUM_TERM.value == "Medium Term"
+    assert InvestmentHorizon.LONG_TERM.value == "Long Term"
+
+
+def test_investment_conviction_enum_values():
+    assert InvestmentConviction.LOW.value == "Low"
+    assert InvestmentConviction.MEDIUM.value == "Medium"
+    assert InvestmentConviction.HIGH.value == "High"
+
+
+def test_expected_upside_must_match_prices():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            ticker="NVDA",
+            recommendation=InvestmentRecommendation.BUY,
+            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+            current_price=180.0,
+            target_price=216.0,
+            expected_upside=0.50,
+            conviction=InvestmentConviction.HIGH,
+            investment_thesis="Valid investment thesis.",
+            key_catalysts=["Catalyst"],
+            key_risks=["Risk"],
+            invalidation_conditions=["Invalidation condition"],
+            supporting_evidence=["Evidence"],
+        )
+
+
+def test_negative_target_price_is_rejected():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            ticker="NVDA",
+            recommendation=InvestmentRecommendation.BUY,
+            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+            current_price=180.0,
+            target_price=-1.0,
+            expected_upside=-1.0055555556,
+            conviction=InvestmentConviction.HIGH,
+            investment_thesis="Valid investment thesis.",
+            key_catalysts=["Catalyst"],
+            key_risks=["Risk"],
+            invalidation_conditions=["Invalidation condition"],
+            supporting_evidence=["Evidence"],
+        )
+
+
+def test_zero_current_price_is_rejected():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            ticker="NVDA",
+            recommendation=InvestmentRecommendation.BUY,
+            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+            current_price=0.0,
+            target_price=180.0,
+            expected_upside=1.0,
+            conviction=InvestmentConviction.HIGH,
+            investment_thesis="Valid investment thesis.",
+            key_catalysts=["Catalyst"],
+            key_risks=["Risk"],
+            invalidation_conditions=["Invalidation condition"],
+            supporting_evidence=["Evidence"],
+        )
+
+
+def test_empty_ticker_is_rejected():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            ticker="",
+            recommendation=InvestmentRecommendation.BUY,
+            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+            current_price=180.0,
+            target_price=216.0,
+            expected_upside=0.20,
+            conviction=InvestmentConviction.HIGH,
+            investment_thesis="Valid investment thesis.",
+            key_catalysts=["Catalyst"],
+            key_risks=["Risk"],
+            invalidation_conditions=["Invalidation condition"],
+            supporting_evidence=["Evidence"],
+        )
+
+
+def test_empty_investment_thesis_is_rejected():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            ticker="NVDA",
+            recommendation=InvestmentRecommendation.BUY,
+            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+            current_price=180.0,
+            target_price=216.0,
+            expected_upside=0.20,
+            conviction=InvestmentConviction.HIGH,
+            investment_thesis="",
+            key_catalysts=["Catalyst"],
+            key_risks=["Risk"],
+            invalidation_conditions=["Invalidation condition"],
+            supporting_evidence=["Evidence"],
+        )
+
+
+def test_empty_key_risks_are_rejected():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            ticker="NVDA",
+            recommendation=InvestmentRecommendation.BUY,
+            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+            current_price=180.0,
+            target_price=216.0,
+            expected_upside=0.20,
+            conviction=InvestmentConviction.HIGH,
+            investment_thesis="Valid investment thesis.",
+            key_catalysts=["Catalyst"],
+            key_risks=[],
+            invalidation_conditions=["Invalidation condition"],
+            supporting_evidence=["Evidence"],
+        )
+
+
+def test_empty_supporting_evidence_is_rejected():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            ticker="NVDA",
+            recommendation=InvestmentRecommendation.BUY,
+            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+            current_price=180.0,
+            target_price=216.0,
+            expected_upside=0.20,
+            conviction=InvestmentConviction.HIGH,
+            investment_thesis="Valid investment thesis.",
+            key_catalysts=["Catalyst"],
+            key_risks=["Risk"],
+            invalidation_conditions=["Invalidation condition"],
+            supporting_evidence=[],
+        )
+
+
+def test_extra_fields_are_rejected():
+    with pytest.raises(ValidationError):
+        InvestmentDecision(
+            ticker="NVDA",
+            recommendation=InvestmentRecommendation.BUY,
+            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+            current_price=180.0,
+            target_price=216.0,
+            expected_upside=0.20,
+            conviction=InvestmentConviction.HIGH,
+            investment_thesis="Valid investment thesis.",
+            key_catalysts=["Catalyst"],
+            key_risks=["Risk"],
+            invalidation_conditions=["Invalidation condition"],
+            supporting_evidence=["Evidence"],
+            unexpected_field="not allowed",
+        )
+```
+
+---
+
+### 11. Run Commands
+
+先只运行 Lesson 3：
+
+```bash
+pytest tests/test_investment_decision_models.py -q
+```
+
+预期：
+
+```text
+...........
+11 passed
+```
+
+然后运行 Phase 7 当前已经完成的 Domain/Agent tests：
+
+```bash
+pytest tests/test_risk_models.py tests/test_risk_agent.py tests/test_investment_decision_models.py -q
+```
+
+如果这些通过，再运行此前的 Phase 5 / Phase 6 regression。
+
+---
+
+### 12. Acceptance Criteria
+
+Lesson 3 只有满足以下条件才算完成：
+
+#### Domain Structure
+
+* [ ] `InvestmentRecommendation` 存在
+* [ ] `InvestmentHorizon` 存在
+* [ ] `InvestmentConviction` 存在
+* [ ] `InvestmentDecision` 存在
+
+#### Required Fields
+
+* [ ] ticker
+* [ ] recommendation
+* [ ] investment_horizon
+* [ ] current_price
+* [ ] target_price
+* [ ] expected_upside
+* [ ] conviction
+* [ ] investment_thesis
+* [ ] key_catalysts
+* [ ] key_risks
+* [ ] invalidation_conditions
+* [ ] supporting_evidence
+
+#### Validation
+
+* [ ] ticker 不能为空
+* [ ] price 必须 > 0
+* [ ] thesis 不能为空
+* [ ] evidence 不能为空
+* [ ] risk 不能为空
+* [ ] recommendation 必须来自 Enum
+* [ ] horizon 必须来自 Enum
+* [ ] conviction 必须来自 Enum
+* [ ] extra fields 被拒绝
+* [ ] expected_upside 必须与 current/target price 数学一致
+
+---
+
+### 13. Out of Scope
+
+这一课**明确不做**：
+
+```text
+❌ Decision Agent
+❌ LLM
+❌ LangGraph
+❌ Graph
+❌ Supervisor
+❌ Research integration
+❌ Valuation integration
+❌ Risk integration
+❌ Recommendation generation logic
+❌ Portfolio optimization
+❌ Report
+❌ HITL
+```
+
+尤其不要在这里添加：
+
+```python
+def generate_recommendation(...)
+```
+
+因为：
+
+> **Domain Model 定义“结果长什么样”，Agent 才负责“如何产生结果”。**
+
+---
+
+### 14. 一个非常重要的架构理解
+
+到目前为止，Phase 7 已经形成：
+
+```text
+                 Research Domain
+                       │
+                       ↓
+                Research Results
+                       │
+                       ↓
+                 Valuation Domain
+                       │
+                       ↓
+                 ValuationResult
+                       │
+                       ↓
+                   Risk Domain
+                       │
+                       ↓
+                  RiskAnalysis
+                       │
+                       ↓
+             Investment Decision Domain
+                       │
+                       ↓
+             InvestmentDecision
+```
+
+注意我们现在仍然**没有把这些东西强行塞进一个总 Graph**。
+
+这是有意的。
+
+当前每个 Domain 都先拥有自己的 Contract：
+
+```text
+Research       → ResearchResult
+Valuation      → ValuationResult
+Risk            → RiskAnalysis
+Decision        → InvestmentDecision
+```
+
+等这些 Contract 稳定以后，再在后续 Integration 阶段建立它们之间的 orchestration。
+
+这正是我们之前确定的：
+
+> **先建立可靠的 Domain Contract，再进行 Application-level orchestration。**
+
+---
