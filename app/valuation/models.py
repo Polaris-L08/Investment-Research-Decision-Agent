@@ -72,6 +72,20 @@ class ValuationResult(BaseModel):
         gt=0,
         description="Implied per-share value produced by the model.",
     )
+    target_price: float = Field(
+        gt=0,
+        description="Target price derived from the valuation result.",
+    )
+    current_price: float = Field(
+        gt=0,
+        description="Current stock price used for return calculation.",
+    )
+    expected_upside: float = Field(
+        description=(
+            "Expected upside/downside expressed as a decimal, "
+            "calculated from target price and current price."
+        ),
+    )
     metadata: ValuationMetadata = Field(
         description="Metadata describing the valuation result.",
     )

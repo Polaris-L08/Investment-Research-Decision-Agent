@@ -2123,3 +2123,699 @@ Lesson 4 完成并通过计算测试后，Phase 6 才正式关闭，然后进入
 ---
 
 
+## Lesson 4：Target Price + Expected Upside
+
+Lesson 3 的 Valuation Agent 已经接入 LangGraph。本课完成 Phase 6 最后一个功能点：
+
+```text
+Valuation Result
+      ↓
+Target Price
+      ↓
+Current Price
+      ↓
+Expected Upside / Downside
+```
+
+完成后，Phase 6 的四个核心目标全部具备：
+
+```text
+Valuation Model
+      ↓
+Deterministic Calculation
+      ↓
+LangGraph Valuation Agent
+      ↓
+Target Price + Expected Upside
+```
+
+---
+
+### 1. Lesson 4 Goal
+
+本课实现两个确定性结果：
+
+#### Target Price
+
+当前 P/E 模型产生：
+
+```text
+EPS × P/E Multiple
+        ↓
+Implied Value Per Share
+```
+
+在当前 Phase 6 的单模型架构下：
+
+```text
+Target Price = Implied Value Per Share
+```
+
+例如：
+
+```text
+EPS = 10
+P/E = 20
+
+Implied Value = 200
+Target Price  = 200
+```
+
+#### Expected Upside
+
+严格使用：
+
+$$
+Expected\ Upside =
+\frac{Target\ Price-Current\ Price}{Current\ Price}
+$$
+
+例如：
+
+```text
+Target Price  = 200
+Current Price = 160
+
+Expected Upside
+= (200 - 160) / 160
+= 0.25
+= 25%
+```
+
+如果 Target Price 低于 Current Price：
+
+```text
+Target = 160
+Current = 200
+
+Expected Upside
+= -0.20
+= -20%
+```
+
+因此这个字段同时表达：
+
+```text
+positive → upside
+negative → downside
+zero     → no expected price change
+```
+
+---
+
+### 2. Graph Topology
+
+本课**不再新增 Graph Node**。
+
+这是有意的。
+
+Lesson 3 已经建立：
+
+```text
+START
+  ↓
+Valuation Agent
+  ↓
+END
+```
+
+本课只是扩展 Valuation Agent 内部的确定性计算链：
+
+```text
+                         ┌────────────────────┐
+                         │   Valuation Agent  │
+                         └─────────┬──────────┘
+                                   │
+                                   ▼
+                        P/E Implied Value
+                                   │
+                                   ▼
+                             Target Price
+                                   │
+                                   ▼
+                        Expected Upside
+                                   │
+                                   ▼
+                         ValuationResult
+```
+
+因此没有为了“看起来有变化”而人为添加：
+
+```text
+Valuation
+   ↓
+Target Price Node
+   ↓
+Upside Node
+```
+
+当前阶段它们都属于同一个 Valuation Domain Operation。
+
+未来如果系统需要更复杂的多模型估值、模型选择、敏感性分析，再拆分节点才有意义。
+
+---
+
+### 3. Domain Model 修改
+
+`ValuationResult` 现在完整包含：
+
+```text
+ValuationResult
+├── ticker
+├── method
+├── inputs
+├── assumptions
+├── implied_value_per_share
+├── target_price
+├── current_price
+├── expected_upside
+└── metadata
+```
+
+即：
+
+```python
+target_price: float
+current_price: float
+expected_upside: float
+```
+
+其中：
+
+* `target_price > 0`
+* `current_price > 0`
+* `expected_upside` 可以为负数，因此不能设置 `gt=0`
+
+---
+
+### 4. Complete Calculation Code
+
+#### `app/valuation/calculations.py`
+
+当前完整内容：
+
+```python
+from app.valuation.models import ValuationAssumptions, ValuationInputs
+
+
+def calculate_pe_implied_value(
+    inputs: ValuationInputs,
+    assumptions: ValuationAssumptions,
+) -> float:
+    """Calculate implied value per share using the P/E valuation method.
+
+    Formula:
+        implied value per share = earnings per share × assumed P/E multiple
+
+    The function is intentionally deterministic and has no LLM, provider,
+    network, or LangGraph dependency.
+    """
+
+    return inputs.earnings_per_share * assumptions.multiple
+
+
+def calculate_target_price(implied_value_per_share: float) -> float:
+    """Convert the valuation model's implied value into the target price."""
+
+    if implied_value_per_share <= 0:
+        raise ValueError("Implied value per share must be positive.")
+
+    return implied_value_per_share
+
+
+def calculate_expected_upside(
+    target_price: float,
+    current_price: float,
+) -> float:
+    """Calculate expected upside/downside from target and current prices.
+
+    Formula:
+        (target price - current price) / current price
+    """
+
+    if target_price <= 0:
+        raise ValueError("Target price must be positive.")
+
+    if current_price <= 0:
+        raise ValueError("Current price must be positive.")
+
+    return (target_price - current_price) / current_price
+```
+
+这里最重要的是：
+
+```python
+return (target_price - current_price) / current_price
+```
+
+这是 Python 确定性计算。
+
+**没有 LLM 参与。**
+
+---
+
+### 5. Current Price 从哪里来？
+
+这一点本课也进行了明确处理。
+
+当前已有：
+
+```python
+CompanyResearchResult.current_price
+```
+
+而 Company Research Agent 的工具链已经存在股票价格工具。
+
+因此 Valuation Agent 使用：
+
+```text
+CompanyResearchResult
+        ↓
+current_price
+        ↓
+Valuation
+```
+
+而不是重新制造一个价格。
+
+所以：
+
+```text
+Company Research
+       ↓
+Current Price
+       │
+       ├──────────────┐
+       │              │
+       ▼              ▼
+ Research State    Valuation
+                      │
+                      ▼
+                  Target Price
+                      │
+                      ▼
+                Expected Upside
+```
+
+这也避免了 State 中重复维护同一个 `current_price` 数据源。
+
+---
+
+### 6. Valuation Agent 的完整核心流程
+
+现在 Agent 的逻辑变成：
+
+```text
+ticker
+   │
+   ├── valuation_inputs
+   │
+   ├── valuation_assumptions
+   │
+   └── company_research.current_price
+             │
+             ▼
+      calculate_pe_implied_value()
+             │
+             ▼
+        implied_value
+             │
+             ▼
+       calculate_target_price()
+             │
+             ▼
+        target_price
+             │
+             ▼
+   calculate_expected_upside()
+             │
+             ▼
+       expected_upside
+             │
+             ▼
+      ValuationResult
+```
+
+对应核心代码：
+
+```python
+implied_value = calculate_pe_implied_value(
+    inputs,
+    assumptions,
+)
+
+target_price = calculate_target_price(implied_value)
+
+expected_upside = calculate_expected_upside(
+    target_price,
+    current_price,
+)
+```
+
+这是整个 Phase 6 最重要的计算链。
+
+---
+
+### 7. 为什么 `target_price` 没有让 LLM 生成？
+
+这是非常重要的工业架构原则。
+
+错误方式：
+
+```text
+Research
+   ↓
+LLM
+   ↓
+"Based on the research,
+ target price is probably $200."
+```
+
+正确方式：
+
+```text
+Structured Research
+       ↓
+Explicit Assumptions
+       ↓
+Deterministic Valuation Model
+       ↓
+Implied Value
+       ↓
+Target Price
+       ↓
+Expected Upside
+```
+
+这样 Target Price 才具备：
+
+* 可复现性
+* 可测试性
+* 可解释性
+* 可审计性
+* 可回归验证
+
+这也是为什么 Phase 6 专门设计成一个独立的 Valuation Layer。
+
+---
+
+### 8. Complete Test Coverage
+
+本课增加了：
+
+#### Target Price
+
+```python
+def test_calculate_target_price_uses_implied_value():
+    assert calculate_target_price(200.0) == 200.0
+```
+
+以及非法值：
+
+```python
+def test_calculate_target_price_rejects_non_positive_value():
+    ...
+```
+
+#### Expected Upside
+
+测试三个关键情况：
+
+```text
+Target > Current
+    → positive
+
+Target == Current
+    → 0
+
+Target < Current
+    → negative
+```
+
+即：
+
+```python
+(200, 160) → 0.25
+(200, 200) → 0.00
+(160, 200) → -0.20
+```
+
+同时测试：
+
+```text
+Current Price <= 0
+Target Price <= 0
+```
+
+都会拒绝。
+
+---
+
+### 9. Agent Integration Test
+
+Agent 测试现在验证完整链路：
+
+```text
+EPS = 10
+P/E = 20
+Current Price = 160
+```
+
+得到：
+
+```text
+Implied Value = 200
+Target Price = 200
+Expected Upside = 0.25
+```
+
+即：
+
+```python
+assert valuation.implied_value_per_share == 200.0
+assert valuation.target_price == 200.0
+assert valuation.current_price == 160.0
+assert valuation.expected_upside == 0.25
+```
+
+同时测试：
+
+```text
+没有 valuation_inputs
+没有 valuation_assumptions
+没有 company_research/current_price
+```
+
+都会明确失败。
+
+---
+
+### 10. 为什么没有加入 Investment Recommendation
+
+现在即使已经有：
+
+```text
+Target Price
+Current Price
+Expected Upside
+```
+
+也**不能**在 Phase 6 增加：
+
+```text
+Strong Buy
+Buy
+Hold
+Reduce
+Sell
+```
+
+也不能增加：
+
+```text
+Investment Horizon
+Investment Thesis
+Key Catalysts
+Key Risks
+Invalidation Conditions
+```
+
+这些全部属于：
+
+### 11. Phase 6 当前完整架构
+
+现在 Phase 6 已经形成完整闭环：
+
+```text
+                    Research State
+                          │
+                          ▼
+                  Valuation Inputs
+                          │
+                          ▼
+                 Valuation Assumptions
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │ Valuation     │
+                  │ Agent         │
+                  └───────┬───────┘
+                          │
+                          ▼
+                  P/E Calculation
+                          │
+                          ▼
+                 Implied Value/Share
+                          │
+                          ▼
+                    Target Price
+                          │
+                          ▼
+                  Expected Upside
+                          │
+                          ▼
+                  ValuationResult
+```
+
+这已经可以作为 Phase 7 的输入边界。
+
+---
+
+### 12. Phase 6 Acceptance Criteria
+
+根据项目交接文档规定的 Phase 6 验收标准：
+
+| 要求                    | 状态       |
+|-------------------------|------------|
+| Valuation executes      | ✅         |
+| Assumptions explicit    | ✅         |
+| Target price generated  | ✅         |
+| Calculation test passes | ✅         |
+| Deterministic valuation | ✅         |
+| LangGraph integration   | ✅         |
+| Expected upside         | ✅         |
+| Risk Analysis           | ⏳ Phase 7 |
+| Investment Decision     | ⏳ Phase 7 |
+| Recommendation          | ⏳ Phase 7 |
+| Investment Horizon      | ⏳ Phase 7 |
+| Investment Thesis       | ⏳ Phase 7 |
+| Report                  | ⏳ Phase 8 |
+
+所以从**代码设计和 Lesson 4 实现**角度，Phase 6 已经完成。
+
+---
+
+### 13. 测试状态
+
+这里需要特别说明实际情况：
+
+我在当前执行环境中运行测试时，环境缺少：
+
+```text
+langgraph
+```
+
+因此涉及 `app.agents.valuation` 的 pytest 在 collection 阶段报：
+
+```text
+ModuleNotFoundError: No module named 'langgraph'
+```
+
+这不是本课代码产生的测试失败。
+
+同时：
+
+```bash
+python -m compileall -q app tests
+```
+
+已经通过。
+
+我还直接验证了 Pydantic `ValuationResult` 能正确构造：
+
+```text
+EPS = 10
+P/E = 20
+Target Price = 200
+Current Price = 160
+Expected Upside = 0.25
+```
+
+所以请你在自己的项目 `.venv` 中运行：
+
+```bash
+pytest -q
+```
+
+这次建议**直接跑完整测试套件，而不是只跑 Phase 6 测试**。
+
+因为 Phase 6 已经修改了：
+
+```text
+app/agents/research_state.py
+app/valuation/models.py
+app/agents/valuation.py
+```
+
+必须确认 Phase 1–5 没有回归。
+
+---
+
+### 14. Phase 6 的最终边界
+
+现在可以明确冻结：
+
+```text
+Phase 6
+│
+├── Valuation Domain Model        ✅
+├── Valuation Calculation         ✅
+├── Valuation Agent Integration   ✅
+├── Target Price                  ✅
+└── Expected Upside               ✅
+```
+
+不继续增加：
+
+```text
+❌ DCF
+❌ EV/EBITDA
+❌ PEG
+❌ Peer Valuation
+❌ Valuation Model Selector
+❌ Risk Analysis
+❌ Recommendation
+❌ Investment Horizon
+❌ Investment Thesis
+❌ Report
+❌ Checkpoint
+❌ HITL
+❌ Memory
+❌ Error Recovery Framework
+❌ Observability
+❌ Evaluation
+❌ FastAPI
+```
+
+尤其不要因为现在已经有一个 P/E 模型，就继续扩展成一个“半成品多模型估值平台”。
+
+**Phase 6 到这里应该停。**
+
+---
+
+### 16. Phase 6 完成状态
+
+因此现在：
+
+```text
+Phase 0  Architecture                  ✅
+Phase 1  Minimal LangGraph Core       ✅
+Phase 2  LLM + Structured Output      ✅
+Phase 3  Tool Calling                 ✅
+Phase 4  Research Agents              ✅
+Phase 5  Multi-Agent Orchestration    ✅
+Phase 6  Valuation                    ✅
+Phase 7  Risk + Investment Decision   ⏳
+```
+
+**Phase 6 到此完成。**

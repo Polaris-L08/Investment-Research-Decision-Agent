@@ -3,7 +3,11 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.research_state import ResearchState
-from app.valuation.calculations import calculate_pe_implied_value
+from app.valuation.calculations import (
+    calculate_expected_upside,
+    calculate_pe_implied_value,
+    calculate_target_price,
+)
 from app.valuation.models import (
     ValuationAssumptions,
     ValuationInputs,
@@ -35,6 +39,7 @@ def valuation_agent(
     ticker = state.get("ticker")
     inputs = state.get("valuation_inputs")
     assumptions = state.get("valuation_assumptions")
+    company_research = state.get("company_research")
 
     if not ticker:
         return {
@@ -54,10 +59,24 @@ def valuation_agent(
             "valuation_error": "Valuation assumptions are required.",
         }
 
+    if company_research is None:
+        return {
+            "valuation_analysis": None,
+            "valuation_error": "Company research is required for current price.",
+        }
+
+    current_price = company_research.current_price
+
     try:
         implied_value = calculate_pe_implied_value(
             inputs,
             assumptions,
+        )
+
+        target_price = calculate_target_price(implied_value)
+        expected_upside = calculate_expected_upside(
+            target_price,
+            current_price,
         )
 
         result = ValuationResult(
@@ -66,6 +85,9 @@ def valuation_agent(
             inputs=inputs,
             assumptions=assumptions,
             implied_value_per_share=implied_value,
+            target_price=target_price,
+            current_price=current_price,
+            expected_upside=expected_upside,
             metadata=ValuationMetadata(
                 currency="USD",
                 model_version="pe-v1",
