@@ -4161,3 +4161,1229 @@ LLM
 ```
 
 这是整个项目从“LangGraph Demo”逐步走向真正可运行 Investment Research & Decision Agent 的关键。
+
+
+## Lesson 5：Integration & Data Contract Validation
+
+Lesson 4 已通过。现在进入 **Phase 7 最后一课**。
+
+这一课非常重要，因为我们不是再增加功能，而是第一次验证：
+
+```text
+Research
+   ↓
+Valuation
+   ↓
+Risk
+   ↓
+Investment Decision
+```
+
+这些已经独立完成的 Domain / Agent 是否真的能够通过 **稳定的数据 Contract** 串起来。
+
+本课完成后，如果所有测试通过，Phase 7 就可以正式关闭。
+
+---
+
+### 1. Goal
+
+Lesson 5 有四个目标：
+
+1. 验证 Research → Valuation Contract
+2. 验证 Valuation → Risk Contract
+3. 验证 Risk → Decision Contract
+4. 执行 Phase 5 / Phase 6 regression tests
+
+最终我们希望证明：
+
+```text
+CompanyResearchResult
+        ↓
+ValuationResult
+        ↓
+RiskAnalysis
+        ↓
+InvestmentDecision
+```
+
+能够形成一条完整的数据链。
+
+注意：
+
+**这里不是建立最终 Application Graph。**
+
+我们只是通过 Integration Test 验证各个已经存在的独立模块可以组合。
+
+---
+
+### 2. Why Now
+
+到目前为止，我们有：
+
+```text
+Phase 4
+Research Agents
+        ↓
+Research Results
+```
+
+```text
+Phase 6
+Valuation
+        ↓
+ValuationResult
+```
+
+```text
+Phase 7
+Risk Agent
+        ↓
+RiskAnalysis
+```
+
+```text
+Phase 7
+Investment Decision Agent
+        ↓
+InvestmentDecision
+```
+
+单独测试通过，并不意味着 Contract 一定兼容。
+
+例如：
+
+```text
+Research 输出 current_price
+        ↓
+Valuation 是否正确消费？
+```
+
+或者：
+
+```text
+Valuation 输出 target_price
+        ↓
+Risk 是否正确消费？
+```
+
+以及：
+
+```text
+RiskAnalysis
+        ↓
+Decision Agent 是否正确消费？
+```
+
+因此现在必须做一次跨 Domain validation。
+
+---
+
+### 3. 本课最重要的原则
+
+这一课有一个非常重要的架构边界：
+
+> **Integration Test ≠ Final Application Graph**
+
+我们暂时不创建：
+
+```text
+app/graph/investment_application.py
+```
+
+也不修改旧的：
+
+```text
+app/graph/state.py
+```
+
+更不会把所有 Agent 强行塞进一个超级 Graph。
+
+当前验证方式是：
+
+```text
+Test
+ │
+ ├── Research fixtures
+ │
+ ├── Valuation Graph
+ │
+ ├── Risk Graph
+ │
+ └── Decision Graph
+```
+
+即：
+
+```text
+Integration Test
+      │
+      ▼
+独立 Subgraph Contract
+```
+
+而不是：
+
+```text
+Production Application Graph
+```
+
+后者属于后续架构阶段。
+
+---
+
+### 4. Graph Topology
+
+本课本身没有新的 Production Graph。
+
+测试中的数据流是：
+
+```text
+                    ┌─────────────────────┐
+                    │ CompanyResearchResult│
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │  Valuation Graph    │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                       ValuationResult
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │    Risk Graph       │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                         RiskAnalysis
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │  Decision Graph     │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                      InvestmentDecision
+```
+
+注意：
+
+Research 的四个结果都作为 Risk / Decision 的输入。
+
+完整关系：
+
+```text
+CompanyResearchResult ────────┐
+FinancialResearchResult ──────┤
+MarketResearchResult ─────────┤
+IndustryMacroResearchResult ──┤
+                              │
+                              ▼
+                         Risk Agent
+                              │
+ValuationResult ──────────────┤
+                              ▼
+                         RiskAnalysis
+                              │
+                              ▼
+                       Decision Agent
+                              │
+                              ▼
+                     InvestmentDecision
+```
+
+---
+
+### 5. Data Contract Chain
+
+我们现在正式定义本课需要验证的 Contract。
+
+#### Contract 1：Research → Valuation
+
+Valuation 需要：
+
+```python
+ticker: str
+company_research: CompanyResearchResult
+valuation_inputs: ValuationInputs
+valuation_assumptions: ValuationAssumptions
+```
+
+其中：
+
+```text
+CompanyResearchResult.current_price
+                 ↓
+ValuationResult.current_price
+```
+
+必须保持一致。
+
+---
+
+#### Contract 2：Valuation → Risk
+
+Risk Agent 接收：
+
+```python
+valuation: ValuationResult
+```
+
+因此必须保证：
+
+```text
+ValuationResult
+      ↓
+RiskInputState.valuation
+```
+
+类型完全一致。
+
+---
+
+#### Contract 3：Research + Valuation + Risk → Decision
+
+Decision Agent 接收：
+
+```python
+CompanyResearchResult
+FinancialResearchResult
+MarketResearchResult
+IndustryMacroResearchResult
+ValuationResult
+RiskAnalysis
+```
+
+最终：
+
+```text
+InvestmentDecision
+```
+
+必须保留：
+
+```text
+ticker
+current_price
+target_price
+expected_upside
+```
+
+以及：
+
+```text
+recommendation
+investment_horizon
+conviction
+investment_thesis
+key_catalysts
+key_risks
+invalidation_conditions
+supporting_evidence
+```
+
+---
+
+### 6. 一个非常重要的验证
+
+本课尤其验证：
+
+```text
+CompanyResearchResult.current_price
+                │
+                ▼
+        ValuationResult.current_price
+                │
+                ▼
+     InvestmentDecision.current_price
+```
+
+例如：
+
+```text
+180.0
+ ↓
+180.0
+ ↓
+180.0
+```
+
+以及：
+
+```text
+ValuationResult.target_price
+                │
+                ▼
+InvestmentDecision.target_price
+```
+
+例如：
+
+```text
+216.0
+ ↓
+216.0
+```
+
+最后：
+
+```text
+expected_upside
+```
+
+来自 Valuation：
+
+```text
+(216 - 180) / 180
+= 0.20
+```
+
+Decision Agent 不应该重新计算它。
+
+---
+
+### 7. Exact File
+
+新增一个测试文件：
+
+```text
+tests/test_phase7_integration.py
+```
+
+不需要修改 Production Code。
+
+---
+
+### 8. Complete Integration Test
+
+创建：
+
+`tests/test_phase7_integration.py`
+
+完整内容：
+
+```python
+from unittest.mock import MagicMock, patch
+
+from app.agents.investment_decision import (
+    InvestmentDecisionInputState,
+    build_investment_decision_graph,
+)
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+)
+from app.agents.risk import (
+    RiskInputState,
+    build_risk_graph,
+)
+from app.agents.valuation import valuation_graph
+from app.investment.models import (
+    InvestmentConviction,
+    InvestmentDecision,
+    InvestmentHorizon,
+    InvestmentRecommendation,
+)
+from app.risk.models import (
+    RiskAnalysis,
+    RiskCategory,
+    RiskImpact,
+    RiskItem,
+    RiskLikelihood,
+    RiskSeverity,
+)
+from app.valuation.models import (
+    ValuationAssumptions,
+    ValuationInputs,
+)
+
+
+def make_company_research() -> CompanyResearchResult:
+    return CompanyResearchResult(
+        ticker="NVDA",
+        company_name="NVIDIA Corporation",
+        sector="Semiconductors",
+        current_price=180.0,
+        summary=(
+            "NVIDIA designs GPUs and accelerated computing platforms "
+            "serving data center and other computing markets."
+        ),
+    )
+
+
+def make_financial_research() -> FinancialResearchResult:
+    return FinancialResearchResult(
+        ticker="NVDA",
+        revenue=100.0,
+        net_income=30.0,
+        profit_margin=0.30,
+        summary=(
+            "The company has strong revenue and net income "
+            "with a high profit margin."
+        ),
+    )
+
+
+def make_market_research() -> MarketResearchResult:
+    return MarketResearchResult(
+        ticker="NVDA",
+        market_index="NASDAQ",
+        market_return=0.08,
+        summary=(
+            "The stock has experienced positive market performance "
+            "within the broader technology market."
+        ),
+    )
+
+
+def make_industry_macro_research() -> IndustryMacroResearchResult:
+    return IndustryMacroResearchResult(
+        ticker="NVDA",
+        industry="Semiconductors",
+        industry_growth=0.15,
+        macro_environment=(
+            "Growth-oriented technology investment environment"
+        ),
+        macro_growth=0.03,
+        summary=(
+            "The semiconductor industry benefits from AI infrastructure "
+            "investment but remains exposed to macroeconomic conditions."
+        ),
+    )
+
+
+def make_valuation_inputs() -> ValuationInputs:
+    return ValuationInputs(
+        earnings_per_share=6.0,
+    )
+
+
+def make_valuation_assumptions() -> ValuationAssumptions:
+    return ValuationAssumptions(
+        multiple=36.0,
+        rationale="Illustrative P/E multiple assumption.",
+    )
+
+
+def make_risk_analysis() -> RiskAnalysis:
+    return RiskAnalysis(
+        ticker="NVDA",
+        risks=[
+            RiskItem(
+                category=RiskCategory.VALUATION,
+                title="Valuation Multiple Compression",
+                description=(
+                    "A contraction in the valuation multiple could reduce "
+                    "the expected investment return."
+                ),
+                severity=RiskSeverity.HIGH,
+                likelihood=RiskLikelihood.MEDIUM,
+                impact=RiskImpact.HIGH,
+                evidence=[
+                    "The valuation relies on an assumed P/E multiple.",
+                ],
+            ),
+            RiskItem(
+                category=RiskCategory.INDUSTRY,
+                title="Competitive Pressure",
+                description=(
+                    "Intensifying competition could reduce market share "
+                    "or pricing power."
+                ),
+                severity=RiskSeverity.MEDIUM,
+                likelihood=RiskLikelihood.MEDIUM,
+                impact=RiskImpact.MEDIUM,
+                evidence=[
+                    "The semiconductor industry has competitive dynamics."
+                ],
+            ),
+        ],
+        overall_risk_level=RiskSeverity.HIGH,
+        key_risks=[
+            "Valuation Multiple Compression",
+            "Competitive Pressure",
+        ],
+        uncertainty_notes=[
+            "Long-term demand growth remains uncertain.",
+        ],
+    )
+
+
+def make_investment_decision() -> InvestmentDecision:
+    return InvestmentDecision(
+        ticker="NVDA",
+        recommendation=InvestmentRecommendation.BUY,
+        investment_horizon=InvestmentHorizon.MEDIUM_TERM,
+        current_price=180.0,
+        target_price=216.0,
+        expected_upside=0.20,
+        conviction=InvestmentConviction.MEDIUM,
+        investment_thesis=(
+            "The investment case is supported by strong financial "
+            "performance, favorable industry conditions, and upside "
+            "to the valuation target, while significant valuation "
+            "and competitive risks remain."
+        ),
+        key_catalysts=[
+            "Continued AI infrastructure investment",
+            "Strong demand for accelerated computing",
+        ],
+        key_risks=[
+            "Valuation Multiple Compression",
+            "Competitive Pressure",
+        ],
+        invalidation_conditions=[
+            "Material deterioration in growth expectations",
+            "Sustained loss of competitive position",
+        ],
+        supporting_evidence=[
+            "Strong financial performance",
+            "Positive semiconductor industry outlook",
+            "Valuation target above the current price",
+            "Identified valuation and competitive risks",
+        ],
+    )
+
+
+def make_mock_llm(return_value) -> MagicMock:
+    mock_llm = MagicMock()
+
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = return_value
+
+    mock_llm.with_structured_output.return_value = structured_llm
+
+    return mock_llm
+
+
+def build_research_state():
+    return {
+        "ticker": "NVDA",
+        "company_research": make_company_research(),
+        "financial_research": make_financial_research(),
+        "market_research": make_market_research(),
+        "industry_macro_research": make_industry_macro_research(),
+    }
+
+
+def test_phase7_research_to_valuation_contract():
+    research_state = build_research_state()
+
+    result = valuation_graph.invoke(
+        {
+            "ticker": research_state["ticker"],
+            "company_research": research_state["company_research"],
+            "valuation_inputs": make_valuation_inputs(),
+            "valuation_assumptions": make_valuation_assumptions(),
+        }
+    )
+
+    assert result["valuation_error"] == ""
+    assert result["valuation_analysis"] is not None
+
+    valuation = result["valuation_analysis"]
+
+    assert valuation.ticker == "NVDA"
+    assert valuation.current_price == 180.0
+    assert valuation.target_price == 216.0
+    assert valuation.expected_upside == 0.20
+
+
+def test_phase7_valuation_to_risk_contract():
+    research_state = build_research_state()
+
+    valuation_result = valuation_graph.invoke(
+        {
+            "ticker": research_state["ticker"],
+            "company_research": research_state["company_research"],
+            "valuation_inputs": make_valuation_inputs(),
+            "valuation_assumptions": make_valuation_assumptions(),
+        }
+    )
+
+    valuation = valuation_result["valuation_analysis"]
+
+    expected_risk = make_risk_analysis()
+    mock_llm = make_mock_llm(expected_risk)
+
+    risk_input: RiskInputState = {
+        "ticker": research_state["ticker"],
+        "company_research": research_state["company_research"],
+        "financial_research": research_state["financial_research"],
+        "market_research": research_state["market_research"],
+        "industry_macro_research": research_state[
+            "industry_macro_research"
+        ],
+        "valuation": valuation,
+    }
+
+    with patch(
+        "app.agents.risk.llm",
+        mock_llm,
+    ):
+        risk_graph = build_risk_graph()
+        result = risk_graph.invoke(risk_input)
+
+    assert result["risk_error"] is None
+    assert isinstance(result["risk_analysis"], RiskAnalysis)
+
+    risk_analysis = result["risk_analysis"]
+
+    assert risk_analysis.ticker == valuation.ticker
+    assert risk_analysis.overall_risk_level == RiskSeverity.HIGH
+    assert risk_analysis.key_risks
+
+
+def test_phase7_risk_to_decision_contract():
+    research_state = build_research_state()
+
+    valuation_result = valuation_graph.invoke(
+        {
+            "ticker": research_state["ticker"],
+            "company_research": research_state["company_research"],
+            "valuation_inputs": make_valuation_inputs(),
+            "valuation_assumptions": make_valuation_assumptions(),
+        }
+    )
+
+    valuation = valuation_result["valuation_analysis"]
+
+    risk_analysis = make_risk_analysis()
+    expected_decision = make_investment_decision()
+
+    mock_llm = make_mock_llm(expected_decision)
+
+    decision_input: InvestmentDecisionInputState = {
+        "ticker": research_state["ticker"],
+        "company_research": research_state["company_research"],
+        "financial_research": research_state["financial_research"],
+        "market_research": research_state["market_research"],
+        "industry_macro_research": research_state[
+            "industry_macro_research"
+        ],
+        "valuation": valuation,
+        "risk_analysis": risk_analysis,
+    }
+
+    with patch(
+        "app.agents.investment_decision.llm",
+        mock_llm,
+    ):
+        decision_graph = build_investment_decision_graph()
+        result = decision_graph.invoke(decision_input)
+
+    assert result["decision_error"] is None
+    assert isinstance(
+        result["investment_decision"],
+        InvestmentDecision,
+    )
+
+    decision = result["investment_decision"]
+
+    assert decision.ticker == risk_analysis.ticker
+    assert decision.current_price == valuation.current_price
+    assert decision.target_price == valuation.target_price
+    assert decision.expected_upside == valuation.expected_upside
+
+    assert decision.recommendation == (
+        InvestmentRecommendation.BUY
+    )
+    assert decision.investment_horizon == (
+        InvestmentHorizon.MEDIUM_TERM
+    )
+    assert decision.conviction == InvestmentConviction.MEDIUM
+
+    assert decision.key_risks == risk_analysis.key_risks
+    assert decision.investment_thesis
+    assert decision.supporting_evidence
+
+
+def test_phase7_full_data_contract_chain():
+    research_state = build_research_state()
+
+    # ---------------------------------------------------------
+    # Step 1: Research → Valuation
+    # ---------------------------------------------------------
+
+    valuation_result = valuation_graph.invoke(
+        {
+            "ticker": research_state["ticker"],
+            "company_research": research_state["company_research"],
+            "valuation_inputs": make_valuation_inputs(),
+            "valuation_assumptions": make_valuation_assumptions(),
+        }
+    )
+
+    assert valuation_result["valuation_error"] == ""
+
+    valuation = valuation_result["valuation_analysis"]
+
+    assert valuation is not None
+
+    # ---------------------------------------------------------
+    # Step 2: Research + Valuation → Risk
+    # ---------------------------------------------------------
+
+    risk_analysis = make_risk_analysis()
+    risk_llm = make_mock_llm(risk_analysis)
+
+    risk_input: RiskInputState = {
+        "ticker": research_state["ticker"],
+        "company_research": research_state["company_research"],
+        "financial_research": research_state["financial_research"],
+        "market_research": research_state["market_research"],
+        "industry_macro_research": research_state[
+            "industry_macro_research"
+        ],
+        "valuation": valuation,
+    }
+
+    with patch(
+        "app.agents.risk.llm",
+        risk_llm,
+    ):
+        risk_graph = build_risk_graph()
+        risk_result = risk_graph.invoke(risk_input)
+
+    assert risk_result["risk_error"] is None
+
+    produced_risk = risk_result["risk_analysis"]
+
+    assert produced_risk is not None
+    assert produced_risk.ticker == valuation.ticker
+
+    # ---------------------------------------------------------
+    # Step 3: Research + Valuation + Risk → Decision
+    # ---------------------------------------------------------
+
+    expected_decision = make_investment_decision()
+    decision_llm = make_mock_llm(expected_decision)
+
+    decision_input: InvestmentDecisionInputState = {
+        "ticker": research_state["ticker"],
+        "company_research": research_state["company_research"],
+        "financial_research": research_state["financial_research"],
+        "market_research": research_state["market_research"],
+        "industry_macro_research": research_state[
+            "industry_macro_research"
+        ],
+        "valuation": valuation,
+        "risk_analysis": produced_risk,
+    }
+
+    with patch(
+        "app.agents.investment_decision.llm",
+        decision_llm,
+    ):
+        decision_graph = build_investment_decision_graph()
+        decision_result = decision_graph.invoke(decision_input)
+
+    assert decision_result["decision_error"] is None
+
+    decision = decision_result["investment_decision"]
+
+    assert isinstance(decision, InvestmentDecision)
+
+    # ---------------------------------------------------------
+    # Cross-domain contract assertions
+    # ---------------------------------------------------------
+
+    assert decision.ticker == research_state["ticker"]
+
+    assert (
+        valuation.current_price
+        == research_state["company_research"].current_price
+    )
+
+    assert decision.current_price == valuation.current_price
+    assert decision.target_price == valuation.target_price
+    assert decision.expected_upside == valuation.expected_upside
+
+    assert decision.key_risks == produced_risk.key_risks
+
+    assert decision.investment_thesis
+    assert decision.supporting_evidence
+```
+
+---
+
+### 9. 为什么这里选择 `36.0` 的 P/E
+
+这是为了让整个链条出现一个明确的非零估值结果。
+
+我们使用：
+
+```text
+EPS = 6
+P/E = 36
+```
+
+因此：
+
+```text
+implied value
+= 6 × 36
+= 216
+```
+
+而：
+
+```text
+current price = 180
+```
+
+所以：
+
+```text
+expected upside
+= (216 - 180) / 180
+= 0.20
+```
+
+最终：
+
+```text
+Research
+current_price = 180
+        ↓
+Valuation
+target_price = 216
+expected_upside = 0.20
+        ↓
+Risk
+        ↓
+Decision
+current_price = 180
+target_price = 216
+expected_upside = 0.20
+```
+
+这比全部使用 `0.0` upside 更适合进行真正的 Contract 测试。
+
+---
+
+### 10. 为什么 Risk / Decision 仍然 Mock LLM
+
+因为 Lesson 5 的目标是：
+
+> **验证数据 Contract，而不是评估 LLM。**
+
+因此：
+
+```text
+Valuation
+    ↓
+真实 deterministic calculation
+```
+
+而：
+
+```text
+Risk Agent
+    ↓
+mock LLM
+```
+
+以及：
+
+```text
+Decision Agent
+    ↓
+mock LLM
+```
+
+这是合理的。
+
+否则 Integration Test 会变成：
+
+```text
+API Key
+Network
+LLM availability
+Model behavior
+Prompt behavior
+Domain contracts
+```
+
+全部混在一起。
+
+这种测试反而不稳定。
+
+---
+
+### 11. Phase 5 Regression
+
+Phase 7 不能破坏 Phase 5。
+
+根据当前项目结构，Phase 5 的核心测试包括：
+
+```text
+tests/test_research_planner.py
+tests/test_research_router.py
+tests/test_research_supervisor.py
+tests/test_research_orchestrator.py
+tests/test_research_parallel.py
+tests/test_research_parallel_fan_out.py
+tests/test_company_research_parent_graph.py
+```
+
+建议执行：
+
+```bash
+pytest tests/test_research_planner.py tests/test_research_router.py tests/test_research_supervisor.py tests/test_research_orchestrator.py tests/test_research_parallel.py tests/test_research_parallel_fan_out.py tests/test_company_research_parent_graph.py -q
+```
+
+如果你希望更严格地验证整个 Research 部分，也可以直接运行：
+
+```bash
+pytest tests/test_company_research_agent.py tests/test_financial_research_agent.py tests/test_market_research_agent.py tests/test_industry_macro_research_agent.py tests/test_research_planner.py tests/test_research_router.py tests/test_research_supervisor.py tests/test_research_orchestrator.py tests/test_research_parallel.py tests/test_research_parallel_fan_out.py tests/test_company_research_parent_graph.py -q
+```
+
+---
+
+### 12. Phase 6 Regression
+
+Phase 6 的核心测试：
+
+```text
+tests/test_valuation_models.py
+tests/test_valuation_calculations.py
+tests/test_valuation_agent.py
+```
+
+执行：
+
+```bash
+pytest tests/test_valuation_models.py tests/test_valuation_calculations.py tests/test_valuation_agent.py -q
+```
+
+这一步尤其重要。
+
+因为 Phase 7 的 Risk / Decision 都依赖：
+
+```text
+ValuationResult
+```
+
+我们必须确保 Phase 7 没有破坏 Phase 6。
+
+---
+
+### 13. Phase 7 Regression
+
+最后运行目前 Phase 7 的全部测试：
+
+```bash
+pytest tests/test_risk_models.py tests/test_risk_agent.py tests/test_investment_decision_models.py tests/test_investment_decision_agent.py tests/test_phase7_integration.py -q
+```
+
+---
+
+### 14. 最终 Full Regression
+
+如果上面全部通过，最后运行：
+
+```bash
+pytest -q
+```
+
+这是 Phase 7 最终验收最重要的一步。
+
+我们要验证：
+
+```text
+Phase 1
+   ↓
+Phase 2
+   ↓
+Phase 3
+   ↓
+Phase 4
+   ↓
+Phase 5
+   ↓
+Phase 6
+   ↓
+Phase 7
+```
+
+没有发生 regression。
+
+---
+
+### 15. Phase 7 Closure Criteria
+
+Phase 7 正式关闭必须满足以下全部条件。
+
+#### Risk
+
+* [x] Risk Domain Model
+* [x] Risk Agent
+* [x] Structured `RiskAnalysis`
+* [x] Risk error handling
+
+#### Investment Decision
+
+* [x] Investment Decision Domain Model
+* [x] Investment Decision Agent
+* [x] Structured `InvestmentDecision`
+* [x] Recommendation
+* [x] Investment horizon
+* [x] Investment thesis
+* [x] Evidence
+* [x] Conviction
+* [x] Key risks
+* [x] Invalidation conditions
+
+#### Data Contract
+
+需要测试确认：
+
+```text
+Research
+   ↓
+Valuation
+```
+
+```text
+Valuation
+   ↓
+Risk
+```
+
+```text
+Risk
+   ↓
+Decision
+```
+
+以及：
+
+```text
+current_price
+target_price
+expected_upside
+```
+
+的正确传递。
+
+#### Regression
+
+必须：
+
+```text
+Phase 5 regression ✓
+Phase 6 regression ✓
+Phase 7 regression ✓
+Full regression   ✓
+```
+
+---
+
+### 16. Phase 7 完成后的架构状态
+
+如果本课通过，整个项目会达到一个非常明确的阶段：
+
+```text
+                         Investment Research
+                                │
+                                ▼
+                    ┌──────────────────────┐
+                    │   Research Domain    │
+                    └──────────┬───────────┘
+                               │
+                               ▼
+                         Research Results
+                               │
+                 ┌─────────────┴─────────────┐
+                 │                           │
+                 ▼                           ▼
+       ┌──────────────────┐       ┌──────────────────┐
+       │ Valuation Domain │       │   Risk Domain    │
+       └────────┬─────────┘       └────────┬─────────┘
+                │                          │
+                ▼                          ▼
+        ValuationResult              RiskAnalysis
+                │                          │
+                └──────────┬───────────────┘
+                           ▼
+                ┌──────────────────────┐
+                │ Investment Decision  │
+                │       Domain         │
+                └──────────┬───────────┘
+                           │
+                           ▼
+                  InvestmentDecision
+```
+
+这已经不是单纯的：
+
+```text
+LLM → Answer
+```
+
+而是：
+
+```text
+Research
+   ↓
+Structured Domain Data
+   ↓
+Deterministic Valuation
+   ↓
+Structured Risk Analysis
+   ↓
+Structured Investment Decision
+```
+
+这是后面进入 Report / Persistence / HITL / Error Recovery / Observability / Evaluation 的必要基础。
+
+---
+
+### 17. Phase 7 仍然不做的事情
+
+即使 Integration Test 通过，也**不要在本课继续扩展**：
+
+```text
+❌ Report
+❌ Checkpointer
+❌ Persistence
+❌ HITL
+❌ Long-term Memory
+❌ Error Recovery Framework
+❌ Observability
+❌ Evaluation Framework
+❌ FastAPI
+❌ Final Application Graph
+❌ Portfolio Optimization
+❌ Trading
+```
+
+这些不会因为现在已经有了四个 Domain 就提前塞进 Phase 7。
+
+---
+
+### 18. 最终 Acceptance Criteria
+
+Lesson 5 的最终验收可以概括为：
+
+```text
+Research Contract        ✓
+        ↓
+Valuation Contract      ✓
+        ↓
+Risk Contract           ✓
+        ↓
+Decision Contract       ✓
+        ↓
+Phase 5 Regression      ✓
+        ↓
+Phase 6 Regression      ✓
+        ↓
+Phase 7 Regression      ✓
+        ↓
+Full Regression         ✓
+```
