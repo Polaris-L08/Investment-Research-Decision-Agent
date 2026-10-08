@@ -3,6 +3,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.company_research import company_research_graph
+from app.graph.checkpointer import create_checkpointer
 from app.graph.models import (
     InvestmentDecision,
     InvestmentHorizon,
@@ -471,7 +472,7 @@ builder.add_edge(
     END,
 )
 
-checkpointer = InMemorySaver()
+checkpointer = create_checkpointer()
 
 graph = builder.compile(
     checkpointer=checkpointer,
