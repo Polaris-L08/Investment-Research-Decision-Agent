@@ -6788,3 +6788,139 @@ Presentation Layer
 Markdown
 ```
 ---
+
+### Lesson 4 验收结果
+
+| 验收项                             | 结果 |
+|------------------------------------|------|
+| `InvestmentReport → str`           | ✅   |
+| Markdown 标题正确                  | ✅   |
+| 8 个报告章节完整                   | ✅   |
+| 章节顺序固定                       | ✅   |
+| Narrative 内容完整保留             | ✅   |
+| 不通过任意字段遍历生成 Markdown    | ✅   |
+| 不修改 `InvestmentReport`          | ✅   |
+| 不修改 Valuation / Risk / Decision | ✅   |
+| 不重新计算业务结论                 | ✅   |
+| Renderer 不调用 LLM                | ✅   |
+| Renderer 不调用 Tool / Graph / I/O | ✅   |
+| Renderer 单元测试                  | ✅   |
+| Phase 8 既有测试无回归             | ✅   |
+
+### Lesson 4 最终架构
+
+现在 Phase 8 的核心链路已经完整建立：
+
+```text
+Research
+   │
+   ├── CompanyResearch
+   ├── FinancialResearch
+   ├── MarketResearch
+   └── IndustryMacroResearch
+          │
+          ▼
+     ValuationResult
+          │
+          ▼
+      RiskAnalysis
+          │
+          ▼
+  InvestmentDecision
+          │
+          ▼
+   InvestmentReport
+          │
+          ▼
+ ┌───────────────────────┐
+ │ LLM Narrative         │
+ │ Generation             │
+ └───────────────────────┘
+          │
+          ▼
+ deterministic merge
+          │
+          ▼
+ completed InvestmentReport
+          │
+          ▼
+   Markdown Renderer
+          │
+          ▼
+      Markdown
+```
+
+其中职责已经明确分离：
+
+* **Domain Models**：保存结构化事实与业务结论
+* **InvestmentReport**：Report Domain Boundary
+* **LLM**：只负责把既有事实转化为自然语言 Narrative
+* **Merge**：确定性地把 Narrative 写回 Report
+* **Renderer**：确定性地把完成后的 Report 转换为 Markdown
+* **Renderer 不负责业务逻辑**
+
+这意味着 Phase 8 已经实现了一个非常重要的架构边界：
+
+> **LLM 负责语言生成，程序负责事实、结构和最终输出格式。**
+
+---
+---
+
+
+## Phase 8 正式验收
+
+按照我们之前重新确认过的路线，**Phase 8 到 Lesson 4 即结束，不增加 Lesson 5，也不在这里提前引入新的 Output Contract、Renderer Registry、HTML/PDF 等抽象。**
+
+Phase 8 最终交付物：
+
+```text
+app/report/
+├── __init__.py
+├── models.py
+├── assembly.py
+├── generation.py
+└── rendering.py
+```
+
+职责：
+
+```text
+models.py
+    ↓
+InvestmentReport
+    ↓
+assembly.py
+    ↓
+structured domain results → report structure
+    ↓
+generation.py
+    ↓
+LLM narrative generation
+    ↓
+deterministic merge
+    ↓
+completed InvestmentReport
+    ↓
+rendering.py
+    ↓
+Markdown
+```
+
+### Phase 8 验收条件
+
+1. **Report Domain 建立** ✅
+2. **Research / Valuation / Risk / Decision → Report Assembly** ✅
+3. **Ticker / Cross-domain consistency validation** ✅
+4. **LLM Structured Output Narrative Generation** ✅
+5. **Narrative Schema Validation** ✅
+6. **Deterministic Narrative Merge** ✅
+7. **LLM 不改变投资结论** ✅
+8. **InvestmentReport 不被 Renderer 修改** ✅
+9. **Markdown Renderer** ✅
+10. **Phase 8 测试覆盖核心行为** ✅
+11. **没有提前引入 Phase 9+ 能力** ✅
+12. **没有遗留一个“只能演示、无法继续演进”的临时实现** ✅
+
+**因此：Phase 8 正式完成。**
+
+---
