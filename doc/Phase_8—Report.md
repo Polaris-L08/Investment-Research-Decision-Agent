@@ -5888,3 +5888,903 @@ Domain Object
 这是本项目后面走向工业级实现时非常关键的一条边界：
 
 > **LLM 可以参与解释和叙事，但不能通过“重新生成 Domain Model”的方式获得对业务事实的修改权。**
+
+
+## Lesson 4：Markdown Renderer
+
+正式开始。
+
+这一课我们只解决一个问题：
+
+> **如何把已经完成的 `InvestmentReport`，确定性地渲染成一份结构清晰、可直接阅读的 Markdown 投资研究报告。**
+
+不会在这一课提前加入 HTML、PDF、主 Graph 集成、Persistence、HITL 等内容。
+
+---
+
+### 1. Lesson 4 在整个 Phase 8 中的位置
+
+我们现在已经完成：
+
+```text
+Research Results
+      ↓
+ValuationResult
+RiskAnalysis
+InvestmentDecision
+      ↓
+build_investment_report()
+      ↓
+InvestmentReport
+      ↓
+LLM Narrative Generation
+      ↓
+ReportNarrativeOutput
+      ↓
+Narrative Validation
+      ↓
+Deterministic Merge
+      ↓
+Completed InvestmentReport
+```
+
+Lesson 4 从这里继续：
+
+```text
+Completed InvestmentReport
+            ↓
+     Markdown Renderer
+            ↓
+       Markdown str
+```
+
+因此完整链路变成：
+
+```text
+                    Research
+                       │
+                       ▼
+              Analysis Domains
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+      Valuation       Risk       Decision
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+               InvestmentReport
+                       │
+                       ▼
+             Narrative Generation
+                       │
+                       ▼
+              Narrative Validation
+                       │
+                       ▼
+             Deterministic Merge
+                       │
+                       ▼
+          Completed InvestmentReport
+                       │
+                       ▼
+              Markdown Renderer
+                       │
+                       ▼
+               Markdown Document
+```
+
+---
+
+### 2. 为什么现在需要 Renderer？
+
+前面的 `InvestmentReport` 不是最终用户看到的 Markdown。
+
+它是一个**结构化 Report Domain Boundary**。
+
+例如：
+
+```python
+InvestmentReport(
+    ticker="AAPL",
+    title="Investment Research Report - AAPL",
+    executive_summary="...",
+    company_overview="...",
+    ...
+)
+```
+
+这个对象适合：
+
+* 程序内部传递
+* API response
+* 后续 HTML Renderer
+* 后续 PDF Renderer
+* 测试
+* Persistence
+* Evaluation
+
+但是用户最终需要看到的是：
+
+```markdown
+# Investment Research Report - AAPL
+
+## Executive Summary
+
+...
+
+## Company Overview
+
+...
+
+## Financial Summary
+
+...
+```
+
+所以 Renderer 的职责就是：
+
+> **把已经确定的结构化 Report 转换为具体 Presentation Format。**
+
+---
+
+### 3. Renderer 最重要的架构原则
+
+这里必须把三个概念严格区分：
+
+```text
+Generation
+Rendering
+Decision
+```
+
+#### Generation
+
+负责：
+
+> 用 LLM 生成自然语言 narrative。
+
+```text
+InvestmentReport
+      ↓
+      LLM
+      ↓
+Narrative
+```
+
+#### Rendering
+
+负责：
+
+> 把已经完成的 Report 转换成指定格式。
+
+```text
+InvestmentReport
+      ↓
+Deterministic Renderer
+      ↓
+Markdown
+```
+
+#### Decision
+
+负责：
+
+> 形成投资判断。
+
+```text
+Research
+  +
+Valuation
+  +
+Risk
+  ↓
+InvestmentDecision
+```
+
+因此 Renderer **绝对不能变成第二个 Decision Agent**。
+
+---
+
+### 4. Renderer 为什么应该是 Deterministic？
+
+这是这一课最重要的工程概念之一。
+
+假设同一个：
+
+```python
+InvestmentReport
+```
+
+第一次渲染：
+
+```text
+Recommendation: Buy
+```
+
+第二次却因为 LLM：
+
+```text
+Recommendation: Hold
+```
+
+这会产生非常严重的问题。
+
+因此：
+
+```text
+同一个 InvestmentReport
+        +
+同一个 Renderer
+        ↓
+应该得到确定性的 Markdown
+```
+
+也就是说：
+
+```text
+Renderer(report)
+```
+
+本质上应该是：
+
+```text
+f(report) -> markdown
+```
+
+而不是：
+
+```text
+f(report, LLM) -> markdown
+```
+
+这也是为什么本课 **不调用 LLM**。
+
+---
+
+### 5. Renderer 应该读取什么？
+
+这里继续遵守前面已经建立的 `InvestmentReport` Boundary。
+
+Renderer 的输入只有：
+
+```python
+InvestmentReport
+```
+
+而不是：
+
+```python
+ValuationResult
+RiskAnalysis
+InvestmentDecision
+CompanyResearchResult
+FinancialResearchResult
+...
+```
+
+也就是说：
+
+```text
+Renderer
+   ↑
+InvestmentReport
+```
+
+而不是：
+
+```text
+Renderer
+   ↑
+多个 Domain Object
+```
+
+这样以后我们可以非常自然地增加：
+
+```text
+InvestmentReport
+      │
+      ├── MarkdownRenderer
+      ├── HTMLRenderer
+      └── PDFRenderer
+```
+
+而上游完全不用改变。
+
+---
+
+### 6. Markdown 文档结构
+
+本课我们采用固定、确定性的章节结构：
+
+```markdown
+# {title}
+
+## Executive Summary
+
+{executive_summary}
+
+## Company Overview
+
+{company_overview}
+
+## Financial Summary
+
+{financial_summary}
+
+## Market Summary
+
+{market_summary}
+
+## Industry & Macro Summary
+
+{industry_macro_summary}
+
+## Valuation Summary
+
+{valuation_summary}
+
+## Risk Summary
+
+{risk_summary}
+
+## Investment Decision
+
+{investment_decision_summary}
+```
+
+注意这里有一个非常重要的设计：
+
+**Renderer 不重新生成这些内容。**
+
+例如：
+
+```python
+report.valuation_summary
+```
+
+已经是 Lesson 3 中生成并 Merge 后的 narrative。
+
+Renderer 只负责：
+
+```text
+取出来
+↓
+放到正确位置
+↓
+组成 Markdown
+```
+
+---
+
+### 7. 投资决策的结构化事实怎么办？
+
+这里存在一个很容易犯的错误。
+
+例如有人可能写：
+
+```markdown
+## Investment Decision
+
+Buy
+
+Medium Term
+
+Medium Conviction
+
+Target Price: $210
+```
+
+然后 Renderer 自己读取：
+
+```python
+report.investment_decision.recommendation
+```
+
+再拼接一套新的内容。
+
+这会让 Renderer 开始承担 Report Generation 的职责。
+
+当前 Lesson 4 **不这么做**。
+
+我们的原则是：
+
+```text
+InvestmentDecision
+       ↓
+Investment Report Assembly
+       ↓
+LLM Narrative
+       ↓
+InvestmentReport.investment_decision_summary
+       ↓
+Renderer
+```
+
+因此 Renderer 的正文主要使用：
+
+```python
+report.investment_decision_summary
+```
+
+而不是重新组织投资决策。
+
+后续如果我们需要在最终报告中增加结构化“Key Metrics / Recommendation Box”，可以单独设计 **deterministic metadata presentation layer**，但不在本课扩大范围。
+
+---
+
+### 8. 文件设计
+
+本课新增：
+
+```text
+app/report/rendering.py
+```
+
+职责非常单一：
+
+```text
+InvestmentReport
+       ↓
+render_markdown()
+       ↓
+str
+```
+
+暂时不需要：
+
+```text
+app/report/renderers/
+```
+
+也不需要创建：
+
+```text
+markdown.py
+html.py
+pdf.py
+```
+
+因为当前只有一个 Renderer。
+
+遵循项目一直以来的原则：
+
+> **不要为了“看起来像 Production”提前创建 abstraction。**
+
+等 HTML/PDF 真正出现时，再根据实际需求自然拆分。
+
+---
+
+### 9. Renderer API
+
+我们先定义一个非常简单的 Contract：
+
+```python
+def render_markdown(report: InvestmentReport) -> str:
+    ...
+```
+
+输入：
+
+```text
+InvestmentReport
+```
+
+输出：
+
+```text
+str
+```
+
+并且：
+
+```text
+No LLM
+No Tool
+No Graph
+No I/O
+No Mutation
+```
+
+这使它成为一个非常容易测试的 deterministic pure function。
+
+---
+
+### 10. 实现
+
+新建：
+
+`app/report/rendering.py`
+
+内容：
+
+```python
+from app.report.models import InvestmentReport
+
+
+def render_markdown(report: InvestmentReport) -> str:
+    """Render a completed InvestmentReport as Markdown."""
+
+    return "\n".join(
+        [
+            f"# {report.title}",
+            "",
+            "## Executive Summary",
+            "",
+            report.executive_summary,
+            "",
+            "## Company Overview",
+            "",
+            report.company_overview,
+            "",
+            "## Financial Summary",
+            "",
+            report.financial_summary,
+            "",
+            "## Market Summary",
+            "",
+            report.market_summary,
+            "",
+            "## Industry & Macro Summary",
+            "",
+            report.industry_macro_summary,
+            "",
+            "## Valuation Summary",
+            "",
+            report.valuation_summary,
+            "",
+            "## Risk Summary",
+            "",
+            report.risk_summary,
+            "",
+            "## Investment Decision",
+            "",
+            report.investment_decision_summary,
+        ]
+    )
+```
+
+这里故意没有使用：
+
+```python
+f"""
+...
+"""
+```
+
+而使用：
+
+```python
+"\n".join([...])
+```
+
+原因不是性能，而是**结构显式**。
+
+每一个 Markdown 元素都非常清楚：
+
+```text
+Title
+Section Heading
+Section Content
+```
+
+以后测试也非常直接。
+
+---
+
+### 11. 为什么不让 Renderer 自动处理任意字段？
+
+例如不要写：
+
+```python
+for field_name, value in report.model_dump().items():
+    ...
+```
+
+这种设计看起来很灵活，但实际上会产生几个问题：
+
+#### 问题 1：Presentation Order 不明确
+
+Markdown 报告需要固定的业务顺序。
+
+#### 问题 2：Domain Model 改字段可能直接改变文档
+
+例如以后 `InvestmentReport` 增加：
+
+```python
+internal_debug_info
+```
+
+通用 Renderer 可能直接把它输出。
+
+#### 问题 3：Presentation Structure 被 Domain Schema 绑架
+
+Domain Model：
+
+```text
+描述系统内部数据结构
+```
+
+Renderer：
+
+```text
+描述用户看到的文档结构
+```
+
+两者不是同一个概念。
+
+因此我们继续使用：
+
+> **Explicit Presentation Mapping**
+
+---
+
+### 12. 测试设计
+
+本课测试至少需要覆盖以下几个概念。
+
+#### Test 1：返回 Markdown
+
+```text
+render_markdown(report)
+        ↓
+str
+```
+
+#### Test 2：包含 Title
+
+验证：
+
+```markdown
+# Investment Research Report - AAPL
+```
+
+#### Test 3：包含全部 8 个章节
+
+验证：
+
+```text
+Executive Summary
+Company Overview
+Financial Summary
+Market Summary
+Industry & Macro Summary
+Valuation Summary
+Risk Summary
+Investment Decision
+```
+
+#### Test 4：内容来自 InvestmentReport
+
+例如：
+
+```python
+assert "Generated executive summary." in markdown
+```
+
+而不是测试某个硬编码的内容。
+
+#### Test 5：章节顺序正确
+
+必须保证：
+
+```text
+Executive Summary
+        ↓
+Company Overview
+        ↓
+Financial Summary
+        ↓
+Market Summary
+        ↓
+Industry & Macro Summary
+        ↓
+Valuation Summary
+        ↓
+Risk Summary
+        ↓
+Investment Decision
+```
+
+#### Test 6：Renderer 不修改 Report
+
+```python
+original_report = report.model_copy(deep=True)
+
+render_markdown(report)
+
+assert report == original_report
+```
+
+#### Test 7：Renderer 不依赖 LLM
+
+由于 `render_markdown()` 本身没有 LLM dependency，这实际上由 architecture 保证；测试重点是它可以在没有任何 LLM mock 的情况下直接运行。
+
+---
+
+### 13. 完整测试
+
+新增：
+
+`tests/test_report_rendering.py`
+
+建议使用：
+
+```python
+from app.report.rendering import render_markdown
+```
+
+然后复用与 `test_report_generation.py` 相同的 `InvestmentReport` fixture 思路。
+
+完整测试：
+
+```python
+def test_render_markdown_returns_string():
+    report = build_test_report()
+
+    markdown = render_markdown(report)
+
+    assert isinstance(markdown, str)
+
+
+def test_render_markdown_contains_title():
+    report = build_test_report()
+
+    markdown = render_markdown(report)
+
+    assert "# Investment Research Report - AAPL" in markdown
+
+
+def test_render_markdown_contains_all_sections():
+    report = build_test_report()
+
+    markdown = render_markdown(report)
+
+    expected_headings = [
+        "## Executive Summary",
+        "## Company Overview",
+        "## Financial Summary",
+        "## Market Summary",
+        "## Industry & Macro Summary",
+        "## Valuation Summary",
+        "## Risk Summary",
+        "## Investment Decision",
+    ]
+
+    for heading in expected_headings:
+        assert heading in markdown
+
+
+def test_render_markdown_contains_report_narrative():
+    report = build_test_report()
+
+    markdown = render_markdown(report)
+
+    assert "Original executive summary." in markdown
+    assert "Original company overview." in markdown
+    assert "Original financial summary." in markdown
+    assert "Original market summary." in markdown
+    assert "Original industry and macro summary." in markdown
+    assert "Original valuation summary." in markdown
+    assert "Original risk summary." in markdown
+    assert "Original investment decision summary." in markdown
+
+
+def test_render_markdown_preserves_section_order():
+    report = build_test_report()
+
+    markdown = render_markdown(report)
+
+    positions = [
+        markdown.index("## Executive Summary"),
+        markdown.index("## Company Overview"),
+        markdown.index("## Financial Summary"),
+        markdown.index("## Market Summary"),
+        markdown.index("## Industry & Macro Summary"),
+        markdown.index("## Valuation Summary"),
+        markdown.index("## Risk Summary"),
+        markdown.index("## Investment Decision"),
+    ]
+
+    assert positions == sorted(positions)
+
+
+def test_render_markdown_does_not_mutate_report():
+    report = build_test_report()
+    original_report = report.model_copy(deep=True)
+
+    render_markdown(report)
+
+    assert report == original_report
+```
+
+这里的 `build_test_report()` 可以直接沿用上一课测试中的 fixture 构造方式。
+
+---
+
+### 14. Lesson 4 的 Acceptance Criteria
+
+完成这一课后，需要全部满足：
+
+#### A. Renderer Contract
+
+* [ ] `render_markdown(report)` 接收 `InvestmentReport`
+* [ ] 返回 `str`
+* [ ] 不调用 LLM
+* [ ] 不调用 Tool
+* [ ] 不依赖 Graph
+* [ ] 不进行 I/O
+
+#### B. Markdown Structure
+
+* [ ] Title 正确
+* [ ] 8 个 Report sections 全部存在
+* [ ] Section 顺序固定
+* [ ] Narrative 内容完整进入 Markdown
+
+#### C. Domain Safety
+
+* [ ] 不修改 `InvestmentReport`
+* [ ] 不修改 `valuation`
+* [ ] 不修改 `risk_analysis`
+* [ ] 不修改 `investment_decision`
+* [ ] 不重新计算 valuation
+* [ ] 不重新生成 recommendation
+* [ ] 不进行新的 investment reasoning
+
+#### D. Testing
+
+* [ ] Renderer 单元测试全部通过
+* [ ] Phase 8 已有测试不能出现 regression
+
+#### E. Scope Control
+
+本课**不实现**：
+
+```text
+HTML
+PDF
+Main Graph Integration
+FastAPI
+Persistence
+HITL
+Retry
+Observability
+```
+
+---
+
+### 这一课真正建立的能力
+
+到这里，Phase 8 会第一次形成完整的：
+
+```text
+Content
+   ↓
+Generation
+   ↓
+Validation
+   ↓
+Merge
+   ↓
+Rendering
+```
+
+也就是：
+
+```text
+InvestmentReport
+      │
+      ├── contains structured source-of-truth
+      │
+      ├── contains generated narrative
+      │
+      ▼
+Completed Report Domain Object
+      │
+      ▼
+Presentation Layer
+      │
+      ▼
+Markdown
+```
+---
