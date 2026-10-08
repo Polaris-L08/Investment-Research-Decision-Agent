@@ -1,4 +1,5 @@
 from langchain_core.prompts import ChatPromptTemplate
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.company_research import company_research_graph
@@ -470,5 +471,8 @@ builder.add_edge(
     END,
 )
 
+checkpointer = InMemorySaver()
 
-graph = builder.compile()
+graph = builder.compile(
+    checkpointer=checkpointer,
+)
