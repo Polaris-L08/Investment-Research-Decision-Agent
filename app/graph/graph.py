@@ -336,144 +336,143 @@ def prepare_failure_output(
     }
 
 
-builder = StateGraph(
-    GraphState,
-    input_schema=InputState,
-    output_schema=OutputState,
-)
+def build_graph(checkpointer=None):
+    builder = StateGraph(
+        GraphState,
+        input_schema=InputState,
+        output_schema=OutputState,
+    )
 
 
-builder.add_node(
-    "initialize_state",
-    initialize_state,
-)
+    builder.add_node(
+        "initialize_state",
+        initialize_state,
+    )
 
-builder.add_node(
-    "company_research",
-    company_research_node,
-)
+    builder.add_node(
+        "company_research",
+        company_research_node,
+    )
 
-builder.add_node(
-    "company_research_failure",
-    handle_company_research_failure,
-)
+    builder.add_node(
+        "company_research_failure",
+        handle_company_research_failure,
+    )
 
-builder.add_node(
-    "llm_node",
-    llm_node,
-)
+    builder.add_node(
+        "llm_node",
+        llm_node,
+    )
 
-builder.add_node(
-    "retry_llm",
-    retry_llm,
-)
+    builder.add_node(
+        "retry_llm",
+        retry_llm,
+    )
 
-builder.add_node(
-    "handle_llm_failure",
-    handle_llm_failure,
-)
+    builder.add_node(
+        "handle_llm_failure",
+        handle_llm_failure,
+    )
 
-builder.add_node(
-    "get_stock_price",
-    get_stock_price_node,
-)
+    builder.add_node(
+        "get_stock_price",
+        get_stock_price_node,
+    )
 
-builder.add_node(
-    "create_research_plan",
-    create_research_plan,
-)
+    builder.add_node(
+        "create_research_plan",
+        create_research_plan,
+    )
 
-builder.add_node(
-    "investment_decision_node",
-    investment_decision_node,
-)
+    builder.add_node(
+        "investment_decision_node",
+        investment_decision_node,
+    )
 
-builder.add_node(
-    "prepare_output",
-    prepare_output,
-)
+    builder.add_node(
+        "prepare_output",
+        prepare_output,
+    )
 
-builder.add_node(
-    "prepare_failure_output",
-    prepare_failure_output,
-)
-
-
-builder.add_edge(
-    START,
-    "initialize_state",
-)
-
-builder.add_edge(
-    "initialize_state",
-    "company_research",
-)
+    builder.add_node(
+        "prepare_failure_output",
+        prepare_failure_output,
+    )
 
 
-builder.add_conditional_edges(
-    "company_research",
-    route_after_company_research,
-    {
-        "continue": "llm_node",
-        "failure": "company_research_failure",
-    },
-)
+    builder.add_edge(
+        START,
+        "initialize_state",
+    )
+
+    builder.add_edge(
+        "initialize_state",
+        "company_research",
+    )
 
 
-builder.add_edge(
-    "company_research_failure",
-    "prepare_failure_output",
-)
+    builder.add_conditional_edges(
+        "company_research",
+        route_after_company_research,
+        {
+            "continue": "llm_node",
+            "failure": "company_research_failure",
+        },
+    )
 
 
-builder.add_conditional_edges(
-    "llm_node",
-    route_after_llm,
-    {
-        "continue": "create_research_plan",
-        "retry": "retry_llm",
-        "llm_failure": "handle_llm_failure",
-    },
-)
+    builder.add_edge(
+        "company_research_failure",
+        "prepare_failure_output",
+    )
 
 
-builder.add_conditional_edges(
-    "investment_decision_node",
-    route_after_decision,
-    {
-        "continue": "prepare_output",
-        "llm_failure": "handle_llm_failure",
-    },
-)
+    builder.add_conditional_edges(
+        "llm_node",
+        route_after_llm,
+        {
+            "continue": "create_research_plan",
+            "retry": "retry_llm",
+            "llm_failure": "handle_llm_failure",
+        },
+    )
 
 
-builder.add_edge(
-    "retry_llm",
-    "llm_node",
-)
+    builder.add_conditional_edges(
+        "investment_decision_node",
+        route_after_decision,
+        {
+            "continue": "prepare_output",
+            "llm_failure": "handle_llm_failure",
+        },
+    )
 
-builder.add_edge(
-    "create_research_plan",
-    "investment_decision_node",
-)
 
-builder.add_edge(
-    "handle_llm_failure",
-    "prepare_failure_output",
-)
+    builder.add_edge(
+        "retry_llm",
+        "llm_node",
+    )
 
-builder.add_edge(
-    "prepare_output",
-    END,
-)
+    builder.add_edge(
+        "create_research_plan",
+        "investment_decision_node",
+    )
 
-builder.add_edge(
-    "prepare_failure_output",
-    END,
-)
+    builder.add_edge(
+        "handle_llm_failure",
+        "prepare_failure_output",
+    )
 
-checkpointer = create_checkpointer()
+    builder.add_edge(
+        "prepare_output",
+        END,
+    )
 
-graph = builder.compile(
-    checkpointer=checkpointer,
-)
+    builder.add_edge(
+        "prepare_failure_output",
+        END,
+    )
+
+    return builder.compile(checkpointer=checkpointer)
+
+graph = build_graph()
