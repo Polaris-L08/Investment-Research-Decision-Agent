@@ -2257,3 +2257,1751 @@ Resume
 而且官方明确建议 `InMemorySaver` 仅用于调试/测试，生产环境应使用持久化 Checkpointer。([LangChain 参考文档][3])
 
 ---
+
+
+## Lesson 3：从 InMemorySaver 到真正的持久化 Checkpoint
+
+Lesson 2 已经证明：
+
+```text
+Graph
+  ↓
+Checkpointer
+  ↓
+thread_id
+  ↓
+StateSnapshot
+```
+
+这一课继续向前走一步：
+
+> **把 Checkpoint 从进程内存搬到磁盘，使它能够跨 Application Restart 存活。**
+
+这才是 Phase 9 真正意义上的 **Persistence**。
+
+---
+
+### 1. Lesson 3 的目标
+
+本课完成后，我们要得到：
+
+```text
+Application Process A
+        │
+        ▼
+Main Application Graph
+        │
+        ▼
+SqliteSaver
+        │
+        ▼
+checkpoints.sqlite
+        │
+        X
+     Process STOP
+        │
+        ▼
+Application Process B
+        │
+        ▼
+重新创建 Graph
+        │
+        ▼
+重新打开同一个 SQLite
+        │
+        ▼
+same thread_id
+        │
+        ▼
+读取之前的 Checkpoint
+```
+
+也就是说，本课第一次验证：
+
+```text
+STOP
+  ↓
+RESTART
+  ↓
+SAME THREAD
+  ↓
+STATE STILL EXISTS
+```
+
+这和 Lesson 2 的：
+
+```text
+InMemorySaver
+```
+
+是本质不同的。
+
+LangGraph 官方当前将 `InMemorySaver` 定位为调试/测试用途，而 `SqliteSaver` 是本地文件持久化实现；更进一步的生产环境通常使用 PostgreSQL 等持久化后端。([GitHub][1])
+
+---
+
+### 2. 为什么这一课选择 SQLite
+
+当前项目是：
+
+```text
+Python
++
+LangGraph
++
+本地 Agent Application
+```
+
+我们现在需要的是一个：
+
+* 真正落盘
+* 不需要启动额外数据库服务
+* 能验证 Restart
+* API 简单
+* 测试方便
+
+的 Persistence Backend。
+
+SQLite 正好适合这个阶段。
+
+架构：
+
+```text
+                Checkpointer
+                     │
+                     ▼
+                SqliteSaver
+                     │
+                     ▼
+             ┌────────────────┐
+             │ SQLite File    │
+             │                │
+             │ checkpoints    │
+             │ writes         │
+             └────────────────┘
+```
+
+LangGraph 官方提供独立的：
+
+```text
+langgraph-checkpoint-sqlite
+```
+
+包来提供 `SqliteSaver`。它支持基于 SQLite 的 checkpoint 持久化；官方文档将其定位为本地开发、测试和轻量级部署场景。([GitHub][2])
+
+---
+
+### 3. 一个重要的架构认识
+
+到 Lesson 2 为止：
+
+```text
+Application
+    │
+    ▼
+Graph
+    │
+    ▼
+InMemorySaver
+    │
+    ▼
+RAM
+```
+
+现在：
+
+```text
+Application
+    │
+    ▼
+Graph
+    │
+    ▼
+SqliteSaver
+    │
+    ▼
+SQLite
+    │
+    ▼
+Disk
+```
+
+因此真正发生变化的是：
+
+```text
+Persistence Backend
+```
+
+而不是：
+
+```text
+GraphState
+```
+
+也不是：
+
+```text
+Node
+```
+
+更不是：
+
+```text
+Graph Topology
+```
+
+---
+
+### 4. 本课依然不修改 Domain Model
+
+再次强调：
+
+`app/graph/state.py`
+
+**不修改。**
+
+不要加入：
+
+```python
+thread_id: str
+```
+
+不要加入：
+
+```python
+checkpoint_id: str
+```
+
+不要加入：
+
+```python
+checkpoint: ...
+```
+
+不要加入：
+
+```python
+memory: ...
+```
+
+Persistence 仍然属于：
+
+```text
+Runtime Infrastructure
+```
+
+而不是：
+
+```text
+Domain State
+```
+
+---
+
+### 5. 依赖变化
+
+Lesson 2 使用的：
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+```
+
+属于 LangGraph Checkpoint 基础包。
+
+SQLite 则是独立扩展包：
+
+```text
+langgraph-checkpoint-sqlite
+```
+
+官方安装方式是：
+
+```bash
+uv add langgraph-checkpoint-sqlite
+```
+
+([GitHub][2])
+
+因此项目的依赖从：
+
+```toml
+dependencies = [
+    "langgraph",
+    "pydantic>=2.0",
+]
+```
+
+增加：
+
+```toml
+"langgraph-checkpoint-sqlite",
+```
+
+最终：
+
+```toml
+dependencies = [
+    "langgraph",
+    "langgraph-checkpoint-sqlite",
+    "pydantic>=2.0",
+]
+```
+
+如果你的项目使用的是 `uv`，推荐直接：
+
+```powershell
+uv add langgraph-checkpoint-sqlite
+```
+
+而不是手工编辑 lock file。
+
+---
+
+### 6. Persistence Backend 的位置
+
+这里我们需要做一个小但重要的架构调整。
+
+Lesson 2 是：
+
+```python
+checkpointer = InMemorySaver()
+
+graph = builder.compile(
+    checkpointer=checkpointer,
+)
+```
+
+这在验证概念时没有问题。
+
+但是现在我们有了真正的外部资源：
+
+```text
+SQLite connection
+```
+
+继续把所有东西塞进：
+
+```text
+app/graph/graph.py
+```
+
+会逐渐让 Graph Definition 和 Persistence Infrastructure 耦合。
+
+因此这一课新增：
+
+```text
+app/graph/checkpointer.py
+```
+
+注意：
+
+> 这不是为了“增加目录层次感”，而是因为 Persistence Backend 已经成为一个独立的 runtime infrastructure concern。
+
+我们没有新建：
+
+```text
+app/infrastructure/persistence/
+app/core/database/
+app/services/checkpoint/
+```
+
+这一大堆目录。
+
+当前项目规模下：
+
+```text
+app/graph/checkpointer.py
+```
+
+已经足够。
+
+---
+
+### 7. 新增 `app/graph/checkpointer.py`
+
+完整内容：
+
+```python
+from pathlib import Path
+import sqlite3
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = PROJECT_ROOT / "data"
+CHECKPOINT_DB_PATH = DATA_DIR / "checkpoints.sqlite"
+
+
+def create_checkpointer() -> SqliteSaver:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    connection = sqlite3.connect(
+        CHECKPOINT_DB_PATH,
+        check_same_thread=False,
+    )
+
+    return SqliteSaver(connection)
+```
+
+这里有几个关键点。
+
+---
+
+### 8. 为什么使用 `Path`
+
+不要写：
+
+```python
+sqlite3.connect(
+    "D:\\PycharmProject\\xxx\\checkpoints.sqlite"
+)
+```
+
+因为这会把开发机器路径写死。
+
+我们使用：
+
+```python
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+```
+
+因此：
+
+```text
+app/
+  graph/
+    checkpointer.py
+```
+
+向上：
+
+```text
+parents[0] → graph
+parents[1] → app
+parents[2] → project root
+```
+
+然后：
+
+```python
+DATA_DIR = PROJECT_ROOT / "data"
+```
+
+得到：
+
+```text
+project/
+├── app/
+├── tests/
+├── pyproject.toml
+└── data/
+    └── checkpoints.sqlite
+```
+
+---
+
+### 9. 为什么 `data/` 不应该提交到 Git
+
+SQLite 文件是：
+
+```text
+Runtime Data
+```
+
+不是：
+
+```text
+Source Code
+```
+
+因此应该加入 `.gitignore`：
+
+```gitignore
+data/
+```
+
+如果项目当前已经存在 `.gitignore`，加入：
+
+```gitignore
+data/
+```
+
+如果没有，则新建：
+
+```text
+.gitignore
+```
+
+完整内容至少包含：
+
+```gitignore
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+data/
+```
+
+如果你原来的 `.gitignore` 已经包含前面的内容，则**只增加**：
+
+```gitignore
+data/
+```
+
+不要覆盖已有规则。
+
+---
+
+### 10. 为什么 `check_same_thread=False`
+
+我们使用：
+
+```python
+sqlite3.connect(
+    CHECKPOINT_DB_PATH,
+    check_same_thread=False,
+)
+```
+
+这里不是因为我们现在已经实现了多线程 Agent。
+
+而是因为 `SqliteSaver` 的实现本身对 SQLite connection 有线程安全处理；官方示例也使用 `check_same_thread=False`。([GitHub][3])
+
+不过必须注意：
+
+> SQLite 本身不是我们最终的生产级高并发 Persistence Backend。
+
+官方当前的说明也明确指出 `SqliteSaver` 更适合 lightweight synchronous use cases，并不适合扩展到多线程/高并发生产场景。([GitHub][3])
+
+所以：
+
+```text
+SQLite
+```
+
+在本项目中的定位是：
+
+```text
+Phase 9
+Development / Local Persistence
+```
+
+而不是最终：
+
+```text
+Production Distributed Persistence
+```
+
+后续真正进入生产化阶段时，再切换 PostgreSQL 等后端。
+
+---
+
+### 11. 修改 `app/graph/graph.py`
+
+原来 Lesson 2：
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+```
+
+删除。
+
+增加：
+
+```python
+from app.graph.checkpointer import create_checkpointer
+```
+
+然后原来的：
+
+```python
+checkpointer = InMemorySaver()
+
+graph = builder.compile(
+    checkpointer=checkpointer,
+)
+```
+
+修改为：
+
+```python
+checkpointer = create_checkpointer()
+
+graph = builder.compile(
+    checkpointer=checkpointer,
+)
+```
+
+所以 `graph.py` 的 Persistence 部分最终是：
+
+```python
+from app.graph.checkpointer import create_checkpointer
+```
+
+以及：
+
+```python
+checkpointer = create_checkpointer()
+
+graph = builder.compile(
+    checkpointer=checkpointer,
+)
+```
+
+---
+
+### 12. 当前 Main Graph 的架构
+
+现在：
+
+```text
+app/graph/graph.py
+        │
+        │ create_checkpointer()
+        ▼
+app/graph/checkpointer.py
+        │
+        ▼
+SqliteSaver
+        │
+        ▼
+data/checkpoints.sqlite
+```
+
+Graph Definition 本身仍然只负责：
+
+```text
+Node
+Edge
+Conditional Edge
+Compile
+```
+
+Persistence Backend 负责：
+
+```text
+Checkpoint Storage
+```
+
+这是一个比 Lesson 2 更清晰的边界。
+
+---
+
+### 13. Graph Topology 仍然完全不变
+
+依旧是：
+
+```text
+START
+  │
+  ▼
+initialize_state
+  │
+  ▼
+company_research
+  │
+  ├──────────────► company_research_failure
+  │
+  ▼
+llm_node
+  │
+  ├── retry ─────► retry_llm
+  │                  │
+  │                  └────► llm_node
+  │
+  ├──────────────► handle_llm_failure
+  │
+  ▼
+create_research_plan
+  │
+  ▼
+investment_decision_node
+  │
+  ├──────────────► handle_llm_failure
+  │
+  ▼
+prepare_output
+  │
+  ▼
+END
+```
+
+唯一变化：
+
+```text
+InMemorySaver
+      ↓
+SqliteSaver
+```
+
+所以这仍然不是业务逻辑改造。
+
+---
+
+### 14. 一个重要问题：SQLite 什么时候创建？
+
+我们的代码：
+
+```python
+connection = sqlite3.connect(
+    CHECKPOINT_DB_PATH,
+    check_same_thread=False,
+)
+```
+
+会创建：
+
+```text
+data/checkpoints.sqlite
+```
+
+但 checkpoint 表并不是简单依赖 SQLite 文件本身。
+
+`SqliteSaver` 会在第一次需要时建立自己的数据库结构。官方实现中包含 `checkpoints` 和 `writes` 表，并且 `setup()` 会负责创建它们。([GitHub][3])
+
+因此我们不需要自己写：
+
+```sql
+CREATE TABLE checkpoints ...
+```
+
+更不能自己设计一套表结构替代 LangGraph 的 Checkpointer。
+
+否则就会变成：
+
+```text
+Our custom persistence layer
+          +
+LangGraph checkpoint model
+```
+
+两套模型，很容易失控。
+
+---
+
+### 15. Lesson 3 的关键验证：Restart
+
+这一课真正重要的测试不是：
+
+```python
+graph.get_state(config)
+```
+
+因为 Lesson 2 已经证明这个能力。
+
+这一课必须证明：
+
+```text
+Graph Instance A
+       │
+       ▼
+SQLite
+       │
+       X
+   destroy A
+       │
+       ▼
+Graph Instance B
+       │
+       ▼
+same SQLite
+       │
+       ▼
+same thread_id
+       │
+       ▼
+old State
+```
+
+也就是说：
+
+> **我们不复用同一个 Graph Instance。**
+
+这是关键。
+
+---
+
+### 16. 测试 Graph Builder
+
+在：
+
+```text
+tests/test_checkpoint.py
+```
+
+中，我们需要一个可以反复创建的 Graph。
+
+可以把之前的：
+
+```python
+build_test_graph()
+```
+
+保留，但增加 SQLite 版本。
+
+完整的测试文件建议改成：
+
+```python
+import sqlite3
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
+from typing import TypedDict
+
+from app.graph.graph import graph
+
+
+class CounterState(TypedDict):
+    value: int
+
+
+def build_test_graph(checkpointer):
+    builder = StateGraph(CounterState)
+
+    def increment(state: CounterState):
+        return {
+            "value": state["value"] + 1,
+        }
+
+    builder.add_node("increment", increment)
+
+    builder.add_edge(START, "increment")
+    builder.add_edge("increment", END)
+
+    return builder.compile(
+        checkpointer=checkpointer,
+    )
+
+
+def test_main_application_graph_has_checkpointer():
+    assert graph.checkpointer is not None
+
+
+def test_sqlite_checkpointer_persists_state(tmp_path):
+    database_path = tmp_path / "checkpoints.sqlite"
+
+    connection = sqlite3.connect(
+        database_path,
+        check_same_thread=False,
+    )
+
+    checkpointer = SqliteSaver(connection)
+
+    test_graph = build_test_graph(checkpointer)
+
+    config = {
+        "configurable": {
+            "thread_id": "sqlite-test-thread",
+        }
+    }
+
+    result = test_graph.invoke(
+        {"value": 0},
+        config,
+    )
+
+    assert result["value"] == 1
+
+    snapshot = test_graph.get_state(config)
+
+    assert snapshot.values["value"] == 1
+
+
+def test_sqlite_checkpoint_survives_graph_recreation(tmp_path):
+    database_path = tmp_path / "restart-test.sqlite"
+
+    config = {
+        "configurable": {
+            "thread_id": "restart-test-thread",
+        }
+    }
+
+    connection_1 = sqlite3.connect(
+        database_path,
+        check_same_thread=False,
+    )
+
+    checkpointer_1 = SqliteSaver(connection_1)
+
+    graph_1 = build_test_graph(checkpointer_1)
+
+    result_1 = graph_1.invoke(
+        {"value": 10},
+        config,
+    )
+
+    assert result_1["value"] == 11
+
+    connection_1.close()
+
+    connection_2 = sqlite3.connect(
+        database_path,
+        check_same_thread=False,
+    )
+
+    checkpointer_2 = SqliteSaver(connection_2)
+
+    graph_2 = build_test_graph(checkpointer_2)
+
+    snapshot = graph_2.get_state(config)
+
+    assert snapshot.values["value"] == 11
+
+    connection_2.close()
+
+
+def test_sqlite_threads_are_isolated(tmp_path):
+    database_path = tmp_path / "thread-isolation.sqlite"
+
+    connection = sqlite3.connect(
+        database_path,
+        check_same_thread=False,
+    )
+
+    checkpointer = SqliteSaver(connection)
+
+    test_graph = build_test_graph(checkpointer)
+
+    thread_a = {
+        "configurable": {
+            "thread_id": "sqlite-thread-a",
+        }
+    }
+
+    thread_b = {
+        "configurable": {
+            "thread_id": "sqlite-thread-b",
+        }
+    }
+
+    result_a = test_graph.invoke(
+        {"value": 10},
+        thread_a,
+    )
+
+    result_b = test_graph.invoke(
+        {"value": 20},
+        thread_b,
+    )
+
+    assert result_a["value"] == 11
+    assert result_b["value"] == 21
+
+    snapshot_a = test_graph.get_state(thread_a)
+    snapshot_b = test_graph.get_state(thread_b)
+
+    assert snapshot_a.values["value"] == 11
+    assert snapshot_b.values["value"] == 21
+
+    connection.close()
+```
+
+---
+
+### 17. 这里为什么使用 `tmp_path`
+
+测试绝对不要直接写：
+
+```text
+data/checkpoints.sqlite
+```
+
+否则测试运行以后：
+
+```text
+tests
+  ↓
+修改真实运行数据
+```
+
+会产生污染。
+
+pytest 提供：
+
+```python
+tmp_path
+```
+
+因此：
+
+```python
+database_path = tmp_path / "restart-test.sqlite"
+```
+
+会得到一个测试专用临时数据库。
+
+测试结束后由 pytest 管理临时目录。
+
+因此：
+
+```text
+Production Runtime
+        ↓
+data/checkpoints.sqlite
+
+
+Tests
+        ↓
+temporary sqlite file
+```
+
+完全隔离。
+
+---
+
+### 18. Restart Test 为什么特别重要
+
+看这个测试：
+
+```python
+connection_1 = sqlite3.connect(
+    database_path,
+    check_same_thread=False,
+)
+```
+
+然后：
+
+```python
+graph_1 = build_test_graph(checkpointer_1)
+```
+
+执行：
+
+```python
+result_1 = graph_1.invoke(
+    {"value": 10},
+    config,
+)
+```
+
+得到：
+
+```text
+11
+```
+
+Checkpoint 写入：
+
+```text
+restart-test.sqlite
+```
+
+然后：
+
+```python
+connection_1.close()
+```
+
+这一步非常重要。
+
+它模拟：
+
+```text
+Application STOP
+```
+
+然后重新：
+
+```python
+connection_2 = sqlite3.connect(
+    database_path,
+    check_same_thread=False,
+)
+```
+
+重新：
+
+```python
+checkpointer_2 = SqliteSaver(connection_2)
+```
+
+重新：
+
+```python
+graph_2 = build_test_graph(checkpointer_2)
+```
+
+此时：
+
+```text
+graph_1
+```
+
+已经不存在。
+
+我们使用的是：
+
+```text
+graph_2
+```
+
+但是：
+
+```python
+config = {
+    "configurable": {
+        "thread_id": "restart-test-thread",
+    }
+}
+```
+
+保持完全相同。
+
+于是：
+
+```python
+snapshot = graph_2.get_state(config)
+```
+
+应该仍然得到：
+
+```text
+value = 11
+```
+
+这就是本项目第一次真正意义上的：
+
+```text
+Persistence
+```
+
+---
+
+### 19. 注意：这里还不是 Resume
+
+这里要特别避免一个概念混淆。
+
+我们现在证明：
+
+```text
+Restart
+  ↓
+same thread_id
+  ↓
+load old checkpoint
+```
+
+但是我们还没有实现：
+
+```text
+Resume execution from checkpoint
+```
+
+因此：
+
+```text
+Persistence
+```
+
+和：
+
+```text
+Resume
+```
+
+仍然是两个概念。
+
+本课首先证明：
+
+> **Checkpoint 在 Application Restart 后仍然存在。**
+
+后续再专门处理：
+
+> **如何从特定 checkpoint 恢复 Graph execution。**
+
+这也是为什么 Phase 9 不能被简单理解成“加一个数据库”。
+
+---
+
+### 20. 一个非常重要的 SQLite 测试边界
+
+测试里：
+
+```python
+connection_1.close()
+```
+
+然后重新：
+
+```python
+connection_2
+```
+
+非常关键。
+
+如果我们只是：
+
+```python
+graph_1.invoke(...)
+graph_1.get_state(...)
+```
+
+那么仍然可能只是：
+
+```text
+同一个 Process
+同一个 Connection
+同一个 Graph
+```
+
+无法证明真正的持久化。
+
+所以 Lesson 3 的验收测试必须包含：
+
+```text
+Connection 1
+    ↓
+write
+    ↓
+close
+    ↓
+Connection 2
+    ↓
+read
+```
+
+这才是真正的 Disk Persistence Test。
+
+---
+
+### 21. 安全问题：Checkpoint 是可反序列化数据
+
+这里开始进入一个之前 InMemorySaver 不明显、但生产化必须关注的问题。
+
+Checkpoint 存储的不只是简单：
+
+```text
+{"value": 1}
+```
+
+LangGraph 的 Checkpoint Serialization 涉及对象序列化。
+
+当前官方文档特别提醒，Checkpoint 反序列化需要考虑不可信数据库内容，并提供：
+
+```text
+LANGGRAPH_STRICT_MSGPACK=true
+```
+
+以及显式允许的 module list 等安全控制。([GitHub][2])
+
+因此本项目后续进入 Production Persistence 时，还需要专门处理：
+
+```text
+Serialization Security
+```
+
+但是：
+
+> **本课暂时不把它扩展成一个新的安全子系统。**
+
+现在先建立正确 Persistence Boundary。
+
+---
+
+### 22. 为什么现在不直接上 PostgreSQL？
+
+这是一个非常容易产生的疑问。
+
+既然我们的最终目标是：
+
+```text
+Industrial-grade Agent
+```
+
+为什么不直接：
+
+```text
+PostgreSQL
+```
+
+答案是：
+
+#### 因为这一课的目标不是验证生产数据库。
+
+我们要先验证：
+
+```text
+Graph
+  ↓
+Checkpointer
+  ↓
+Persistent Backend
+  ↓
+Restart
+  ↓
+same Thread
+  ↓
+old State
+```
+
+SQLite 足够完成这个验证。
+
+如果直接引入 PostgreSQL：
+
+```text
+Agent
+  ↓
+LangGraph
+  ↓
+Postgres
+  ↓
+Docker
+  ↓
+Connection Pool
+  ↓
+Migration
+  ↓
+Environment Config
+```
+
+会把本课真正要学习的：
+
+```text
+Checkpoint Persistence Semantics
+```
+
+淹没在基础设施配置中。
+
+而且官方当前也把 SQLite 定位为 local/lightweight 场景，把 PostgreSQL 定位为生产 workload。([LangChain 参考文档][4])
+
+所以路线应该是：
+
+```text
+Lesson 2
+InMemorySaver
+     ↓
+Lesson 3
+SqliteSaver
+     ↓
+后续生产化阶段
+Postgres / durable production backend
+```
+
+而不是：
+
+```text
+Lesson 2
+InMemorySaver
+     ↓
+直接跳到复杂生产部署
+```
+
+---
+
+### 23. 本课完成后的完整架构
+
+现在我们拥有：
+
+```text
+                     Application
+                          │
+                          ▼
+                 Main Application Graph
+                          │
+                          │
+                          ▼
+                    Checkpointer
+                          │
+                          ▼
+                    SqliteSaver
+                          │
+                          ▼
+                ┌────────────────────┐
+                │ checkpoints.sqlite │
+                └─────────┬──────────┘
+                          │
+               ┌──────────┴──────────┐
+               │                     │
+               ▼                     ▼
+          Thread A               Thread B
+               │                     │
+          Checkpoints           Checkpoints
+```
+
+而 Application Restart：
+
+```text
+             PROCESS A
+                 │
+                 ▼
+          SqliteSaver #1
+                 │
+                 ▼
+          checkpoints.sqlite
+                 │
+                 X
+             PROCESS STOP
+                 │
+                 ▼
+             PROCESS B
+                 │
+                 ▼
+          SqliteSaver #2
+                 │
+                 ▼
+          checkpoints.sqlite
+                 │
+                 ▼
+          same thread_id
+                 │
+                 ▼
+          previous checkpoint
+```
+
+这条链路已经成立。
+
+---
+
+### 25. 本课运行顺序
+
+首先安装依赖：
+
+```powershell
+uv add langgraph-checkpoint-sqlite
+```
+
+然后运行：
+
+```powershell
+pytest tests/test_checkpoint.py -v
+```
+
+预期至少：
+
+```text
+4 passed
+```
+
+然后：
+
+```powershell
+pytest -v
+```
+
+---
+
+### 26. 手工验证真正的 SQLite Persistence
+
+为了让你真正看到：
+
+```text
+Process A
+```
+
+和：
+
+```text
+Process B
+```
+
+之间的区别，建议额外做一次手工实验。
+
+可以建立一个临时测试脚本：
+
+```text
+tests/manual_checkpoint_write.py
+```
+
+内容：
+
+```python
+import sqlite3
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
+from typing import TypedDict
+
+
+class State(TypedDict):
+    value: int
+
+
+def increment(state: State):
+    return {
+        "value": state["value"] + 1,
+    }
+
+
+builder = StateGraph(State)
+
+builder.add_node("increment", increment)
+
+builder.add_edge(START, "increment")
+builder.add_edge("increment", END)
+
+
+connection = sqlite3.connect(
+    "restart-demo.sqlite",
+    check_same_thread=False,
+)
+
+checkpointer = SqliteSaver(connection)
+
+graph = builder.compile(
+    checkpointer=checkpointer,
+)
+
+config = {
+    "configurable": {
+        "thread_id": "demo-thread",
+    }
+}
+
+result = graph.invoke(
+    {"value": 100},
+    config,
+)
+
+print(result)
+
+connection.close()
+```
+
+执行：
+
+```powershell
+python tests/manual_checkpoint_write.py
+```
+
+应该得到：
+
+```text
+{'value': 101}
+```
+
+然后这个 Python Process 结束。
+
+现在再建立：
+
+```text
+tests/manual_checkpoint_read.py
+```
+
+内容：
+
+```python
+import sqlite3
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
+from typing import TypedDict
+
+
+class State(TypedDict):
+    value: int
+
+
+def increment(state: State):
+    return {
+        "value": state["value"] + 1,
+    }
+
+
+builder = StateGraph(State)
+
+builder.add_node("increment", increment)
+
+builder.add_edge(START, "increment")
+builder.add_edge("increment", END)
+
+connection = sqlite3.connect(
+    "restart-demo.sqlite",
+    check_same_thread=False,
+)
+
+checkpointer = SqliteSaver(connection)
+
+graph = builder.compile(
+    checkpointer=checkpointer,
+)
+
+config = {
+    "configurable": {
+        "thread_id": "demo-thread",
+    }
+}
+
+snapshot = graph.get_state(config)
+
+print(snapshot.values)
+
+connection.close()
+```
+
+运行：
+
+```powershell
+python tests/manual_checkpoint_read.py
+```
+
+应该看到：
+
+```text
+{'value': 101}
+```
+
+注意这里：
+
+```text
+write process
+      ↓
+STOP
+      ↓
+read process
+```
+
+已经是真正的两个 Python Process。
+
+所以：
+
+```text
+InMemorySaver
+```
+
+无法完成这个实验。
+
+而：
+
+```text
+SqliteSaver
+```
+
+可以。
+
+---
+
+### 27. 这一课的验收标准
+
+Lesson 3 只有在下面条件全部成立时才算完成。
+
+#### Persistence Backend
+
+```text
+[✓] 引入 langgraph-checkpoint-sqlite
+[✓] 使用 SqliteSaver
+[✓] SQLite 数据库落盘
+[✓] 不再使用 InMemorySaver 作为 Main Graph 的 Checkpointer
+```
+
+#### Architecture
+
+```text
+[✓] 新增 app/graph/checkpointer.py
+[✓] Graph Definition 与 Persistence Backend 分离
+[✓] Graph Topology 不改变
+[✓] GraphState 不改变
+[✓] thread_id 不进入 GraphState
+```
+
+#### Persistence
+
+```text
+[✓] Checkpoint 写入 SQLite
+[✓] 可以通过 get_state() 读取
+[✓] 关闭原 SQLite connection
+[✓] 创建新的 SQLite connection
+[✓] 创建新的 Graph Instance
+[✓] 使用同一个 thread_id
+[✓] 能读取之前的 State
+```
+
+#### Thread Isolation
+
+```text
+[✓] Thread A 与 Thread B 使用同一个 SQLite
+[✓] 两者 Checkpoint 相互隔离
+```
+
+#### Scope
+
+```text
+[✓] 没有 HITL
+[✓] 没有 Long-term Memory
+[✓] 没有 Error Recovery
+[✓] 没有 Observability
+[✓] 没有 FastAPI
+```
+
+---
+
+### 28. Lesson 3 最核心的理解
+
+现在请把 Phase 9 的前三步连起来：
+
+```text
+Lesson 1
+────────────────────────────
+理解：
+
+Thread
+Run
+State
+Checkpoint
+Checkpointer
+Persistence
+Resume
+Isolation
+```
+
+↓
+
+```text
+Lesson 2
+────────────────────────────
+InMemorySaver
+
+Graph
+  ↓
+Checkpointer
+  ↓
+Thread
+  ↓
+Checkpoint
+```
+
+↓
+
+```text
+Lesson 3
+────────────────────────────
+SqliteSaver
+
+Graph
+  ↓
+Checkpointer
+  ↓
+SQLite
+  ↓
+Disk
+```
+
+于是第一次得到：
+
+```text
+Process A
+    │
+    ▼
+Checkpoint
+    │
+    ▼
+SQLite
+    │
+    X
+Process STOP
+    │
+    ▼
+Process B
+    │
+    ▼
+same thread_id
+    │
+    ▼
+Checkpoint
+```
+
+这一步是整个 Phase 9 非常关键的里程碑。
+
+---
