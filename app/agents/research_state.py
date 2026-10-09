@@ -8,6 +8,7 @@ from app.agents.models import (
     ResearchArea,
     ResearchPlan,
 )
+from app.valuation import ValuationInputs, ValuationAssumptions
 
 
 def merge_research_errors(
@@ -31,6 +32,11 @@ class ResearchState(TypedDict, total=False):
     financial_research: FinancialResearchResult | None
     market_research: MarketResearchResult | None
     industry_macro_research: IndustryMacroResearchResult | None
+
+    # Produced by the Research stage and consumed by the Application Valuation stage.
+    valuation_inputs: ValuationInputs | None
+    valuation_assumptions: ValuationAssumptions | None
+    valuation_research_error: str
 
     research_errors: Annotated[dict[str, str], merge_research_errors]
 

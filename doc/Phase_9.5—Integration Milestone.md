@@ -2679,3 +2679,67 @@ M3 已直接进入代码实施。本次完成了 Application State / Contract Co
 这里有一个重要的生产设计原则：数据缺失时明确失败，不能用看似合理的数字掩盖缺失。
 
 当前没有新增 EPS 数据 Provider，也没有让 LLM 自行编造估值倍数。真实数据源接入仍属于 M7；M5 会负责将这些显式输入正确传入顶层工作流。
+
+## M5：Application Graph Reconstruction
+
+已按当前 M4 源码直接实施 M5 的第一版：建立生产级顶层 Application Graph，将已有业务子图连接起来，并增加工作流集成测试。
+
+### 1. 本次修改
+
+新增 `app/application/graph.py`
+
+建立统一入口 `application_graph`，执行顺序为：
+
+```text
+Validate Input
+
+Research Supervisor
+
+Valuation
+
+Risk Analysis
+
+Investment Decision
+
+Report Assembly
+
+Report Generation
+```
+
+每个阶段都有条件路由。前置阶段失败时，工作流停止后续业务计算并记录错误，而不是继续生成看似完整的投资结论。
+
+---
+
+更新 `app/application/state.py`
+
+顶层 State 现在承载各业务阶段的结构化结果、显式估值输入、报告结果以及阶段错误。调用方必须提供 `ValuationInputs` 和 `ValuationAssumptions`，不使用隐式默认值。
+
+统一阶段交接和错误处理
+
+* Valuation 的 `valuation_analysis` 映射为 Application 的 `valuation`。
+
+* 检查 Research 输出是否完整，并验证各领域结果的 ticker 一致性。
+
+* 验证 Risk、Investment Decision、Report 的返回结构。
+
+* 报告叙述生成失败时保留确定性组装的报告，并明确记录错误。
+
+--- 
+
+新增 `tests/test_application_graph.py`
+
+增加 Mock 子图驱动的工作流集成测试，覆盖成功路径、Research 输出缺失时停止，以及估值输入缺失时拒绝执行。
+
+另外，调整了 `app/report/__init__.py` 的延迟导入，避免仅使用报告模型或 Application 契约时就强制加载 LangGraph 运行时。
+
+### 2. M5 的验收条件
+
+* 建立生产级顶层 Application Graph。
+
+* 接入 Research、Valuation、Risk、Investment Decision 和 Report。
+
+* 增加阶段失败路由、契约检查及集成测试。
+
+* 在具备项目依赖的环境中运行新增 Graph 集成测试。
+
+* 运行完整测试套件，确认没有破坏已有阶段。

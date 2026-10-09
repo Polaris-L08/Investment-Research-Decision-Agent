@@ -6,7 +6,7 @@ This module defines the shared data boundary for the future top-level
 Application Graph. It intentionally does not implement graph orchestration.
 """
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, NotRequired
 
 from app.agents.models import (
     CompanyResearchResult,
@@ -17,8 +17,8 @@ from app.agents.models import (
     ResearchArea,
 )
 from app.investment.models import InvestmentDecision
-if TYPE_CHECKING:
-    from app.report.models import InvestmentReport
+
+from app.report.models import InvestmentReport
 from app.risk.models import RiskAnalysis
 from app.valuation.models import (
     ValuationAssumptions,
@@ -32,18 +32,11 @@ class ApplicationInputState(TypedDict):
 
     ticker: str
     user_query: str
-
+    valuation_inputs: NotRequired[ValuationInputs]
+    valuation_assumptions: NotRequired[ValuationAssumptions]
 
 class ApplicationState(TypedDict, total=False):
-    """Shared state owned by the production Application workflow.
-
-    Domain result fields use canonical names. In particular, ``valuation``
-    is the application-level name even though the valuation subgraph returns
-    ``valuation_analysis``. The top-level graph will perform that mapping.
-
-    Valuation inputs remain optional at this boundary until the dedicated
-    valuation-input milestone defines how they are obtained and validated.
-    """
+    """Shared state owned by the production Application workflow."""
 
     # Request context
     ticker: str
@@ -61,8 +54,8 @@ class ApplicationState(TypedDict, total=False):
     supervisor_error: str
 
     # Valuation boundary and result
-    valuation_inputs: ValuationInputs
-    valuation_assumptions: ValuationAssumptions
+    valuation_inputs: ValuationInputs | None
+    valuation_assumptions: ValuationAssumptions | None
     valuation: ValuationResult | None
     valuation_error: str
 
@@ -76,6 +69,7 @@ class ApplicationState(TypedDict, total=False):
 
     # Report stage
     report: InvestmentReport | None
+    report_assembly_error: str
     report_generation_error: str
     report_merge_error: str
 
@@ -94,9 +88,15 @@ class ApplicationOutputState(TypedDict, total=False):
     market_research: MarketResearchResult | None
     industry_macro_research: IndustryMacroResearchResult | None
     valuation: ValuationResult | None
+    valuation_error: str
     risk_analysis: RiskAnalysis | None
+    risk_error: str
     investment_decision: InvestmentDecision | None
+    decision_error: str
     report: InvestmentReport | None
     research_errors: dict[str, str]
     stage_errors: dict[str, str]
+    report_assembly_error: str
+    report_generation_error: str
+    report_merge_error: str
     application_error: str

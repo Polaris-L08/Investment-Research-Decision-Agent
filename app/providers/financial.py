@@ -214,3 +214,49 @@ class MockMacroEnvironmentProvider(MacroEnvironmentProvider):
             )
 
         return self.mock_macro_environment[ticker]
+
+class ValuationResearchProvider(ABC):
+    """Provider contract for Research-stage valuation inputs and assumptions."""
+
+    @abstractmethod
+    def get_valuation_inputs(self, ticker: str) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_valuation_assumptions(self, ticker: str) -> dict:
+        raise NotImplementedError
+
+
+class MockValuationResearchProvider(ValuationResearchProvider):
+    """Deterministic fixture provider; replace with source-backed data in M7."""
+
+    def __init__(self):
+        self.mock_inputs = {
+            "AAPL": {"earnings_per_share": 6.0},
+            "MSFT": {"earnings_per_share": 12.0},
+            "GOOGL": {"earnings_per_share": 7.0},
+        }
+        self.mock_assumptions = {
+            "AAPL": {
+                "multiple": 28.0,
+                "rationale": "Mock research fixture only; replace with source-backed peer valuation analysis before production use.",
+            },
+            "MSFT": {
+                "multiple": 32.0,
+                "rationale": "Mock research fixture only; replace with source-backed peer valuation analysis before production use.",
+            },
+            "GOOGL": {
+                "multiple": 25.0,
+                "rationale": "Mock research fixture only; replace with source-backed peer valuation analysis before production use.",
+            },
+        }
+
+    def get_valuation_inputs(self, ticker: str) -> dict:
+        if ticker not in self.mock_inputs:
+            raise ValueError(f"Valuation inputs not found for ticker: {ticker}")
+        return {"ticker": ticker, **self.mock_inputs[ticker]}
+
+    def get_valuation_assumptions(self, ticker: str) -> dict:
+        if ticker not in self.mock_assumptions:
+            raise ValueError(f"Valuation assumptions not found for ticker: {ticker}")
+        return {"ticker": ticker, **self.mock_assumptions[ticker]}

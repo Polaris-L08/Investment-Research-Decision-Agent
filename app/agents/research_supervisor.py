@@ -12,7 +12,11 @@ from app.agents.models import ResearchArea, ResearchPlan, CompanyResearchResult,
     MarketResearchResult, IndustryMacroResearchResult
 from app.agents.research_planner import research_planner_graph
 from app.agents.research_state import merge_research_errors
+from app.providers.financial import MockValuationResearchProvider
+from app.valuation import ValuationAssumptions, ValuationInputs
 
+# Replace this configured mock with the source-backed provider during M7.
+valuation_research_provider = MockValuationResearchProvider()
 
 class ResearchSupervisorInputState(TypedDict):
     """Public input contract for the complete Research stage."""
@@ -43,6 +47,10 @@ class ResearchSupervisorState(TypedDict, total=False):
     planning_error: str
     supervisor_error: str
 
+    valuation_inputs: ValuationInputs | None
+    valuation_assumptions: ValuationAssumptions | None
+    valuation_research_error: str
+
 
 class ResearchSupervisorOutputState(TypedDict, total=False):
     """Stable output contract returned to the parent application graph."""
@@ -59,6 +67,9 @@ class ResearchSupervisorOutputState(TypedDict, total=False):
     research_errors: dict[str, str]
     planning_error: str
     supervisor_error: str
+    valuation_inputs: ValuationInputs | None
+    valuation_assumptions: ValuationAssumptions | None
+    valuation_research_error: str
 
 
 def plan_research(
@@ -300,6 +311,61 @@ def supervisor_should_continue(
     return "execute"
 
 
+def prepare_valuation_outputs(
+    state: ResearchSupervisorState,
+) -> ResearchSupervisorState:
+    """Produce the valuation input contract as part of the Research stage.
+
+    Explicit caller overrides win. Missing values are obtained through the
+    Research-stage valuation provider. The default provider is intentionally a
+    mock fixture and must be replaced by source-backed integration in M7.
+    """
+    ticker = state.get("ticker", "").strip().upper()
+    provider = valuation_research_provider
+    errors: list[str] = []
+    updates: dict = {}
+
+    supplied_inputs = state.get("valuation_inputs")
+    if supplied_inputs is not None and not isinstance(supplied_inputs, ValuationInputs):
+        updates["valuation_inputs"] = None
+        errors.append("valuation_inputs override must be a ValuationInputs instance")
+    elif isinstance(supplied_inputs, ValuationInputs):
+        updates["valuation_inputs"] = supplied_inputs
+    else:
+        try:
+            raw_inputs = provider.get_valuation_inputs(ticker)
+            updates["valuation_inputs"] = ValuationInputs.model_validate(
+                {key: value for key, value in raw_inputs.items() if key != "ticker"}
+            )
+        except Exception as exc:
+            updates["valuation_inputs"] = None
+            errors.append(f"valuation_inputs: {exc}")
+
+    supplied_assumptions = state.get("valuation_assumptions")
+    if supplied_assumptions is not None and not isinstance(
+        supplied_assumptions, ValuationAssumptions
+    ):
+        updates["valuation_assumptions"] = None
+        errors.append(
+            "valuation_assumptions override must be a ValuationAssumptions instance"
+        )
+    elif isinstance(supplied_assumptions, ValuationAssumptions):
+        updates["valuation_assumptions"] = supplied_assumptions
+    else:
+        try:
+            raw_assumptions = provider.get_valuation_assumptions(ticker)
+            updates["valuation_assumptions"] = ValuationAssumptions.model_validate(
+                {key: value for key, value in raw_assumptions.items() if key != "ticker"}
+            )
+        except Exception as exc:
+            updates["valuation_assumptions"] = None
+            errors.append(f"valuation_assumptions: {exc}")
+
+    updates["valuation_research_error"] = "; ".join(errors)
+    return updates
+
+
+
 def build_research_supervisor_graph():
     """Build the production Research-stage graph."""
 
@@ -316,6 +382,7 @@ def build_research_supervisor_graph():
     )
     builder.add_node("route_and_execute", route_and_execute)
     builder.add_node("mark_completed", mark_completed)
+    builder.add_node("prepare_valuation_outputs", prepare_valuation_outputs)
 
     builder.add_edge(START, "plan_research")
     builder.add_edge("plan_research", "select_next_research_area")
@@ -325,7 +392,7 @@ def build_research_supervisor_graph():
         supervisor_should_continue,
         {
             "execute": "route_and_execute",
-            "done": END,
+            "done": "prepare_valuation_outputs",
             "error": END,
         },
     )
@@ -343,6 +410,7 @@ def build_research_supervisor_graph():
         "mark_completed",
         "select_next_research_area",
     )
+    builder.add_edge("prepare_valuation_outputs", END)
 
     return builder.compile()
 
