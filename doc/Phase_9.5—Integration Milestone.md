@@ -2501,3 +2501,135 @@ def test_invalid_child_output_contract_stops_research_stage(
 ```
 
 这组测试验证七类不合规输出：非字典、缺少字段、没有错误说明的空结果、结果与错误同时出现，以及错误字段类型不正确等情况。
+
+## M3：Application State / Contract Convergence
+
+本课只审查、不修改业务代码。考虑到你希望尽快进入 Phase 10，我会直接给出影响后续集成的结论，不再把每个发现拆成单独课程。
+
+### 1. 当前架构：各业务阶段的 State 与 Contract
+
+![M3-1.png](pic/M3-1.png)
+
+### 2. 审查发现：哪些问题必须处理？
+
+我把问题分成两类：**顶层集成前必须解决**，以及可以保留到对应后续阶段处理的事项。
+
+**问题 A：缺少统一的 Application State 与顶层数据契约**
+
+_必须处理_
+
+当前各子图分别定义自己的输入和输出 State，但没有统一的顶层契约负责承载各阶段结果、控制执行顺序和传播错误。旧的 `app/graph/state.py` 仍然定义另一套教学 Graph State，其中还存在与新业务模型不同的字段类型和重复字段。
+
+处理原则： 在 M5 建立生产级 Application State；旧教学 Graph 不应继续充当生产编排入口。
+
+**问题 B：估值所需输入尚未接入统一工作流**
+
+_必须处理_
+
+Valuation 需要 `ValuationInputs` 和 `ValuationAssumptions`，但 Research Supervisor 的输出不包含这两个对象；估值模块当前也没有在自身内部取得它们的逻辑。
+
+这不是说估值算法不能运行，而是说顶层 Application 必须明确这些输入由谁提供、如何验证，不能假设 Research 完成后估值就能自动运行。
+
+处理原则： 在 M4 明确输入边界，并让 M5 通过正式契约接入；不在本课提前实现新的估值数据源。
+
+**问题 C：跨阶段一致性检查主要集中在报告组装阶段**
+
+_必须处理_
+
+`build_investment_report()` 会检查各阶段的 ticker 是否一致，以及估值价格、预期涨跌幅和关键风险是否符合既定契约。
+
+这类检查有价值，但如果不一致的数据已经进入风险分析或投资决策，直到组装报告才发现，错误就传播得太远了。
+
+处理原则： 顶层工作流应在各阶段交接时检查必要的输入和错误状态；保留报告组装的最终一致性检查，不重复实现复杂的业务逻辑。
+
+**问题 D：不同业务子图的错误表示方式不完全一致**
+
+_集成时统一_
+
+Research 子图使用 `research_result` 与字符串 `research_error`；Valuation 使用字符串错误；Risk 和 Investment Decision 则使用可空错误字段。
+
+不同领域不必强行使用完全相同的内部 State，但顶层必须能够可靠区分成功、业务失败和执行失败。
+
+处理原则： 在 M5 定义统一的阶段执行与错误传播规则，不为统一而大规模改写所有 Agent。
+
+### 3. 哪些问题暂时不处理？
+
+为了加快进度，以下事项不在 M3 中扩展：
+
+| 项目                                    | 决定                      | 原因                           |
+|-----------------------------------------|---------------------------|--------------------------------|
+| 旧 `app/graph/graph.py` 的全部教学逻辑  | 暂时保留，M5 确认替代关系 | 避免提前删除仍有测试价值的代码 |
+| Research Supervisor 内部重构            | 不再扩大范围              | M2 已完成收敛                  |
+| 估值模型新增方法                        | 暂不处理                  | 不属于 State / Contract 收敛   |
+| 真实行情、财务数据 Provider 接入        | 放到 M7                   | 避免把 Mock 集成误认为真实集成 |
+| Checkpoint、Human-in-the-loop、长期记忆 | 按后续计划处理            | 不提前实现 Phase 10 及后续功能 |
+
+另有一项值得记录：报告组装目前要求 `RiskAnalysis.key_risks` 与 `InvestmentDecision.key_risks` 完全相等。
+
+这是一条偏严格的契约，可能限制决策 Agent 对风险的筛选和归纳。暂不直接修改；在端到端集成时再根据实际业务语义和现有测试判断是否需要放宽。
+
+### 4. M3 的完成标准
+
+M3 不以文件数量或重构规模作为验收标准，而以以下结果为准：
+
+* 已盘点 Research、Valuation、Risk、Investment Decision 和 Report 的输入输出契约。
+
+* 已确认顶层 Application State / Graph 缺位，以及估值输入尚未接入的问题。
+
+* 已区分必须处理的问题和暂缓事项。
+
+* 明确 Application State 和阶段交接契约，并通过针对性测试。
+
+前三项已完成；最后一项属于后续代码实施与测试。当前没有修改任何源码，也没有声称相关测试已经通过。
+
+### 5. 下一步：直接进入 M3 的契约收敛实施
+
+下一步不再做第二轮大规模盘点。我会基于本次审查，集中完成：
+
+1. 定义生产级 Application State 的最小必要字段。
+
+2. 明确 Research → Valuation → Risk → Investment Decision → Report 的阶段输入、输出与错误传播规则。
+
+3. 为必需字段和阶段交接补充测试。
+
+4. 不提前实现 M4 的估值数据获取功能，也不重建整个 Application Graph——那属于 M5。
+
+这样可以先固定各模块之间的接口，再尽快进入真正的顶层工作流集成，避免在 M5 才发现各模块的输入输出无法衔接。
+
+
+--- 
+M3 已直接进入代码实施。本次完成了 Application State / Contract Convergence 的第一版实现，没有继续停留在架构讨论。
+
+### 1. 新增的代码
+
+`app/application/state.py`
+
+定义生产级 Application 的三个 State 契约：
+
+* `ApplicationInputState`：调用方输入 `ticker` 和 `user_query`。
+
+* `ApplicationState`：承载研究、估值、风险、投资决策、报告及错误状态。
+
+* `ApplicationOutputState`：定义最终对外输出。
+
+估值输入仍是显式字段，但暂不规定其获取方式，避免提前进入 M4。
+
+---
+
+`app/application/contracts.py`
+
+新增运行时契约验证：
+
+* `normalize_stage_output()`：统一成功与失败的返回语义。
+
+* `normalize_valuation_output()`：把估值子图的 `valuation_analysis` 映射为 Application 的标准字段 `valuation`。
+
+* `validate_ticker_consistency()`：检查各阶段结果是否属于同一股票。
+
+* `StageContractError`：提供明确的契约异常类型。
+
+---
+
+`tests/test_application_contracts.py`
+
+* 新增针对成功、失败、非法返回结构、错误类型和 ticker 不一致的测试。
