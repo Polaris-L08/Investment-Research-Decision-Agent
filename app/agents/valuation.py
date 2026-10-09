@@ -9,6 +9,7 @@ from app.valuation.calculations import (
     calculate_pe_implied_value,
     calculate_target_price,
 )
+from app.valuation.input_boundary import validate_valuation_input_boundary, ValuationInputError
 from app.valuation.models import (
     ValuationAssumptions,
     ValuationInputs,
@@ -44,36 +45,20 @@ class ValuationOutputState(TypedDict):
 def valuation_agent(
     state: ValuationGraphState,
 ) -> ValuationOutputState:
-    """Run the deterministic valuation model from explicit inputs."""
+    """Run deterministic valuation only after the explicit input boundary passes."""
 
-    ticker = state.get("ticker")
-    company_research = state.get("company_research")
-    inputs = state.get("valuation_inputs")
-    assumptions = state.get("valuation_assumptions")
-
-    if not ticker:
+    try:
+        validated = validate_valuation_input_boundary(state)
+    except ValuationInputError as exc:
         return {
             "valuation_analysis": None,
-            "valuation_error": "Ticker is required for valuation.",
+            "valuation_error": str(exc),
         }
 
-    if company_research is None:
-        return {
-            "valuation_analysis": None,
-            "valuation_error": "Company research is required for current price.",
-        }
-
-    if inputs is None:
-        return {
-            "valuation_analysis": None,
-            "valuation_error": "Valuation inputs are required.",
-        }
-
-    if assumptions is None:
-        return {
-            "valuation_analysis": None,
-            "valuation_error": "Valuation assumptions are required.",
-        }
+    ticker = validated.ticker
+    company_research = validated.company_research
+    inputs = validated.valuation_inputs
+    assumptions = validated.valuation_assumptions
 
     current_price = company_research.current_price
 

@@ -2633,3 +2633,49 @@ M3 已直接进入代码实施。本次完成了 Application State / Contract Co
 `tests/test_application_contracts.py`
 
 * 新增针对成功、失败、非法返回结构、错误类型和 ticker 不一致的测试。
+
+## M4：Valuation Input Boundary 已完成第一版
+
+本次直接修改代码，明确了估值输入的来源边界、验证规则和失败行为。下一步进入 M5：Application Graph Reconstruction，不再单独扩展 M4。
+
+### 1. 本次完成的修改
+
+新增 `app/valuation/input_boundary.py`
+
+建立统一的估值输入验证入口：
+
+* 校验股票代码和公司研究结果是否一致。
+
+* 要求明确提供 `ValuationInputs`。
+
+* 要求明确提供 `ValuationAssumptions`。
+
+* 检查当前股价、每股收益和估值倍数的有效性。
+
+* 返回经过验证的结构化输入，供确定性估值模型使用。
+
+---
+
+修改 `app/agents/valuation.py`
+
+估值 Agent 现在先经过输入边界验证，再执行估值计算。验证失败时返回明确的 `valuation_error`，不继续计算。
+
+---
+
+新增 `tests/test_valuation_input_boundary.py`
+
+覆盖正常输入、缺失输入、股票代码不一致、错误模型类型和无效股价等情况。
+
+### 2. 估值输入的正式约定
+
+| 输入                    | 当前来源                         | 处理规则                       |
+|-------------------------|----------------------------------|--------------------------------|
+| `ticker`                | Application 请求                 | 必须有效；边界将其规范化为大写 |
+| `company_research`      | Research 阶段                    | 必须存在，股票代码必须匹配     |
+| `current_price`         | `company_research.current_price` | 必须是有限正数                 |
+| `valuation_inputs`      | 调用方显式提供                   | 不从收入或净利润中猜测 EPS     |
+| `valuation_assumptions` | 调用方显式提供                   | 不静默填入默认估值倍数         |
+
+这里有一个重要的生产设计原则：数据缺失时明确失败，不能用看似合理的数字掩盖缺失。
+
+当前没有新增 EPS 数据 Provider，也没有让 LLM 自行编造估值倍数。真实数据源接入仍属于 M7；M5 会负责将这些显式输入正确传入顶层工作流。
