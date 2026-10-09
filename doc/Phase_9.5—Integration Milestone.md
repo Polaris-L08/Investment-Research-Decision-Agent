@@ -1573,3 +1573,931 @@ pytest -q
 * 旧 Router、Orchestrator、Parallel、Fanout 的相关测试与实际子 Agent 契约一致。
 
 * 本课专项测试和全量测试均通过。
+
+## M2 Lesson 4：统一 Research 子 Agent 契约
+
+### 一、本课最终要建立的接口
+
+四个子 Agent 都接受相同的输入：
+
+Python
+
+运行
+
+```
+{"ticker": "AAPL"}
+```
+
+成功时，统一返回：
+
+Python
+
+运行
+
+```
+{
+    "research_result": <对应领域的 Pydantic 模型>,
+    "research_error": "",
+}
+```
+
+失败时，统一返回：
+
+Python
+
+运行
+
+```
+{
+    "research_result": None,
+    "research_error": "具体错误原因",
+}
+```
+
+这里需要注意：只统一接口，不统一领域模型。
+
+* 公司研究仍使用 `CompanyResearchResult`。
+
+* 财务研究仍使用 `FinancialResearchResult`。
+
+* 市场研究仍使用 `MarketResearchResult`。
+
+* 行业与宏观研究仍使用 `IndustryMacroResearchResult`。
+
+同时，Supervisor 需要区分普通研究失败和接口契约错误。普通研究失败可以记录后继续其他研究领域；接口契约错误则应该终止当前 Research 阶段，避免产生不可信的结果。
+
+### 二、新增公共契约模块
+
+新建文件：`app/agents/research_contracts.py`
+
+请将以下内容完整复制到这个新文件中。
+
+Python
+
+运行
+
+```
+"""Shared contract helpers for Research child agents."""
+
+from typing import Any, TypeVar
+
+from pydantic import BaseModel
+
+
+ResearchResultT = TypeVar(
+    "ResearchResultT",
+    bound=BaseModel,
+)
+
+
+def require_research_result(
+    result: Any,
+    expected_type: type[ResearchResultT],
+) -> ResearchResultT:
+    """Validate that a child agent returned its expected domain model."""
+
+    if not isinstance(result, expected_type):
+        raise TypeError(
+            "Research agent returned an invalid structured result: "
+            f"expected {expected_type.__name__}, "
+            f"received {type(result).__name__}."
+        )
+
+    return result
+
+
+def research_success(
+    result: ResearchResultT,
+) -> dict[str, Any]:
+    """Build the standard success payload."""
+
+    if not isinstance(result, BaseModel):
+        raise TypeError(
+            "Research success payload requires a validated Pydantic result; "
+            f"received {type(result).__name__}."
+        )
+
+    return {
+        "research_result": result,
+        "research_error": "",
+    }
+
+
+def research_failure(
+    error: Exception,
+) -> dict[str, Any]:
+    """Build the standard failure payload."""
+
+    message = str(error).strip() or type(error).__name__
+
+    return {
+        "research_result": None,
+        "research_error": message,
+    }
+```
+
+#### 这个模块解决什么问题？
+
+过去，四个 Agent 各自手动创建成功和失败字典。以后它们调用同一组函数构建输出，减少重复实现。
+
+`require_research_result()` 则增加运行时类型验证。例如，公司研究 Agent 返回了 `None` 或一个普通字典时，系统不会把它当作有效的公司研究结果。
+
+这里的类型验证依赖现有项目使用的 Pydantic 模型，不需要修改 `app/agents/models.py`。
+
+### 三、修改 Company Research Agent
+
+文件：`app/agents/company_research.py`
+
+#### 修改 1：增加 import
+
+找到原来的：
+
+Python
+
+运行
+
+```
+from app.agents.models import CompanyResearchResult
+```
+
+在它下面增加：
+
+Python
+
+运行
+
+```
+from app.agents.research_contracts import (
+    require_research_result,
+    research_failure,
+    research_success,
+)
+```
+
+#### 修改 2：替换 `company_research_agent()` 函数
+
+请在该文件中找到现有的 `company_research_agent()`，将整个函数替换为以下版本。文件中的 `build_company_research_graph()` 和其他代码保持不变。
+
+Python
+
+运行
+
+```
+def company_research_agent(
+    state: CompanyResearchState,
+) -> CompanyResearchState:
+    ticker = state["ticker"]
+
+    prompt_value = company_research_prompt.invoke(
+        {"ticker": ticker}
+    )
+
+    try:
+        tool_result = company_research_tool_loop.invoke(
+            {
+                "messages": prompt_value.messages,
+            }
+        )
+
+        research_context = extract_tool_results(tool_result)
+
+        structured_result = (
+            structured_company_research_llm.invoke(
+                [
+                    *prompt_value.messages,
+                    HumanMessage(
+                        content=(
+                            "Tool results:\n"
+                            f"{research_context}\n\n"
+                            "Using only these tool results, "
+                            "produce the structured company "
+                            "research result."
+                        )
+                    ),
+                ]
+            )
+        )
+
+        structured_result = require_research_result(
+            structured_result,
+            CompanyResearchResult,
+        )
+
+    except Exception as exc:
+        return research_failure(exc)
+
+    return research_success(structured_result)
+```
+
+为什么验证要放在 `try` 内？
+
+如果结构化输出为空或类型不正确，验证会抛出 `TypeError`，然后进入统一的失败返回路径。因此 Supervisor 收到的是标准失败输出，而不是一个看起来成功的空结果。
+
+### 四、修改 Financial Research Agent
+
+文件：`app/agents/financial_research.py`
+
+#### 修改 1：增加 import
+
+找到：
+
+Python
+
+运行
+
+```
+from app.agents.models import FinancialResearchResult
+```
+
+在它下面增加：
+
+Python
+
+运行
+
+```
+from app.agents.research_contracts import (
+    require_research_result,
+    research_failure,
+    research_success,
+)
+```
+
+#### 修改 2：替换 `financial_research_agent()` 函数
+
+将现有的整个函数替换为：
+
+Python
+
+运行
+
+```
+def financial_research_agent(
+    state: FinancialResearchState,
+) -> FinancialResearchState:
+    ticker = state["ticker"]
+
+    prompt_value = financial_research_prompt.invoke(
+        {"ticker": ticker}
+    )
+
+    try:
+        tool_result = financial_research_tool_loop.invoke(
+            {
+                "messages": prompt_value.messages,
+            }
+        )
+
+        research_context = extract_tool_results(tool_result)
+
+        structured_result = (
+            structured_financial_research_llm.invoke(
+                [
+                    *prompt_value.messages,
+                    HumanMessage(
+                        content=(
+                            "Tool results:\n"
+                            f"{research_context}\n\n"
+                            "Using only these tool results, "
+                            "produce the structured financial "
+                            "research result. "
+                            "Do not calculate profit margin; "
+                            "the application will calculate it "
+                            "deterministically."
+                        )
+                    ),
+                ]
+            )
+        )
+
+        structured_result = require_research_result(
+            structured_result,
+            FinancialResearchResult,
+        )
+
+        structured_result.profit_margin = calculate_profit_margin(
+            structured_result.revenue,
+            structured_result.net_income,
+        )
+
+    except Exception as exc:
+        return research_failure(exc)
+
+    return research_success(structured_result)
+```
+
+这里有一个关键顺序：先验证 `FinancialResearchResult`，再计算利润率。
+
+利润率仍然由项目中的 `calculate_profit_margin()` 确定性计算，不交给 LLM。这样既保留原有业务逻辑，也避免对空对象访问 `revenue` 或 `net_income`。
+
+### 五、修改 Market Research Agent
+
+文件：`app/agents/market_research.py`
+
+#### 修改 1：增加 import
+
+找到：
+
+Python
+
+运行
+
+```
+from app.agents.models import MarketResearchResult
+```
+
+在它下面增加：
+
+Python
+
+运行
+
+```
+from app.agents.research_contracts import (
+    require_research_result,
+    research_failure,
+    research_success,
+)
+```
+
+#### 修改 2：替换 `market_research_agent()` 函数
+
+保留该文件中的 prompt、LLM、工具循环、`extract_tool_results()` 和 `build_market_research_graph()`，只替换 Agent 函数：
+
+Python
+
+运行
+
+```
+def market_research_agent(
+    state: MarketResearchState,
+) -> MarketResearchState:
+    ticker = state["ticker"]
+
+    prompt_value = market_research_prompt.invoke(
+        {"ticker": ticker}
+    )
+
+    try:
+        tool_result = market_research_tool_loop.invoke(
+            {
+                "messages": prompt_value.messages,
+            }
+        )
+
+        research_context = extract_tool_results(tool_result)
+
+        structured_result = (
+            structured_market_research_llm.invoke(
+                [
+                    *prompt_value.messages,
+                    HumanMessage(
+                        content=(
+                            "Tool results:\n"
+                            f"{research_context}\n\n"
+                            "Using only these tool results, "
+                            "produce the structured market "
+                            "research result."
+                        )
+                    ),
+                ]
+            )
+        )
+
+        structured_result = require_research_result(
+            structured_result,
+            MarketResearchResult,
+        )
+
+    except Exception as exc:
+        return research_failure(exc)
+
+    return research_success(structured_result)
+```
+
+这个版本的输出不再额外返回 `ticker`。原因是当前 `MarketResearchOutputState` 只公开 `research_result` 和 `research_error`，而结果模型本身已经包含 `ticker`。保持输出契约与实际声明一致更清晰。
+
+### 六、修改 Industry & Macro Research Agent
+
+文件：`app/agents/industry_macro_research.py`
+
+#### 修改 1：增加 import
+
+找到：
+
+Python
+
+运行
+
+```
+from app.agents.models import IndustryMacroResearchResult
+```
+
+在它下面增加：
+
+Python
+
+运行
+
+```
+from app.agents.research_contracts import (
+    require_research_result,
+    research_failure,
+    research_success,
+)
+```
+
+#### 修改 2：替换 `industry_macro_research_agent()` 函数
+
+将现有函数完整替换为：
+
+Python
+
+运行
+
+```
+def industry_macro_research_agent(
+    state: IndustryMacroResearchState,
+) -> IndustryMacroResearchState:
+    ticker = state["ticker"]
+
+    prompt_value = industry_macro_research_prompt.invoke(
+        {"ticker": ticker}
+    )
+
+    try:
+        tool_result = industry_macro_research_tool_loop.invoke(
+            {
+                "messages": prompt_value.messages,
+            }
+        )
+
+        research_context = extract_tool_results(tool_result)
+
+        structured_result = (
+            structured_industry_macro_research_llm.invoke(
+                [
+                    *prompt_value.messages,
+                    HumanMessage(
+                        content=(
+                            "Tool results:\n"
+                            f"{research_context}\n\n"
+                            "Using only these tool results, "
+                            "produce the structured industry and "
+                            "macro research result."
+                        )
+                    ),
+                ]
+            )
+        )
+
+        structured_result = require_research_result(
+            structured_result,
+            IndustryMacroResearchResult,
+        )
+
+    except Exception as exc:
+        return research_failure(exc)
+
+    return research_success(structured_result)
+```
+
+这个 Agent 也遵守相同规则：有效的 `IndustryMacroResearchResult` 才能作为成功结果返回；异常或类型不正确则进入统一失败路径。
+
+到这里，四个子 Agent 的成功与失败输出已经使用同一套构建函数。
+
+### 七、修改 Research Supervisor
+
+文件：`app/agents/research_supervisor.py`
+
+这里需要修改三处：
+
+1. 整理 imports。
+
+2. 替换 `route_and_execute()`。
+
+3. 新增条件路由函数，并调整 Graph topology。
+
+#### 修改 1：整理 imports
+
+将文件顶部相关 imports 替换为以下内容：
+
+Python
+
+运行
+
+```
+from typing import Annotated, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from app.agents.company_research import company_research_graph
+from app.agents.financial_research import financial_research_graph
+from app.agents.industry_macro_research import (
+    industry_macro_research_graph,
+)
+from app.agents.market_research import market_research_graph
+from app.agents.models import (
+    CompanyResearchResult,
+    FinancialResearchResult,
+    IndustryMacroResearchResult,
+    MarketResearchResult,
+    ResearchArea,
+    ResearchPlan,
+)
+from app.agents.research_planner import research_planner_graph
+from app.agents.research_state import merge_research_errors
+```
+
+`ResearchState` 不再导入，因为这个 Supervisor 使用自己的 `ResearchSupervisorState`。这里保留 `merge_research_errors`，因为它仍然负责合并各研究领域的错误记录。
+
+#### 修改 2：完整替换 `route_and_execute()`
+
+找到原来的 `route_and_execute()`，将整个函数替换为：
+
+Python
+
+运行
+
+```
+def route_and_execute(
+    state: ResearchSupervisorState,
+) -> ResearchSupervisorState:
+    """Execute one child graph and validate its output contract."""
+
+    research_area = state.get("next_research_area")
+
+    if research_area is None:
+        return {
+            "supervisor_error": (
+                "No research area was selected for execution."
+            ),
+        }
+
+    child_graphs = {
+        ResearchArea.COMPANY: company_research_graph,
+        ResearchArea.FINANCIAL: financial_research_graph,
+        ResearchArea.MARKET: market_research_graph,
+        ResearchArea.INDUSTRY_MACRO: industry_macro_research_graph,
+    }
+
+    result_fields = {
+        ResearchArea.COMPANY: "company_research",
+        ResearchArea.FINANCIAL: "financial_research",
+        ResearchArea.MARKET: "market_research",
+        ResearchArea.INDUSTRY_MACRO: "industry_macro_research",
+    }
+
+    child_graph = child_graphs.get(research_area)
+    result_field = result_fields.get(research_area)
+
+    if child_graph is None or result_field is None:
+        return {
+            "supervisor_error": (
+                f"Unsupported research area: {research_area}"
+            ),
+        }
+
+    # An exception while invoking the child is a research execution
+    # failure. Record it and allow the remaining planned areas to run.
+    try:
+        child_output = child_graph.invoke(
+            {"ticker": state["ticker"]}
+        )
+    except Exception as exc:
+        return {
+            result_field: None,
+            "research_errors": {
+                research_area.value: (
+                    f"Child research graph invocation failed: {exc}"
+                ),
+            },
+        }
+
+    # The child must return a dictionary with both contract fields.
+    if not isinstance(child_output, dict):
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "expected a dictionary."
+            ),
+        }
+
+    if (
+        "research_result" not in child_output
+        or "research_error" not in child_output
+    ):
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "required keys 'research_result' and 'research_error' "
+                "are missing."
+            ),
+        }
+
+    child_result = child_output["research_result"]
+    child_error = child_output["research_error"]
+
+    if not isinstance(child_error, str):
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "'research_error' must be a string."
+            ),
+        }
+
+    child_error = child_error.strip()
+
+    # Exactly two valid outcomes:
+    # 1. Success: a non-None result and an empty error.
+    # 2. Research failure: a None result and a non-empty error.
+    if child_result is None and not child_error:
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "no result was returned and no error was reported."
+            ),
+        }
+
+    if child_result is not None and child_error:
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "both a result and an error were returned."
+            ),
+        }
+
+    update: dict = {
+        result_field: child_result,
+    }
+
+    # A normal child failure is recorded without terminating the stage.
+    if child_error:
+        update["research_errors"] = {
+            research_area.value: child_error,
+        }
+
+    return update
+```
+
+##### 为什么要把异常捕获与契约校验分开？
+
+这不是单纯的代码风格问题，而是两种不同的系统行为。
+
+* `child_graph.invoke()` 抛出异常：当前研究任务失败，Supervisor 记录错误，之后可以尝试其他研究领域。
+
+* 子图返回了不符合约定的结构：说明组件间的接口发生了不一致，Supervisor 应停止当前阶段并暴露 `supervisor_error`。
+
+如果把这两种情况全部塞进同一个 `except`，接口缺陷就可能被误判成可恢复的研究失败。
+
+#### 修改 3：新增条件路由函数
+
+将下面的函数放在 `route_and_execute()` 后面、`mark_completed()` 前面：
+
+Python
+
+运行
+
+```
+def child_execution_should_continue(
+    state: ResearchSupervisorState,
+) -> str:
+    """Stop when a child violates the output contract."""
+
+    if state.get("supervisor_error"):
+        return "error"
+
+    return "continue"
+```
+
+#### 修改 4：修改 Graph topology
+
+在 `build_research_supervisor_graph()` 中，找到原来的：
+
+Python
+
+运行
+
+```
+builder.add_edge("route_and_execute", "mark_completed")
+```
+
+将它替换为：
+
+Python
+
+运行
+
+```
+builder.add_conditional_edges(
+    "route_and_execute",
+    child_execution_should_continue,
+    {
+        "continue": "mark_completed",
+        "error": END,
+    },
+)
+```
+
+其他边保持原样，尤其是下面这条边不需要修改：
+
+Python
+
+运行
+
+```
+builder.add_edge(
+    "mark_completed",
+    "select_next_research_area",
+)
+```
+
+最终流程如下：
+
+```
+START
+  |
+  v
+plan_research
+  |
+  v
+select_next_research_area
+  |
+  +---- 完成 / 规划错误 ------> END
+  |
+  v
+route_and_execute
+  |
+  +---- 接口契约错误 --------> END
+  |
+  v
+mark_completed
+  |
+  v
+select_next_research_area
+```
+
+这里还依赖现有 `mark_completed()` 中的行为：它会清空 `supervisor_error`。正因为如此，契约错误必须在进入 `mark_completed()` 之前终止图，否则错误可能被清除。
+
+### 八、新增公共契约测试
+
+新建文件：`tests/test_research_contracts.py`
+
+完整内容如下：
+
+Python
+
+运行
+
+```
+import pytest
+
+from app.agents.models import CompanyResearchResult
+from app.agents.research_contracts import (
+    require_research_result,
+    research_failure,
+    research_success,
+)
+
+
+def make_company_result() -> CompanyResearchResult:
+    return CompanyResearchResult(
+        ticker="AAPL",
+        company_name="Apple Inc.",
+        sector="Technology",
+        current_price=200.0,
+        summary="Company research result.",
+    )
+
+
+def test_research_success_uses_standard_output_contract():
+    result = make_company_result()
+
+    assert research_success(result) == {
+        "research_result": result,
+        "research_error": "",
+    }
+
+
+def test_require_research_result_accepts_expected_model():
+    result = make_company_result()
+
+    validated = require_research_result(
+        result,
+        CompanyResearchResult,
+    )
+
+    assert validated is result
+
+
+def test_require_research_result_rejects_none():
+    with pytest.raises(
+        TypeError,
+        match="expected CompanyResearchResult",
+    ):
+        require_research_result(
+            None,
+            CompanyResearchResult,
+        )
+
+
+def test_require_research_result_rejects_wrong_type():
+    with pytest.raises(
+        TypeError,
+        match="expected CompanyResearchResult",
+    ):
+        require_research_result(
+            {"ticker": "AAPL"},
+            CompanyResearchResult,
+        )
+
+
+def test_research_failure_uses_exception_message():
+    assert research_failure(
+        RuntimeError("provider timed out")
+    ) == {
+        "research_result": None,
+        "research_error": "provider timed out",
+    }
+
+
+def test_research_failure_falls_back_when_message_is_empty():
+    assert research_failure(RuntimeError()) == {
+        "research_result": None,
+        "research_error": "RuntimeError",
+    }
+
+
+def test_research_success_rejects_non_pydantic_result():
+    with pytest.raises(
+        TypeError,
+        match="requires a validated Pydantic result",
+    ):
+        research_success({"ticker": "AAPL"})
+```
+
+这些测试验证公共模块自身的契约，不依赖真实 LLM，也不调用外部金融数据接口。
+
+### 九、为 Supervisor 增加接口异常测试
+
+文件：`tests/test_research_supervisor.py`
+
+你现有的测试文件已经包含 `pytest`、`Any`、`ResearchArea`、`ResearchPlan`，以及用于模拟 Planner 和子图的 `FakeGraph`。不要覆盖整个测试文件，只需要在文件末尾追加下面的测试。
+
+Python
+
+运行
+
+```
+@pytest.mark.parametrize(
+    "invalid_output",
+    [
+        None,
+        {},
+        {"research_result": {"summary": "Missing error key."}},
+        {"research_error": "Missing result key."},
+        {"research_result": None, "research_error": "   "},
+        {
+            "research_result": {"summary": "Ambiguous response."},
+            "research_error": "The child also reported an error.",
+        },
+        {"research_result": None, "research_error": 123},
+    ],
+)
+def test_invalid_child_output_contract_stops_research_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_output: Any,
+):
+    plan = make_plan(
+        ResearchArea.COMPANY,
+        ResearchArea.FINANCIAL,
+    )
+
+    _, child_graphs = install_fake_graphs(
+        monkeypatch,
+        planner_handler=planner_returns(plan),
+        child_handlers={
+            ResearchArea.COMPANY: lambda state: invalid_output,
+        },
+    )
+
+    result = supervisor.research_supervisor_graph.invoke(
+        valid_input()
+    )
+
+    assert result["supervisor_error"].startswith(
+        "Invalid output from company research graph:"
+    )
+
+    assert child_graphs[ResearchArea.COMPANY].calls == [
+        {"ticker": "AAPL"},
+    ]
+
+    # The contract error must prevent the next planned child from running.
+    assert child_graphs[ResearchArea.FINANCIAL].calls == []
+
+    # A contract error must not be recorded as a completed research area.
+    assert result.get("completed_research_areas", []) == []
+```
+
+这组测试验证七类不合规输出：非字典、缺少字段、没有错误说明的空结果、结果与错误同时出现，以及错误字段类型不正确等情况。
