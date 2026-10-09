@@ -571,3 +571,55 @@ def test_output_contract_excludes_internal_state_fields(
 
     assert "user_query" not in result
     assert "next_research_area" not in result
+
+
+
+@pytest.mark.parametrize(
+    "invalid_output",
+    [
+        None,
+        {},
+        {"research_result": {"summary": "Missing error key."}},
+        {"research_error": "Missing result key."},
+        {"research_result": None, "research_error": "   "},
+        {
+            "research_result": {"summary": "Ambiguous response."},
+            "research_error": "The child also reported an error.",
+        },
+        {"research_result": None, "research_error": 123},
+    ],
+)
+def test_invalid_child_output_contract_stops_research_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_output: Any,
+):
+    plan = make_plan(
+        ResearchArea.COMPANY,
+        ResearchArea.FINANCIAL,
+    )
+
+    _, child_graphs = install_fake_graphs(
+        monkeypatch,
+        planner_handler=planner_returns(plan),
+        child_handlers={
+            ResearchArea.COMPANY: lambda state: invalid_output,
+        },
+    )
+
+    result = supervisor.research_supervisor_graph.invoke(
+        valid_input()
+    )
+
+    assert result["supervisor_error"].startswith(
+        "Invalid output from company research graph:"
+    )
+
+    assert child_graphs[ResearchArea.COMPANY].calls == [
+        {"ticker": "AAPL"},
+    ]
+
+    # The contract error must prevent the next planned child from running.
+    assert child_graphs[ResearchArea.FINANCIAL].calls == []
+
+    # A contract error must not be recorded as a completed research area.
+    assert result.get("completed_research_areas", []) == []

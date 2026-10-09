@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.financial_calculations import calculate_profit_margin
 from app.agents.models import FinancialResearchResult
+from app.agents.research_contracts import require_research_result, research_failure, research_success
 from app.agents.tool_sets import FINANCIAL_RESEARCH_TOOLS
 from app.graph.tool_loop import build_tool_loop_graph
 from app.llm.client import llm
@@ -124,21 +125,20 @@ def financial_research_agent(
             )
         )
 
+        structured_result = require_research_result(
+            structured_result,
+            FinancialResearchResult,
+        )
+
         structured_result.profit_margin = calculate_profit_margin(
             structured_result.revenue,
             structured_result.net_income,
         )
 
     except Exception as exc:
-        return {
-            "research_result": None,
-            "research_error": str(exc),
-        }
+        return research_failure(exc)
 
-    return {
-        "research_result": structured_result,
-        "research_error": "",
-    }
+    return research_success(structured_result)
 
 
 def build_financial_research_graph():

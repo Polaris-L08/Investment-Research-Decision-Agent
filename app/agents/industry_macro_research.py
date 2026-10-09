@@ -6,6 +6,7 @@ from langgraph.constants import START, END
 from langgraph.graph import StateGraph
 
 from app.agents.models import IndustryMacroResearchResult
+from app.agents.research_contracts import require_research_result, research_failure, research_success
 from app.agents.tool_sets import INDUSTRY_MACRO_RESEARCH_TOOLS
 from app.graph.tool_loop import build_tool_loop_graph
 from app.llm.client import llm
@@ -104,18 +105,15 @@ def industry_macro_research_agent(
             )
         )
 
-    except Exception as exc:
-        return {
-            "ticker": ticker,
-            "research_result": None,
-            "research_error": str(exc),
-        }
+        structured_result = require_research_result(
+            structured_result,
+            IndustryMacroResearchResult,
+        )
 
-    return {
-        "ticker": ticker,
-        "research_result": structured_result,
-        "research_error": "",
-    }
+    except Exception as exc:
+        return research_failure(exc)
+
+    return research_success(structured_result)
 
 
 def build_industry_macro_research_graph():

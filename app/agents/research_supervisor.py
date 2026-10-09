@@ -177,11 +177,67 @@ def route_and_execute(
         child_output = child_graph.invoke(
             {"ticker": state["ticker"]}
         )
-        child_result = child_output.get("research_result")
-        child_error = child_output.get("research_error", "")
     except Exception as exc:
-        child_result = None
-        child_error = f"Child research graph invocation failed: {exc}"
+        return {
+            result_field: None,
+            "research_errors": {
+                research_area.value: (
+                    f"Child research graph invocation failed: {exc}"
+                ),
+            },
+        }
+
+    if not isinstance(child_output, dict):
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "expected a dictionary."
+            ),
+        }
+
+    if (
+        "research_result" not in child_output
+        or "research_error" not in child_output
+    ):
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "required keys 'research_result' and 'research_error' "
+                "are missing."
+            ),
+        }
+
+    child_result = child_output["research_result"]
+    child_error = child_output["research_error"]
+
+    if not isinstance(child_error, str):
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "'research_error' must be a string."
+            ),
+        }
+
+    child_error = child_error.strip()
+
+    # Exactly two valid outcomes:
+    # 1. Success: a non-None result and an empty error.
+    # 2. Research failure: a None result and a non-empty error.
+    if child_result is None and not child_error:
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "no result was returned and no error was reported."
+            ),
+        }
+
+    if child_result is not None and child_error:
+        return {
+            "supervisor_error": (
+                f"Invalid output from {research_area.value} research graph: "
+                "both a result and an error were returned."
+            ),
+        }
 
     update: dict = {
         result_field: child_result,
@@ -193,6 +249,17 @@ def route_and_execute(
         }
 
     return update
+
+
+def child_execution_should_continue(
+    state: ResearchSupervisorState,
+) -> str:
+    """Stop when a child violates the output contract."""
+
+    if state.get("supervisor_error"):
+        return "error"
+
+    return "continue"
 
 
 def mark_completed(
@@ -263,7 +330,15 @@ def build_research_supervisor_graph():
         },
     )
 
-    builder.add_edge("route_and_execute", "mark_completed")
+    builder.add_conditional_edges(
+        "route_and_execute",
+        child_execution_should_continue,
+        {
+            "continue": "mark_completed",
+            "error": END,
+        },
+    )
+
     builder.add_edge(
         "mark_completed",
         "select_next_research_area",

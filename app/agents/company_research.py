@@ -5,6 +5,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.models import CompanyResearchResult
+from app.agents.research_contracts import require_research_result, research_failure, research_success
 from app.agents.tool_sets import COMPANY_RESEARCH_TOOLS
 from app.graph.tool_loop import build_tool_loop_graph
 from app.llm.client import llm
@@ -109,16 +110,15 @@ def company_research_agent(
             )
         )
 
-    except Exception as exc:
-        return {
-            "research_result": None,
-            "research_error": str(exc),
-        }
+        structured_result = require_research_result(
+            structured_result,
+            CompanyResearchResult
+        )
 
-    return {
-        "research_result": structured_result,
-        "research_error": "",
-    }
+    except Exception as exc:
+        return research_failure(exc)
+
+    return research_success(structured_result)
 
 
 def build_company_research_graph():
