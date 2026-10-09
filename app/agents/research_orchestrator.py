@@ -1,3 +1,8 @@
+"""Historical research orchestration experiment.
+
+Non-production module. The production Research orchestration entry point
+is research_supervisor_graph.
+"""
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph

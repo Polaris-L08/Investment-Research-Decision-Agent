@@ -1,3 +1,8 @@
+"""Historical fan-out research experiment.
+
+Non-production module. Do not use this graph as the production Research
+orchestration entry point.
+"""
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph

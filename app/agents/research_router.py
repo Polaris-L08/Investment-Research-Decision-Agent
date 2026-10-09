@@ -1,3 +1,8 @@
+"""Historical research routing experiment.
+
+Non-production module. Production child-agent orchestration is owned by
+research_supervisor_graph.
+"""
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
