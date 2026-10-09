@@ -40,7 +40,7 @@ def test_research_planner_returns_expected_plan():
         )
 
     assert output["research_plan"] == result
-    assert output["research_error"] == ""
+    assert output["planning_error"] == ""
 
 
 def test_research_planner_maps_llm_failure():
@@ -61,7 +61,7 @@ def test_research_planner_maps_llm_failure():
         )
 
     assert output["research_plan"] is None
-    assert output["research_error"] == (
+    assert output["planning_error"] == (
         "Research planner LLM failed."
     )
 

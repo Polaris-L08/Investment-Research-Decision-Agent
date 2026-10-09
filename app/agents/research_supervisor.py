@@ -1,4 +1,4 @@
-from typing import TypedDict
+from typing import TypedDict, Annotated
 
 from langgraph.graph import END, START, StateGraph
 
@@ -8,52 +8,134 @@ from app.agents.industry_macro_research import (
     industry_macro_research_graph,
 )
 from app.agents.market_research import market_research_graph
-from app.agents.models import ResearchArea, ResearchPlan
-from app.agents.research_state import ResearchState
+from app.agents.models import ResearchArea, ResearchPlan, CompanyResearchResult, FinancialResearchResult, \
+    MarketResearchResult, IndustryMacroResearchResult
+from app.agents.research_planner import research_planner_graph
+from app.agents.research_state import merge_research_errors
 
 
 class ResearchSupervisorInputState(TypedDict):
+    """Public input contract for the complete Research stage."""
+
     ticker: str
-    research_plan: ResearchPlan
+    user_query: str
 
 
-class ResearchSupervisorState(ResearchState, total=False):
+class ResearchSupervisorState(TypedDict, total=False):
+    """Internal state owned by ResearchSupervisor."""
+
+    ticker: str
+    user_query: str
+    research_plan: ResearchPlan | None
+
+    next_research_area: ResearchArea | None
     completed_research_areas: list[ResearchArea]
-    current_research_area: ResearchArea | None
+
+    company_research: CompanyResearchResult | None
+    financial_research: FinancialResearchResult | None
+    market_research: MarketResearchResult | None
+    industry_macro_research: IndustryMacroResearchResult | None
+
+    research_errors: Annotated[
+        dict[str, str],
+        merge_research_errors,
+    ]
+    planning_error: str
     supervisor_error: str
 
 
-class ResearchSupervisorOutputState(
-    ResearchState,
-    total=False,
-):
+class ResearchSupervisorOutputState(TypedDict, total=False):
+    """Stable output contract returned to the parent application graph."""
+
+    ticker: str
+    research_plan: ResearchPlan | None
     completed_research_areas: list[ResearchArea]
-    current_research_area: ResearchArea | None
+
+    company_research: CompanyResearchResult | None
+    financial_research: FinancialResearchResult | None
+    market_research: MarketResearchResult | None
+    industry_macro_research: IndustryMacroResearchResult | None
+
+    research_errors: dict[str, str]
+    planning_error: str
     supervisor_error: str
+
+
+def plan_research(
+    state: ResearchSupervisorState,
+) -> ResearchSupervisorState:
+    """Create the research plan inside the Supervisor boundary."""
+
+    ticker = state.get("ticker", "").strip()
+    if not ticker:
+        message = "Ticker is required for research execution."
+        return {
+            "research_plan": None,
+            "planning_error": "",
+            "supervisor_error": message,
+        }
+
+    user_query = state.get("user_query", "").strip()
+    if not user_query:
+        message = "User query is required for research planning."
+        return {
+            "research_plan": None,
+            "planning_error": message,
+            "supervisor_error": message,
+        }
+
+    try:
+        result = research_planner_graph.invoke(
+            {"user_query": user_query}
+        )
+    except Exception as exc:
+        message = f"Research planner invocation failed: {exc}"
+        return {
+            "research_plan": None,
+            "planning_error": message,
+            "supervisor_error": message,
+        }
+
+    research_plan = result.get("research_plan")
+    planning_error = result.get("planning_error", "")
+
+    if planning_error or research_plan is None:
+        message = planning_error or "Research planner returned no plan."
+        return {
+            "research_plan": research_plan,
+            "planning_error": message,
+            "supervisor_error": message,
+        }
+
+    return {
+        "research_plan": research_plan,
+        "planning_error": "",
+        "supervisor_error": "",
+    }
 
 
 def select_next_research_area(
     state: ResearchSupervisorState,
 ) -> ResearchSupervisorState:
-    """Select the next research area that has not been completed."""
+    """Select the next uncompleted area in the planner's requested order."""
 
-    plan = state["research_plan"]
+    if state.get("planning_error") or state.get("supervisor_error"):
+        return {"next_research_area": None}
 
-    completed = set(
-        state.get("completed_research_areas", [])
-    )
+    plan = state.get("research_plan")
+    if plan is None:
+        return {
+            "next_research_area": None,
+            "supervisor_error": "Research plan is unavailable.",
+        }
+
+    completed = set(state.get("completed_research_areas", []))
 
     for research_area in plan.research_areas:
         if research_area not in completed:
-            return {
-                "current_research_area": research_area,
-                "supervisor_error": "",
-            }
+            return {"next_research_area": research_area}
 
-    return {
-        "current_research_area": None,
-        "supervisor_error": "",
-    }
+    return {"next_research_area": None}
 
 
 def route_and_execute(
@@ -61,114 +143,78 @@ def route_and_execute(
 ) -> ResearchSupervisorState:
     """Execute the research agent for the current research area."""
 
-    research_area = state.get("current_research_area")
+    research_area = state.get("next_research_area")
 
     if research_area is None:
         return {
             "supervisor_error": (
-                "No current research area is available."
+                "No research area was selected for execution."
             ),
         }
 
-    if research_area == ResearchArea.COMPANY:
-        result = company_research_graph.invoke(
-            {
-                "ticker": state["ticker"],
-            }
-        )
-
-        return {
-            "company_research": result.get(
-                "company_research"
-            ),
-            "research_errors": result.get(
-                "research_errors",
-                {},
-            ),
-        }
-
-    if research_area == ResearchArea.FINANCIAL:
-        result = financial_research_graph.invoke(
-            {
-                "ticker": state["ticker"],
-            }
-        )
-
-        return {
-            "financial_research": result.get(
-                "financial_research"
-            ),
-            "research_errors": result.get(
-                "research_errors",
-                {},
-            ),
-        }
-
-    if research_area == ResearchArea.MARKET:
-        result = market_research_graph.invoke(
-            {
-                "ticker": state["ticker"],
-            }
-        )
-
-        return {
-            "market_research": result.get(
-                "market_research"
-            ),
-            "research_errors": result.get(
-                "research_errors",
-                {},
-            ),
-        }
-
-    if research_area == ResearchArea.INDUSTRY_MACRO:
-        result = industry_macro_research_graph.invoke(
-            {
-                "ticker": state["ticker"],
-            }
-        )
-
-        return {
-            "industry_macro_research": result.get(
-                "industry_macro_research"
-            ),
-            "research_errors": result.get(
-                "research_errors",
-                {},
-            ),
-        }
-
-    return {
-        "supervisor_error": (
-            f"Unsupported research area: {research_area}"
-        ),
+    child_graphs = {
+        ResearchArea.COMPANY: company_research_graph,
+        ResearchArea.FINANCIAL: financial_research_graph,
+        ResearchArea.MARKET: market_research_graph,
+        ResearchArea.INDUSTRY_MACRO: industry_macro_research_graph,
     }
+    result_fields = {
+        ResearchArea.COMPANY: "company_research",
+        ResearchArea.FINANCIAL: "financial_research",
+        ResearchArea.MARKET: "market_research",
+        ResearchArea.INDUSTRY_MACRO: "industry_macro_research",
+    }
+
+    child_graph = child_graphs.get(research_area)
+    result_field = result_fields.get(research_area)
+
+    if child_graph is None or result_field is None:
+        return {
+            "supervisor_error": f"Unsupported research area: {research_area}"
+        }
+
+    try:
+        child_output = child_graph.invoke(
+            {"ticker": state["ticker"]}
+        )
+        child_result = child_output.get("research_result")
+        child_error = child_output.get("research_error", "")
+    except Exception as exc:
+        child_result = None
+        child_error = f"Child research graph invocation failed: {exc}"
+
+    update: dict = {
+        result_field: child_result,
+    }
+
+    if child_error:
+        update["research_errors"] = {
+            research_area.value: child_error,
+        }
+
+    return update
 
 
 def mark_completed(
     state: ResearchSupervisorState,
 ) -> ResearchSupervisorState:
-    """Mark the current research area as completed."""
+    """Mark the selected research area complete, even when its child failed."""
 
-    current = state.get("current_research_area")
+    current = state.get("next_research_area")
 
     if current is None:
         return {
-            "supervisor_error": (
-                "No current research area to mark as completed."
-            ),
+            "supervisor_error": "No research area is available to mark complete."
         }
 
-    completed = list(
-        state.get("completed_research_areas", [])
-    )
+    completed = list(state.get("completed_research_areas", []))
 
     if current not in completed:
         completed.append(current)
 
     return {
         "completed_research_areas": completed,
-        "current_research_area": None,
+        "next_research_area": None,
         "supervisor_error": "",
     }
 
@@ -176,19 +222,19 @@ def mark_completed(
 def supervisor_should_continue(
     state: ResearchSupervisorState,
 ) -> str:
-    """Decide whether the supervisor should execute or finish."""
+    """Route to execution, finish, or stop on a planning/supervisor error."""
 
-    if state.get("supervisor_error"):
+    if state.get("planning_error") or state.get("supervisor_error"):
         return "error"
 
-    if state.get("current_research_area") is None:
+    if state.get("next_research_area") is None:
         return "done"
 
     return "execute"
 
 
 def build_research_supervisor_graph():
-    """Build the research supervisor graph."""
+    """Build the production Research-stage graph."""
 
     builder = StateGraph(
         ResearchSupervisorState,
@@ -196,28 +242,19 @@ def build_research_supervisor_graph():
         output_schema=ResearchSupervisorOutputState,
     )
 
+    builder.add_node("plan_research", plan_research)
     builder.add_node(
-        "supervisor",
+        "select_next_research_area",
         select_next_research_area,
     )
+    builder.add_node("route_and_execute", route_and_execute)
+    builder.add_node("mark_completed", mark_completed)
 
-    builder.add_node(
-        "route_and_execute",
-        route_and_execute,
-    )
-
-    builder.add_node(
-        "mark_completed",
-        mark_completed,
-    )
-
-    builder.add_edge(
-        START,
-        "supervisor",
-    )
+    builder.add_edge(START, "plan_research")
+    builder.add_edge("plan_research", "select_next_research_area")
 
     builder.add_conditional_edges(
-        "supervisor",
+        "select_next_research_area",
         supervisor_should_continue,
         {
             "execute": "route_and_execute",
@@ -226,19 +263,13 @@ def build_research_supervisor_graph():
         },
     )
 
-    builder.add_edge(
-        "route_and_execute",
-        "mark_completed",
-    )
-
+    builder.add_edge("route_and_execute", "mark_completed")
     builder.add_edge(
         "mark_completed",
-        "supervisor",
+        "select_next_research_area",
     )
 
     return builder.compile()
 
 
-research_supervisor_graph = (
-    build_research_supervisor_graph()
-)
+research_supervisor_graph = build_research_supervisor_graph()
