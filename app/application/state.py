@@ -6,7 +6,7 @@ This module defines the shared data boundary for the future top-level
 Application Graph. It intentionally does not implement graph orchestration.
 """
 
-from typing import TYPE_CHECKING, TypedDict, NotRequired
+from typing import TypedDict, NotRequired
 
 from app.agents.models import (
     CompanyResearchResult,
@@ -72,6 +72,8 @@ class ApplicationState(TypedDict, total=False):
     report_assembly_error: str
     report_generation_error: str
     report_merge_error: str
+    report_markdown: str
+    report_rendering_error: str
 
     # Workflow control and normalized error collection
     current_stage: str
@@ -99,4 +101,6 @@ class ApplicationOutputState(TypedDict, total=False):
     report_assembly_error: str
     report_generation_error: str
     report_merge_error: str
+    report_markdown: str
+    report_rendering_error: str
     application_error: str

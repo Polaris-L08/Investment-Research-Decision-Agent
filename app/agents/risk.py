@@ -122,3 +122,5 @@ def build_risk_graph():
     graph.add_edge("analyze_risk", END)
 
     return graph.compile()
+
+risk_graph = build_risk_graph()

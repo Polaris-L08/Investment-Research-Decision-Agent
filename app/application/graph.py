@@ -1,8 +1,9 @@
 """Production top-level Application Graph.
 
-The graph orchestrates existing domain graphs in this order:
-Research -> Valuation -> Risk -> Investment Decision -> Report assembly ->
-Report narrative generation. Domain logic remains in its owning modules.
+The graph orchestrates the business stages in this order:
+Research -> Valuation -> Risk -> Investment Decision -> Report.
+Report assembly, narrative generation, and Markdown rendering are encapsulated
+in the Report Graph.
 """
 
 from __future__ import annotations
@@ -12,16 +13,17 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.investment_decision import investment_decision_graph
 from app.agents.models import (
     CompanyResearchResult,
     FinancialResearchResult,
     IndustryMacroResearchResult,
     MarketResearchResult,
 )
+from app.agents.report import report_graph
 from app.agents.research_supervisor import research_supervisor_graph
+from app.agents.risk import risk_graph
 from app.agents.valuation import valuation_graph
-from app.agents.risk import build_risk_graph
-from app.agents.investment_decision import build_investment_decision_graph
 from app.application.contracts import (
     StageContractError,
     normalize_stage_output,
@@ -34,12 +36,9 @@ from app.application.state import (
     ApplicationState,
 )
 from app.investment.models import InvestmentDecision
-from app.report.assembly import build_investment_report
-from app.report.models import InvestmentReport
-from app.report.generation import report_generation_graph
+from app.report import InvestmentReport
 from app.risk.models import RiskAnalysis
-from app.valuation.models import ValuationResult
-
+from app.valuation.models import ValuationResult, ValuationAssumptions, ValuationInputs
 
 _REQUIRED_RESEARCH_FIELDS = (
     "company_research",
@@ -91,8 +90,6 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
     # Valuation inputs are optional at the public request boundary. Validate
     # them only when supplied; missing values are handled after Research, at
     # the Valuation boundary, so the research task can still run independently.
-    from app.valuation.models import ValuationAssumptions, ValuationInputs
-
     supplied_inputs = state.get("valuation_inputs")
     if supplied_inputs is not None and not isinstance(supplied_inputs, ValuationInputs):
         return _failure_update(
@@ -154,8 +151,18 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
                 "research_errors",
                 "planning_error",
                 "supervisor_error",
+                "valuation_inputs",
+                "valuation_assumptions",
+                "valuation_research_error",
             )
         }
+        # Application-level overrides are explicit and take precedence, but
+        # they are not part of ResearchSupervisor's public input contract.
+        if state.get("valuation_inputs") is not None:
+            updates["valuation_inputs"] = state["valuation_inputs"]
+        if state.get("valuation_assumptions") is not None:
+            updates["valuation_assumptions"] = state["valuation_assumptions"]
+
         updates["research_errors"] = dict(research_errors)
 
         supervisor_error = result.get("supervisor_error") or result.get("planning_error")
@@ -210,6 +217,16 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
                     f"Research field '{key}' must be {expected_type.__name__}."
                 )
 
+        if updates.get("valuation_inputs") is not None and not isinstance(
+            updates["valuation_inputs"], ValuationInputs
+        ):
+            raise StageContractError("Research field 'valuation_inputs' must be ValuationInputs or None.")
+        if updates.get("valuation_assumptions") is not None and not isinstance(
+            updates["valuation_assumptions"], ValuationAssumptions
+        ):
+            raise StageContractError("Research field 'valuation_assumptions' must be ValuationAssumptions or None.")
+
+
         return {
             **updates,
             "current_stage": "valuation",
@@ -228,7 +245,6 @@ def route_after_research(state: ApplicationState) -> str:
 
 def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
     """Validate valuation dependencies, then run the deterministic valuation."""
-    from app.valuation.models import ValuationAssumptions, ValuationInputs
 
     # The public request may omit these fields. Do not invent financial data or
     # silently choose assumptions; stop at this boundary with an actionable
@@ -367,7 +383,7 @@ def run_decision_stage(state: ApplicationState) -> dict[str, Any]:
         return {
             "investment_decision": result,
             "decision_error": "",
-            "current_stage": "report_assembly",
+            "current_stage": "report",
             "stage_errors": dict(state.get("stage_errors") or {}),
             "application_error": "",
         }
@@ -382,91 +398,82 @@ def route_after_decision(state: ApplicationState) -> str:
     return "continue" if state.get("investment_decision") is not None and not state.get("decision_error") else "end"
 
 
-def assemble_report_stage(state: ApplicationState) -> dict[str, Any]:
+def run_report_stage(state: ApplicationState) -> dict[str, Any]:
+    """Run the complete Report Graph as one Application business stage."""
     try:
-        report = build_investment_report(
-            company_research=state["company_research"],
-            financial_research=state["financial_research"],
-            market_research=state["market_research"],
-            industry_macro_research=state["industry_macro_research"],
-            valuation=state["valuation"],
-            risk_analysis=state["risk_analysis"],
-            investment_decision=state["investment_decision"],
+        raw = report_graph.invoke(
+            {
+                "company_research": state["company_research"],
+                "financial_research": state["financial_research"],
+                "market_research": state["market_research"],
+                "industry_macro_research": state["industry_macro_research"],
+                "valuation": state["valuation"],
+                "risk_analysis": state["risk_analysis"],
+                "investment_decision": state["investment_decision"],
+            }
         )
+        if not isinstance(raw, Mapping):
+            raise StageContractError("Report Graph output must be a mapping.")
+
+        report = raw.get("report")
+        if report is not None and not isinstance(report, InvestmentReport):
+            raise StageContractError("Report Graph 'report' must be an InvestmentReport or None.")
+
+        error_fields = (
+            ("report_assembly_error", "report_assembly"),
+            ("report_generation_error", "report_generation"),
+            ("report_merge_error", "report_merge"),
+            ("report_rendering_error", "report_rendering"),
+        )
+        stage_errors = dict(state.get("stage_errors") or {})
+        report_errors: list[str] = []
+        normalized_errors: dict[str, str] = {}
+        for field_name, stage_name in error_fields:
+            value = raw.get(field_name, "")
+            if value is None:
+                value = ""
+            if not isinstance(value, str):
+                raise StageContractError(f"Report Graph field '{field_name}' must be a string or None.")
+            normalized_errors[field_name] = value.strip()
+            if normalized_errors[field_name]:
+                stage_errors[stage_name] = normalized_errors[field_name]
+                report_errors.append(f"{stage_name}: {normalized_errors[field_name]}")
+
+        report_markdown = raw.get("report_markdown", "")
+        if report_markdown is None:
+            report_markdown = ""
+        if not isinstance(report_markdown, str):
+            raise StageContractError("Report Graph field 'report_markdown' must be a string.")
+
+        application_error = ""
+        if report_errors:
+            application_error = "Report stage ended with errors: " + "; ".join(report_errors)
+
         return {
             "report": report,
-            "report_assembly_error": "",
-            "current_stage": "report_generation",
-            "stage_errors": dict(state.get("stage_errors") or {}),
-            "application_error": "",
-        }
-    except Exception as exc:
-        return _failure_update(
-            state, stage="report_assembly", message=str(exc),
-            result_key="report", error_key="report_assembly_error",
-        )
-
-
-def route_after_report_assembly(state: ApplicationState) -> str:
-    return "continue" if state.get("report") is not None and not state.get("report_assembly_error") else "end"
-
-
-def generate_report_stage(state: ApplicationState) -> dict[str, Any]:
-    try:
-        raw = report_generation_graph.invoke({"report": state["report"]})
-        if not isinstance(raw, Mapping):
-            raise StageContractError("Report generation output must be a mapping.")
-        generated_report = raw.get("report")
-        generation_error = raw.get("generation_error")
-        merge_error = raw.get("merge_error")
-        for key, value in (("generation_error", generation_error), ("merge_error", merge_error)):
-            if value is not None and not isinstance(value, str):
-                raise StageContractError(f"Report {key} must be a string or None.")
-        # If narrative generation fails, the deterministic assembled report is
-        # retained. The error remains explicit so callers can distinguish a
-        # complete narrative report from a structured fallback report.
-        if generated_report is None:
-            if not generation_error and not merge_error:
-                raise StageContractError(
-                    "Report generation returned no report and no error."
-                )
-            generated_report = state["report"]
-        if not isinstance(generated_report, InvestmentReport):
-            raise StageContractError("Report generation result must be an InvestmentReport.")
-        errors = dict(state.get("stage_errors") or {})
-        if generation_error:
-            errors["report_generation"] = generation_error
-        if merge_error:
-            errors["report_merge"] = merge_error
-        application_error = ""
-        if generation_error or merge_error:
-            details = "; ".join(
-                message for message in (generation_error, merge_error) if message
-            )
-            application_error = f"Report generation incomplete: {details}"
-        return {
-            "report": generated_report,
-            "report_generation_error": generation_error or "",
-            "report_merge_error": merge_error or "",
-            "current_stage": "completed" if not application_error else "report_generation",
-            "stage_errors": errors,
+            **normalized_errors,
+            "report_markdown": report_markdown,
+            "current_stage": "completed" if not report_errors else "report",
+            "stage_errors": stage_errors,
             "application_error": application_error,
         }
     except Exception as exc:
         message = str(exc) or type(exc).__name__
-        errors = _stage_errors(state, "report_generation", message)
         return {
             "report": state.get("report"),
-            "report_generation_error": message,
+            "report_assembly_error": state.get("report_assembly_error", ""),
+            "report_generation_error": state.get("report_generation_error", ""),
             "report_merge_error": state.get("report_merge_error", ""),
-            "current_stage": "report_generation",
-            "stage_errors": errors,
-            "application_error": f"Report generation failed: {message}",
+            "report_rendering_error": state.get("report_rendering_error", ""),
+            "report_markdown": state.get("report_markdown", ""),
+            "current_stage": "report",
+            "stage_errors": _stage_errors(state, "report", message),
+            "application_error": f"Report stage failed: {message}",
         }
 
 
 def finalize_application(state: ApplicationState) -> dict[str, Any]:
-    """Ensure the public output has predictable error containers."""
+    """Return the stable public output contract for the application run."""
     return {
         "ticker": state.get("ticker", ""),
         "company_research": state.get("company_research"),
@@ -480,6 +487,8 @@ def finalize_application(state: ApplicationState) -> dict[str, Any]:
         "investment_decision": state.get("investment_decision"),
         "decision_error": state.get("decision_error", ""),
         "report": state.get("report"),
+        "report_markdown": state.get("report_markdown", ""),
+        "report_rendering_error": state.get("report_rendering_error", ""),
         "research_errors": dict(state.get("research_errors") or {}),
         "stage_errors": dict(state.get("stage_errors") or {}),
         "report_assembly_error": state.get("report_assembly_error", ""),
@@ -489,7 +498,7 @@ def finalize_application(state: ApplicationState) -> dict[str, Any]:
     }
 
 
-def build_application_graph():
+def build_application_graph(*, checkpointer: Any = None):
     """Compile the production Application workflow graph."""
     builder = StateGraph(
         ApplicationState,
@@ -501,8 +510,8 @@ def build_application_graph():
     builder.add_node("valuation", run_valuation_stage)
     builder.add_node("risk", run_risk_stage)
     builder.add_node("investment_decision", run_decision_stage)
-    builder.add_node("report_assembly", assemble_report_stage)
-    builder.add_node("report_generation", generate_report_stage)
+
+    builder.add_node("report", run_report_stage)
     builder.add_node("finalize", finalize_application)
 
     builder.add_edge(START, "validate_input")
@@ -525,17 +534,11 @@ def build_application_graph():
     )
     builder.add_conditional_edges(
         "investment_decision", route_after_decision,
-        {"continue": "report_assembly", "end": "finalize"},
+        {"continue": "report", "end": "finalize"},
     )
-    builder.add_conditional_edges(
-        "report_assembly", route_after_report_assembly,
-        {"continue": "report_generation", "end": "finalize"},
-    )
-    builder.add_edge("report_generation", "finalize")
+    builder.add_edge("report", "finalize")
     builder.add_edge("finalize", END)
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
-risk_graph = build_risk_graph()
-investment_decision_graph = build_investment_decision_graph()
 application_graph = build_application_graph()

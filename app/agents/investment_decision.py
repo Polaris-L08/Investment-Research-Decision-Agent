@@ -162,3 +162,5 @@ def build_investment_decision_graph():
     )
 
     return graph.compile()
+
+investment_decision_graph = build_investment_decision_graph()
