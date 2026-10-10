@@ -12,11 +12,9 @@ from app.agents.models import ResearchArea, ResearchPlan, CompanyResearchResult,
     MarketResearchResult, IndustryMacroResearchResult
 from app.agents.research_planner import research_planner_graph
 from app.agents.research_state import merge_research_errors
-from app.providers.financial import MockValuationResearchProvider
+from app.providers.runtime import get_provider_bundle
 from app.valuation import ValuationAssumptions, ValuationInputs
 
-# Replace this configured mock with the source-backed provider during M7.
-valuation_research_provider = MockValuationResearchProvider()
 
 class ResearchSupervisorInputState(TypedDict):
     """Public input contract for the complete Research stage."""
@@ -317,11 +315,10 @@ def prepare_valuation_outputs(
     """Produce the valuation input contract as part of the Research stage.
 
     Explicit caller overrides win. Missing values are obtained through the
-    Research-stage valuation provider. The default provider is intentionally a
-    mock fixture and must be replaced by source-backed integration in M7.
+    valuation provider selected in the runtime provider bundle.
     """
     ticker = state.get("ticker", "").strip().upper()
-    provider = valuation_research_provider
+    provider = get_provider_bundle().valuation_research
     errors: list[str] = []
     updates: dict = {}
 

@@ -2,16 +2,8 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app.providers.exceptions import TransientProviderError
-from app.providers.financial import MockStockPriceProvider, MockCompanyInfoProvider, MockRevenueInfoProvider, \
-    MockNetIncomeInfoProvider, MockMarketIndexProvider, MockMarketReturnProvider, MockIndustryInfoProvider, \
-    MockMacroEnvironmentProvider
+from app.providers.runtime import get_provider_bundle
 
-stock_price_provider = MockStockPriceProvider()
-company_info_provider = MockCompanyInfoProvider()
-revenue_info_provider = MockRevenueInfoProvider()
-net_income_info_provider = MockNetIncomeInfoProvider()
-market_index_provider = MockMarketIndexProvider()
-market_return_provider = MockMarketReturnProvider()
 
 class TransientToolError(Exception):
     """Temporary tool failure that may succeed when retried."""
@@ -28,7 +20,7 @@ def get_stock_price(ticker: str) -> dict:
     """Get the current stock price for a stock ticker."""
 
     try:
-        return stock_price_provider.get_stock_price(ticker)
+        return get_provider_bundle().stock_price.get_stock_price(ticker)
 
     except TransientProviderError as exc:
         raise TransientToolError(
@@ -47,7 +39,7 @@ def get_company_info(ticker: str) -> dict:
     """Get basic company information for a stock ticker."""
 
     try:
-        return company_info_provider.get_company_info(ticker)
+        return get_provider_bundle().company_info.get_company_info(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(
             str(exc)
@@ -62,7 +54,7 @@ class RevenueInput(BaseModel):
 def get_revenue(ticker: str) -> float:
     """Get company revenue for the given stock ticker."""
     try:
-        return revenue_info_provider.get_revenue(ticker)
+        return get_provider_bundle().revenue.get_revenue(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(
             str(exc)
@@ -78,7 +70,7 @@ class NetIncomeInput(BaseModel):
 def get_net_income(ticker: str) -> float:
     """Get company net income for the given stock ticker."""
     try:
-        return net_income_info_provider.get_net_income(ticker)
+        return get_provider_bundle().net_income.get_net_income(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(
             str(exc)
@@ -92,7 +84,7 @@ class MarketIndexInput(BaseModel):
 def get_market_index(ticker: str) -> str:
     """Get company market index for the given stock ticker."""
     try:
-        return market_index_provider.get_market_index(ticker)
+        return get_provider_bundle().market_index.get_market_index(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(
             str(exc)
@@ -106,7 +98,7 @@ class MarketReturnInput(BaseModel):
 def get_market_return(ticker: str) -> float:
     """Get company market return for the given stock ticker."""
     try:
-        return market_return_provider.get_market_return(ticker)
+        return get_provider_bundle().market_return.get_market_return(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(
             str(exc)
@@ -119,14 +111,11 @@ class IndustryInfoInput(BaseModel):
     )
 
 
-industry_provider = MockIndustryInfoProvider()
-
-
 @tool(args_schema=IndustryInfoInput)
 def get_industry_info(ticker: str) -> dict:
     """Get basic industry information for a stock ticker."""
     try:
-        return industry_provider.get_industry_info(ticker)
+        return get_provider_bundle().industry_info.get_industry_info(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(str(exc)) from exc
 
@@ -137,13 +126,10 @@ class MacroEnvironmentInput(BaseModel):
     )
 
 
-macro_environment_provider = MockMacroEnvironmentProvider()
-
-
 @tool(args_schema=MacroEnvironmentInput)
 def get_macro_environment(ticker: str) -> dict:
     """Get basic macroeconomic environment information for a stock ticker."""
     try:
-        return macro_environment_provider.get_macro_environment(ticker)
+        return get_provider_bundle().macro_environment.get_macro_environment(ticker)
     except TransientProviderError as exc:
         raise TransientToolError(str(exc)) from exc

@@ -2743,3 +2743,430 @@ Report Generation
 * 在具备项目依赖的环境中运行新增 Graph 集成测试。
 
 * 运行完整测试套件，确认没有破坏已有阶段。
+
+## M7 · Lesson 1：真实 Provider 接入前的代码审计与数据源设计
+
+我们正式开始 M7。我会按照你在 Phase 9 中熟悉的教学方式推进：先明确本课目标和验收标准，再结合当前项目代码逐步讲解；每次只推进一个可验证的步骤，测试通过后再进入下一课。 不会为了赶进度直接大规模重构，也不会把“代码中存在 Provider 接口”当成“已经接入真实数据”。
+
+本课先做审计和设计，暂不修改业务代码。原因很简单：在确定真实数据源之前，必须先弄清楚当前架构已经有哪些接口、哪些地方仍然使用 Mock，以及数据最终如何进入估值、风险分析、投资决策和报告生成流程。
+
+本课结束时，我们应当能够明确回答三个问题：
+
+1. 当前系统从哪里获取每一类数据，哪些数据仍然是模拟的？
+2. 真实 Provider 应该接入哪个边界，才能避免破坏现有的 Graph、State Contract 和估值输入边界？
+3. M7 必须完成哪些真实数据与模型接入，才能通过端到端验收，而不是只做到“程序能启动”？
+
+### 一、本课的审计对象
+
+我已经解压并检查了你上传的 `Investment-Research-Decision-Agent_After_M6.tar`，重点检查了以下模块：
+
+- `app/providers/financial.py`：Provider 抽象接口与 Mock 实现。
+- `app/tools/financial.py`：Provider 如何被包装成 LangChain Tools。
+- `app/agents/tool_sets.py`：各 Research Agent 能调用哪些工具。
+- `app/agents/research_supervisor.py`：Research 阶段的编排，以及估值输入的来源。
+- `app/application/graph.py`：生产入口的 Application Graph。
+- `app/llm/client.py`：LLM 客户端配置。
+- `app/valuation/input_boundary.py`：估值输入校验边界。
+- `app/agents/models.py`：各研究阶段的结构化输出契约。
+
+先明确一个范围问题：本课审计的是当前上传的 M6 代码归档，不是你本地 IDE 中可能已经发生变化的工作区。
+
+另外，归档里没有看到项目依赖清单，因此暂时不能仅凭这个归档完整复现你的本地运行环境。
+
+### 二、当前架构：已经有完整的接入路径，但还没有完成真实数据接入
+
+#### 2.1 先理解数据在系统中的流动
+
+![M7-1.png](pic/M7-1.png)
+
+这里需要区分两件事：
+
+- Graph 编排已经存在：系统知道先研究，再估值、分析风险、形成投资决策并生成报告。
+- 真实数据链路尚未完成：如果工具背后仍然调用 Mock Provider，那么 Graph 即使完整执行，得到的也可能是模拟数据。
+
+M7 的重点不是重新发明整套 Graph，而是把真实数据接入现有架构，同时保留已建立的 State Contract 和估值边界。
+
+#### 2.2 当前 Provider 清单
+
+以下是从实际代码中确认的情况。
+
+| 数据类别       | 当前接口 / 实现                                             | 当前状态                               |
+|----------------|-------------------------------------------------------------|----------------------------------------|
+| 股价           | `StockPriceProvider` / `MockStockPriceProvider`             | Mock                                   |
+| 公司信息       | `CompanyInfoProvider` / `MockCompanyInfoProvider`           | Mock                                   |
+| 营业收入       | `RevenueInfoProvider` / `MockRevenueInfoProvider`           | Mock                                   |
+| 净利润         | `NetIncomeInfoProvider` / `MockNetIncomeInfoProvider`       | Mock                                   |
+| 市场指数       | `MarketIndexProvider` / `MockMarketIndexProvider`           | Mock                                   |
+| 市场收益率     | `MarketReturnProvider` / `MockMarketReturnProvider`         | Mock                                   |
+| 行业信息       | `IndustryInfoProvider` / `MockIndustryInfoProvider`         | Mock                                   |
+| 宏观环境       | `MacroEnvironmentProvider` / `MockMacroEnvironmentProvider` | Mock                                   |
+| 估值 EPS       | `MockValuationResearchProvider`                             | Mock                                   |
+| 估值倍数与理由 | `MockValuationResearchProvider`                             | Mock                                   |
+| LLM            | `ChatOpenAI`                                                | 已配置真实客户端，但实际连通性尚未验证 |
+
+最值得注意的是最后一项：当前代码确实使用环境变量配置 LLM 客户端，但配置了真实客户端，不等于已经验证实际模型服务可用。
+
+同样，Mock Provider 有明确的接口，也不等于真实 Provider 已经接入。
+
+### 三、逐层分析：为什么不能只替换 Mock 数据字典？
+
+#### 3.1 Provider 层：这是数据接入的核心边界
+
+当前的 `app/providers/financial.py` 已经为多种金融数据定义了抽象接口。
+
+例如，股价接口的核心形态是：
+
+```
+class StockPriceProvider(ABC):    @abstractmethod    def get_stock_price(self, ticker: str) -> dict:        raise NotImplementedError
+```
+
+Mock 实现返回类似：
+
+```
+{    "ticker": "AAPL",    "price": 200.0,}
+```
+
+这个接口是一个良好的起点：上层不必知道价格来自哪个供应商，只需要调用约定好的方法。
+
+但是，真实金融数据与教学用 Mock 数据有一个本质区别。
+
+真实数据不仅要有数值，还必须明确其含义。
+
+例如，股价至少涉及：
+
+- 股票代码及交易所；
+- 价格及其币种；
+- 数据对应的时间；
+- 数据是实时、延迟还是历史收盘价；
+- 数据来源；
+- 请求失败、数据缺失及供应商限流等情况。
+
+现有的 `{"ticker": ..., "price": ...}` 契约无法完整表达这些信息。
+
+这并不意味着我们应该立即重写所有现有模型。更稳妥的做法是先确定 M7 需要支持的数据语义，再选择适当的返回模型和兼容策略。
+
+#### 3.2 Tool 层：当前业务代码直接绑定了 Mock 实例
+
+在 `app/tools/financial.py` 中，可以看到类似的代码：
+
+```
+stock_price_provider = MockStockPriceProvider()company_info_provider = MockCompanyInfoProvider()
+```
+
+随后，工具直接调用这些全局实例：
+
+```
+@tool(args_schema=StockPriceInput)def get_stock_price(ticker: str) -> dict:    """Get the current stock price for a stock ticker."""    try:        return stock_price_provider.get_stock_price(ticker)    except TransientProviderError as exc:        raise TransientToolError(str(exc)) from exc
+```
+
+这段代码本身的 Tool 包装思路没有问题。问题在于：Provider 的具体实现是在模块加载时直接选定的。
+
+因此，如果我们要切换数据供应商，就需要找到一个清晰的配置和装配边界，而不是在各个 Agent 里分别判断该调用哪一家服务。
+
+M7 后续将处理这个问题：
+
+- Provider 接口继续承担统一契约；
+- Factory 或等价的装配机制负责创建具体实现；
+- Tool 负责调用注入的 Provider；
+- Agent 继续通过现有 Tool 集合获取数据；
+- Application Graph 不直接依赖供应商 SDK。
+
+这样可以尽可能避免真实 Provider 的引入扩散到整个业务层。
+
+#### 3.3 Agent 层：LLM 不应该成为金融事实的制造者
+
+例如，Company Research Agent 当前通过工具获取公司名称、行业板块和股价，然后再使用结构化 LLM 输出 `CompanyResearchResult`。
+
+这个分工是合理的：
+
+- Provider 负责获取外部数据；
+- Tool 暴露可调用的数据能力；
+- Agent 组织研究过程；
+- LLM 负责理解和组织信息；
+- Pydantic 模型负责约束输出结构。
+
+但真实数据接入后，还必须防止一个问题：LLM 将不完整的数据补成看似合理的事实。
+
+假设某个供应商没有返回最新股价，不能允许模型自行猜测一个数值，再让这个数值进入估值阶段。
+
+因此，M7 的验收不应仅检查结构化输出是否符合 Pydantic 模型，还应检查关键数据是否确实来自 Provider，以及缺失数据是否被正确处理。
+
+### 四、审计中发现的关键数据契约问题
+
+这是本课最重要的发现之一。
+
+当前研究模型已经定义了需要的数据字段，但一些字段还缺乏真实金融分析所需要的语义。
+
+| 字段                   | 当前缺少的关键信息      | M7 需要明确的内容        |
+| -------------------- | -------------- | ----------------- |
+| `current_price`      | 币种、时间、行情类型     | 价格口径及数据时间         |
+| `revenue`            | 币种、财报期间、单位     | 年报或季度报、金额单位       |
+| `net_income`         | 币种、财报期间、单位     | 与营收保持相同的会计期间及单位   |
+| `market_return`      | 时间窗口、单位、计算方法   | 例如过去一年收益率及其计算口径   |
+| `industry_growth`    | 时间窗口、单位、来源     | 历史增长还是预测增长        |
+| `macro_growth`       | 宏观指标、地区、时间窗口   | 具体指标及对应统计期间       |
+| `earnings_per_share` | 财报期间、币种或每股计价口径 | EPS 的期间、来源和拆股处理口径 |
+| `multiple`           | 可比对象、来源、分析依据   | 倍数来源及其合理性说明       |
+
+这里有一个很容易被忽视的风险。
+
+假设我们获得以下两个数值：
+
+- 营业收入：100,000
+- 净利润：25,000
+
+程序可以正确计算出 25% 的利润率。但如果这两个数字一个是以千美元计价的季度数据，另一个是以美元计价的年度数据，那么计算出来的结果即使通过所有类型检查，也没有正确的金融含义。
+
+因此，类型正确不等于数据语义正确。
+
+在 M7 中，我们必须把这两种正确性分开验收。
+
+#### 估值输入边界应当保留
+
+当前 `app/valuation/input_boundary.py` 明确要求：
+
+- 必须有有效的公司研究结果；
+- 当前股价必须是有限的正数；
+- 必须显式提供 `ValuationInputs`；
+- 必须显式提供 `ValuationAssumptions`；
+- 不允许从其他字段暗中推导 EPS；
+- 不允许静默采用默认估值倍数。
+
+这条边界是正确的，M7 不应为了让真实数据流程“更容易跑通”而绕过它。
+
+真实 Provider 负责提供可验证的数据，估值输入边界负责检查这些数据是否满足模型要求。两者职责不同，不能混为一谈。
+
+### 五、M7 的 Provider 设计决策
+
+经过本次审计，我建议把 M7 的实现重点确定为以下四个部分。
+
+1\. 统一 Provider 装配
+
+将真实实现的选择集中到配置和装配边界，避免 Tools 直接绑定 Mock 实例。保留 Mock 作为确定性测试替身。
+
+2\. 真实行情与公司财务数据
+
+优先覆盖股价、公司资料、营收、净利润和 EPS，统一币种、财报期间、金额单位及数据时间。
+
+3\. 真实市场、行业与宏观数据
+
+确定市场基准收益率、行业指标和宏观指标的来源与口径，避免将模拟增长率或固定收益率作为事实输入。
+
+4\. 端到端验证
+
+验证真实配置能否贯通 Research、Valuation、Risk、Investment Decision 和 Report，并分别测试无凭据、超时、限流、缺失数据等情况。
+
+目前不急于锁定某一家数据供应商。供应商选择应依据实际需要覆盖的字段、可用市场、许可条件、成本、数据更新频率和服务稳定性，而不是仅仅因为某个 Python SDK 比较容易安装。
+
+尤其要注意：市场数据、宏观数据与估值假设不一定适合由同一个供应商提供。可以统一它们的内部接口，但不必强行统一底层来源。
+
+### 六、本课的测试与验收状态
+
+我尝试对上传的归档执行测试：
+
+```
+python -m pytest -q --disable-warnings --maxfail=1
+```
+
+当前运行环境在测试收集阶段就失败了，原因是缺少 `langchain_openai`：
+
+```
+ModuleNotFoundError: No module named 'langchain_openai'
+```
+
+因此，本次没有获得完整测试结果。这不是业务测试失败的结论，也不能据此判断你的本地环境存在同样的问题。
+
+本课的审计结果如下。
+
+| 验收项                                    | 状态           |
+| -------------------------------------- | ------------ |
+| 确认当前 Application Graph 与 Research 编排边界 | 已完成代码审计      |
+| 确认现有 Provider、Tool 与 Agent 的调用关系       | 已完成代码审计      |
+| 识别仍使用 Mock 的主要数据类别                     | 已完成代码审计      |
+| 识别真实金融数据需要补充的语义                        | 已完成设计审计      |
+| 完整运行当前测试套件                             | 未完成，运行环境缺少依赖 |
+| 修改业务代码                                 | 本课不修改        |
+
+### 七、下一课：M7 Lesson 2 — Provider Factory 与运行时配置
+
+下一课才开始修改代码。
+
+我们将以当前 `app/providers/financial.py` 和 `app/tools/financial.py` 为基础，设计一套明确的 Provider 装配机制，并逐步完成：
+
+1. 定义运行时配置与 Provider 选择规则。
+2. 将 Provider 的创建从 Tool 模块中分离出来。
+3. 允许测试注入 Mock Provider，生产配置使用真实 Provider。
+4. 对缺失配置和无效配置提供明确错误，而不是静默回退到 Mock。
+5. 为后续真实 Provider 集成建立可测试的依赖注入边界。
+
+进入 Lesson 2 前，本课需要记住的结论是：我们已经有了真实 Provider 应该接入的位置，但当前的主要金融数据仍由 Mock 提供。 下一步不是立刻替换所有模拟数值，而是先把 Provider 的选择、创建和注入机制设计正确。这样后续接入真实数据时，才能保持现有 Graph 与 State Contract 稳定，并且通过可重复的测试验证每一步。
+
+
+## M7 Lesson 2：Provider Factory 与运行时配置
+
+### 一、本课目标
+
+上一课我们发现，当前项目在 `app/tools/financial.py` 中直接创建了多个 Mock Provider，Research Supervisor 也独立创建了估值研究用的 Mock Provider。
+
+这种设计的问题不是 Mock 本身，而是业务代码直接决定了使用哪个 Provider。
+
+本课要建立一个统一的 Provider 装配机制，让系统能够：
+
+1. 集中创建所有数据 Provider。
+2. 通过运行时配置选择 Provider 模式。
+3. 让 Tool 和 Research Supervisor 使用同一套 Provider 依赖。
+4. 保留 Mock Provider，继续支持可重复的单元测试。
+5. 在生产环境配置不正确时明确失败，绝不静默退回模拟数据。
+
+注意：本课完成的是 Provider 的配置和装配机制，还没有接入真实金融数据。真实 Provider 将在后续课程中逐步实现。
+
+### 二、本课完成的代码修改
+
+#### 2.1 新增 `app/providers/config.py`
+
+该文件负责读取和校验运行时配置。
+
+主要配置项如下：
+
+| 配置项          | 用途              |
+|-----------------|-------------------|
+| `APP_ENV`       | 当前运行环境      |
+| `PROVIDER_MODE` | Provider 选择模式 |
+
+当前支持的环境为 `development`、`test` 和 `production`。
+
+配置行为如下：
+
+| 配置情况                              | 系统行为                            |
+|---------------------------------------|-------------------------------------|
+| 开发环境未设置 Provider 模式          | 默认使用 Mock，保持现有开发流程兼容 |
+| 测试环境明确设置 `mock`               | 使用确定性的 Mock 数据              |
+| 生产环境没有设置 Provider 模式        | 启动配置校验失败                    |
+| 生产环境设置 `mock`                   | 拒绝启动                            |
+| 设置 `real`，但真实 Provider 尚未实现 | 明确报错，不回退到 Mock             |
+
+这里引入了一个重要的工程原则：Fail Fast（快速失败）。
+
+例如，未来部署时，如果我们错误地配置了：
+
+```
+APP_ENV=production
+PROVIDER_MODE=mock
+```
+
+系统应该立即拒绝该配置，而不是继续运行并输出看似真实的投资分析报告。
+
+#### 2.2 新增 `app/providers/factory.py`
+
+这个文件负责统一创建 Provider。
+
+核心结构是 `ProviderBundle`：
+
+```python
+@dataclass(frozen=True)
+class ProviderBundle:
+    stock_price: StockPriceProvider
+    company_info: CompanyInfoProvider
+    revenue: RevenueInfoProvider
+    net_income: NetIncomeInfoProvider
+    market_index: MarketIndexProvider
+    market_return: MarketReturnProvider
+    industry_info: IndustryInfoProvider
+    macro_environment: MacroEnvironmentProvider
+    valuation_research: ValuationResearchProvider
+    mode: str
+```
+
+这段代码解决了什么问题？
+
+以前，股价、公司资料、市场数据和估值输入分别在不同模块中创建 Provider。现在，它们由统一的工厂集中装配。
+
+因此，后续添加真实 Provider 时，我们可以逐步将：
+
+- `MockStockPriceProvider` 替换为真实行情 Provider；
+- `MockCompanyInfoProvider` 替换为真实公司资料 Provider；
+- `MockRevenueInfoProvider` 和 `MockNetIncomeInfoProvider` 替换为真实财务数据 Provider；
+- 其他数据 Provider 也按同样的方式接入。
+
+上层 Agent 不必跟着更换供应商 SDK，也不应该直接依赖供应商的具体实现。
+
+#### 2.3 新增 `app/providers/runtime.py`
+
+这个文件提供统一的运行时 Provider 访问入口：
+
+```python
+def get_provider_bundle() -> ProviderBundle:
+    return _provider_bundle
+```
+
+同时提供两个配置函数：
+
+- `configure_provider_bundle()`：显式注入 Provider Bundle。
+- `reset_provider_bundle()`：按照当前环境配置重新创建 Provider Bundle。
+
+这让测试可以注入一个可控的 Provider，而不必修改 Tool 的业务逻辑。
+
+需要注意：当前版本采用应用运行时共享的 Provider Bundle。应该在启动阶段完成配置，不要在有请求正在执行时切换 Provider。未来进入应用生命周期与部署层的完善阶段时，还可以进一步收敛为明确的应用级依赖管理。
+
+#### 2.4 修改 `app/tools/financial.py`
+
+之前的模式是：
+
+```python
+stock_price_provider = MockStockPriceProvider()
+```
+
+现在，Tool 在调用时通过运行时 Bundle 获取 Provider：
+
+```python
+return get_provider_bundle().stock_price.get_stock_price(ticker)
+```
+
+这样，Tool 不再直接实例化 Mock Provider。
+
+更重要的是，现有 Tool 的名称、输入 Schema 和调用方式保持不变。例如：
+
+```python
+get_stock_price.invoke({"ticker": "AAPL"})
+```
+
+调用方不需要知道底层 Provider 是 Mock 还是未来接入的真实实现。
+
+#### 2.5 修改 `app/agents/research_supervisor.py`
+
+之前，Research Supervisor 单独创建：
+
+```
+valuation_research_provider = MockValuationResearchProvider()
+```
+
+现在改为从统一 Bundle 中获取：
+
+```
+provider = get_provider_bundle().valuation_research
+```
+
+这一步很重要，因为估值研究输入也属于外部数据依赖。
+
+如果只修改 Financial Tools，却遗漏 Research Supervisor，那么项目实际上会存在两套 Provider 装配机制。本课将它们统一到了同一个边界。
+
+### 三、本课的架构变化
+
+![M7-2.png](pic/M7-2.png)
+
+### 四、本课新增测试
+
+新增两个测试文件：
+
+- `tests/test_provider_factory.py`
+- `tests/test_provider_runtime_injection.py`
+
+它们分别验证配置与工厂行为，以及 Tool 是否真正使用注入的 Provider。
+
+重点测试场景包括：
+
+1. 开发环境默认使用 Mock。
+2. 生产环境缺少 Provider 配置时快速失败。
+3. 生产环境禁止使用 Mock。
+4. 尚未实现真实 Provider 时，请求 `real` 模式必须明确失败。
+5. Tool 可以使用显式注入的 Provider，而不是固定调用 Mock。
