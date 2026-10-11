@@ -29,16 +29,10 @@ def test_production_cannot_use_mock_providers():
         ProviderSettings(app_env="production", mode="mock")
 
 
-def test_real_mode_fails_without_silent_mock_fallback():
-    settings = ProviderSettings(app_env="development", mode="real")
-
-    with pytest.raises(ProviderConfigurationError, match="No Mock fallback"):
-        create_provider_bundle(settings)
-
-
-def test_real_mode_registers_real_quote_and_company_providers_without_mock_fallback(monkeypatch):
+def test_real_mode_registers_real_quote_company_and_financial_statement_providers(monkeypatch):
     from app.providers.alpha_vantage import (
         AlphaVantageCompanyInfoProvider,
+        AlphaVantageIncomeStatementProvider,
         AlphaVantageStockPriceProvider,
     )
     from app.providers.unavailable import UnavailableRealProvider
@@ -50,9 +44,11 @@ def test_real_mode_registers_real_quote_and_company_providers_without_mock_fallb
     assert bundle.mode == "real-partial"
     assert isinstance(bundle.stock_price, AlphaVantageStockPriceProvider)
     assert isinstance(bundle.company_info, AlphaVantageCompanyInfoProvider)
-    assert isinstance(bundle.revenue, UnavailableRealProvider)
+    assert isinstance(bundle.revenue, AlphaVantageIncomeStatementProvider)
+    assert bundle.net_income is bundle.revenue
+    assert isinstance(bundle.market_index, UnavailableRealProvider)
     with pytest.raises(ProviderConfigurationError, match="No Mock fallback"):
-        bundle.revenue.get_revenue("AAPL")
+        bundle.market_index.get_market_index("AAPL")
 
 
 def test_real_mode_requires_alpha_vantage_api_key(monkeypatch):
@@ -69,4 +65,5 @@ def test_production_real_mode_remains_blocked_until_provider_coverage_is_complet
 
     with pytest.raises(ProviderConfigurationError, match="coverage is incomplete"):
         create_provider_bundle(settings)
+
 

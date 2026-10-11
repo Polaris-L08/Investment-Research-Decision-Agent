@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass
 
 from app.providers.alpha_vantage import AlphaVantageClient, AlphaVantageStockPriceProvider, \
-    AlphaVantageCompanyInfoProvider
+    AlphaVantageCompanyInfoProvider, AlphaVantageIncomeStatementProvider
 from app.providers.config import ProviderConfigurationError, ProviderSettings
 from app.providers.financial import (
     CompanyInfoProvider,
@@ -49,7 +49,7 @@ def create_provider_bundle(
 ) -> ProviderBundle:
     """Build providers from explicit runtime settings.
 
-    Real mode currently supports quote and company-profile adapters only.
+    Real mode currently supports quote, company-profile, annual revenue, and net-income adapters.
     Other capabilities fail closed until their adapters are implemented; this
     factory never silently mixes Mock data into a real-mode bundle.
     """
@@ -59,18 +59,19 @@ def create_provider_bundle(
         if resolved.app_env == "production":
             raise ProviderConfigurationError(
                 "Real provider coverage is incomplete: only stock quotes and "
-                "company profiles are implemented in M7 Lesson 3. Production "
+                "company profiles, revenue, and net income are implemented in M7 Lessons 3-4. Production "
                 "mode remains blocked until all required real providers and "
                 "operational controls are implemented."
             )
 
         client = AlphaVantageClient(api_key=os.getenv("ALPHA_VANTAGE_API_KEY"))
-        unavailable = UnavailableRealProvider("financial/industry/macro/valuation research")
+        income_statement = AlphaVantageIncomeStatementProvider(client)
+        unavailable = UnavailableRealProvider("market benchmark/industry/macro/valuation research")
         return ProviderBundle(
             stock_price=AlphaVantageStockPriceProvider(client),
             company_info=AlphaVantageCompanyInfoProvider(client),
-            revenue=unavailable,
-            net_income=unavailable,
+            revenue=income_statement,
+            net_income=income_statement,
             market_index=unavailable,
             market_return=unavailable,
             industry_info=unavailable,

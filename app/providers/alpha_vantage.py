@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
+import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -16,7 +18,7 @@ from urllib.request import Request, urlopen
 
 from app.providers.config import ProviderConfigurationError
 from app.providers.exceptions import TransientProviderError
-from app.providers.financial import CompanyInfoProvider, StockPriceProvider
+from app.providers.financial import CompanyInfoProvider, StockPriceProvider, RevenueInfoProvider, NetIncomeInfoProvider
 
 
 class AlphaVantageClient:
@@ -29,6 +31,9 @@ class AlphaVantageClient:
         api_key: str | None = None,
         timeout: float = 10.0,
         opener: Callable[..., Any] | None = None,
+        min_request_interval: float = 1.1,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         resolved_key = api_key if api_key is not None else os.getenv("ALPHA_VANTAGE_API_KEY")
         if not resolved_key or not resolved_key.strip():
@@ -37,9 +42,28 @@ class AlphaVantageClient:
             )
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero.")
+        if min_request_interval < 0:
+            raise ValueError("min_request_interval must not be negative.")
         self._api_key = resolved_key.strip()
         self._timeout = timeout
         self._opener = opener or urlopen
+        self._min_request_interval = min_request_interval
+        self._clock = clock or time.monotonic
+        self._sleeper = sleeper or time.sleep
+        self._last_request_started_at: float | None = None
+        self._rate_limit_lock = threading.Lock()
+
+    def _throttle(self) -> None:
+        # Serialize request starts so concurrent tools sharing this client also
+        # respect the provider's per-second limit.
+        with self._rate_limit_lock:
+            now = self._clock()
+            if self._last_request_started_at is not None:
+                wait_seconds = self._min_request_interval - (now - self._last_request_started_at)
+                if wait_seconds > 0:
+                    self._sleeper(wait_seconds)
+                    now = self._clock()
+            self._last_request_started_at = now
 
     def get_json(self, function: str, symbol: str) -> dict[str, Any]:
         params = urlencode(
@@ -53,6 +77,7 @@ class AlphaVantageClient:
             f"{self.BASE_URL}?{params}",
             headers={"User-Agent": "Investment-Research-Decision-Agent/1.0"},
         )
+        self._throttle()
         try:
             with self._opener(request, timeout=self._timeout) as response:
                 status = getattr(response, "status", 200)
@@ -91,10 +116,21 @@ class AlphaVantageClient:
             detail = str(payload["Note"])
             raise TransientProviderError(f"Alpha Vantage limit/availability notice: {detail}")
         if "Information" in payload:
-            # This field may indicate an invalid key, a premium-only endpoint,
-            # or an account entitlement issue; retrying cannot reliably fix it.
+            detail = str(payload["Information"])
+            lowered = detail.lower()
+            rate_limit_markers = (
+                "request per second", "requests per second", "rate limit",
+                "frequency", "requests per day", "call frequency", "quota",
+                "spreading out your free api requests",
+            )
+            if any(marker in lowered for marker in rate_limit_markers):
+                raise TransientProviderError(
+                    f"Alpha Vantage rate-limit notice: {detail}"
+                )
+            # Invalid credentials, premium-only endpoints, and account
+            # entitlements generally need operator action rather than retries.
             raise ProviderConfigurationError(
-                f"Alpha Vantage API key/endpoint entitlement notice: {payload['Information']}"
+                f"Alpha Vantage API key/endpoint entitlement notice: {detail}"
             )
         if "Error Message" in payload:
             raise ValueError(f"Alpha Vantage rejected the request: {payload['Error Message']}")
@@ -164,6 +200,79 @@ class AlphaVantageCompanyInfoProvider(CompanyInfoProvider):
             "source": "Alpha Vantage OVERVIEW",
         }
 
+
+
+class AlphaVantageIncomeStatementProvider(RevenueInfoProvider, NetIncomeInfoProvider):
+    """Read the latest available annual revenue and net income.
+
+    Both metrics share one parsed INCOME_STATEMENT response per ticker for the
+    lifetime of this provider instance, avoiding duplicate API calls when the
+    research graph asks for both values.
+    """
+
+    def __init__(self, client: AlphaVantageClient | None = None) -> None:
+        self._client = client or AlphaVantageClient()
+        self._annual_reports_by_ticker: dict[str, dict[str, Any]] = {}
+        self._cache_lock = threading.Lock()
+
+    def _latest_annual_report(self, ticker: str) -> dict[str, Any]:
+        symbol = _normalize_ticker(ticker)
+        with self._cache_lock:
+            if symbol in self._annual_reports_by_ticker:
+                return self._annual_reports_by_ticker[symbol]
+
+            payload = self._client.get_json("INCOME_STATEMENT", symbol)
+            reports = payload.get("annualReports")
+            if not isinstance(reports, list) or not reports:
+                raise ValueError(
+                    f"No annual income-statement data was returned for {symbol}."
+                )
+            valid_reports = [
+                report for report in reports
+                if isinstance(report, dict) and report.get("fiscalDateEnding")
+            ]
+            if not valid_reports:
+                raise TransientProviderError(
+                    f"Alpha Vantage returned malformed annual reports for {symbol}."
+                )
+            latest = max(valid_reports, key=lambda report: str(report["fiscalDateEnding"]))
+            self._annual_reports_by_ticker[symbol] = latest
+            return latest
+
+    def get_revenue(self, ticker: str) -> float:
+        return self._required_financial_value(ticker, "totalRevenue", "revenue")
+
+    def get_net_income(self, ticker: str) -> float:
+        return self._required_financial_value(ticker, "netIncome", "net income")
+
+    def get_latest_annual_report(self, ticker: str) -> dict[str, Any]:
+        report = self._latest_annual_report(ticker)
+        return {
+            "ticker": _normalize_ticker(ticker),
+            "fiscal_date_ending": str(report["fiscalDateEnding"]),
+            "revenue": self._parse_required_number(report.get("totalRevenue"), ticker, "revenue"),
+            "net_income": self._parse_required_number(report.get("netIncome"), ticker, "net income"),
+            "period": "annual",
+            "source": "Alpha Vantage INCOME_STATEMENT",
+        }
+
+    def _required_financial_value(self, ticker: str, field: str, label: str) -> float:
+        report = self._latest_annual_report(ticker)
+        return self._parse_required_number(report.get(field), ticker, label)
+
+    @staticmethod
+    def _parse_required_number(value: Any, ticker: str, label: str) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise TransientProviderError(
+                f"Alpha Vantage returned invalid {label} for {ticker}."
+            ) from exc
+        if not math.isfinite(number):
+            raise TransientProviderError(
+                f"Alpha Vantage returned non-finite {label} for {ticker}."
+            )
+        return number
 
 def _normalize_ticker(ticker: str) -> str:
     if not isinstance(ticker, str) or not ticker.strip():

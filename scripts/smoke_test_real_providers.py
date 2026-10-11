@@ -26,6 +26,18 @@ def main() -> int:
     print(json.dumps(bundle.stock_price.get_stock_price(args.ticker), indent=2))
     print("Company profile:")
     print(json.dumps(bundle.company_info.get_company_info(args.ticker), indent=2))
+    print("Latest annual financials:")
+    statement_provider = bundle.revenue
+    if hasattr(statement_provider, "get_latest_annual_report"):
+        print(json.dumps(statement_provider.get_latest_annual_report(args.ticker), indent=2))
+    else:
+        print(json.dumps({
+            "ticker": args.ticker.upper(),
+            "revenue": bundle.revenue.get_revenue(args.ticker),
+            "net_income": bundle.net_income.get_net_income(args.ticker),
+            "period": "annual",
+            "source": "Alpha Vantage INCOME_STATEMENT",
+        }, indent=2))
     return 0
 
 
