@@ -4,6 +4,12 @@ from dataclasses import dataclass
 
 from app.providers.alpha_vantage import AlphaVantageClient, AlphaVantageStockPriceProvider, \
     AlphaVantageCompanyInfoProvider, AlphaVantageIncomeStatementProvider
+from app.providers.akshare import (
+    AkShareClient,
+    AkShareStockPriceProvider,
+    AkShareCompanyInfoProvider,
+    AkShareIncomeStatementProvider,
+)
 from app.providers.config import ProviderConfigurationError, ProviderSettings
 from app.providers.financial import (
     CompanyInfoProvider,
@@ -59,17 +65,26 @@ def create_provider_bundle(
         if resolved.app_env == "production":
             raise ProviderConfigurationError(
                 "Real provider coverage is incomplete: only stock quotes and "
-                "company profiles, revenue, and net income are implemented in M7 Lessons 3-4. Production "
+                "company profiles, revenue, and net income are implemented as partial adapters in M7 Lessons 3-4. Production "
                 "mode remains blocked until all required real providers and "
                 "operational controls are implemented."
             )
 
-        client = AlphaVantageClient(api_key=os.getenv("ALPHA_VANTAGE_API_KEY"))
-        income_statement = AlphaVantageIncomeStatementProvider(client)
+        if resolved.real_provider_source == "akshare":
+            client = AkShareClient()
+            stock_price = AkShareStockPriceProvider(client)
+            company_info = AkShareCompanyInfoProvider(client)
+            income_statement = AkShareIncomeStatementProvider(client)
+        else:
+            client = AlphaVantageClient(api_key=os.getenv("ALPHA_VANTAGE_API_KEY"))
+            stock_price = AlphaVantageStockPriceProvider(client)
+            company_info = AlphaVantageCompanyInfoProvider(client)
+            income_statement = AlphaVantageIncomeStatementProvider(client)
+
         unavailable = UnavailableRealProvider("market benchmark/industry/macro/valuation research")
         return ProviderBundle(
-            stock_price=AlphaVantageStockPriceProvider(client),
-            company_info=AlphaVantageCompanyInfoProvider(client),
+            stock_price=stock_price,
+            company_info=company_info,
             revenue=income_statement,
             net_income=income_statement,
             market_index=unavailable,

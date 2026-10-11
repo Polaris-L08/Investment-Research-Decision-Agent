@@ -21,6 +21,7 @@ class ProviderConfigurationError(ValueError):
 class ProviderSettings:
     app_env: str
     mode: str
+    real_provider_source: str = "alpha_vantage"
 
     def __post_init__(self) -> None:
         if self.app_env not in {"development", "test", "production"}:
@@ -30,6 +31,10 @@ class ProviderSettings:
         if self.mode not in {"mock", "real"}:
             raise ProviderConfigurationError(
                 "PROVIDER_MODE must be either 'mock' or 'real'."
+            )
+        if self.real_provider_source not in {"alpha_vantage", "akshare"}:
+            raise ProviderConfigurationError(
+                "REAL_PROVIDER_SOURCE must be either 'alpha_vantage' or 'akshare'."
             )
         if self.app_env == "production" and self.mode == "mock":
             raise ProviderConfigurationError(
@@ -55,4 +60,5 @@ class ProviderSettings:
         else:
             mode = configured_mode.strip().lower()
 
-        return cls(app_env=app_env, mode=mode)
+        source = os.getenv("REAL_PROVIDER_SOURCE", "alpha_vantage").strip().lower()
+        return cls(app_env=app_env, mode=mode, real_provider_source=source)

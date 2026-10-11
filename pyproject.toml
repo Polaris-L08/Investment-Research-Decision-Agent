@@ -15,6 +15,7 @@ dev = [
     "langgraph",
     "langgraph-checkpoint-sqlite",
     "pydantic>=2.0",
+    "akshare",
 ]
 
 [build-system]
