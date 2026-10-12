@@ -1426,3 +1426,349 @@ def test_application_graph_invalid_decision_skips_research(monkeypatch):
 | 回归测试        | 新增 HITL 测试及 Report Graph 集成测试全部通过         |
 
 现在先完成代码修改并运行上面的命令。 把测试结果发给我；如果失败，请提供完整 traceback。我们会先修复正式 Graph 的集成问题，再决定是否完成 Lesson 4，不提前进入下一课。
+
+## Lesson 5：验证 HITL 的 Checkpoint 持久化与恢复
+
+Lesson 4 的正式 Application Graph 集成测试已全部通过。现在继续验证一个更接近生产环境的关键能力：Graph 在人工审批处暂停后，能否通过持久化 Checkpoint 找回执行状态，并在恢复后继续正确的业务路径。
+
+上一课使用 `MemorySaver` 验证了审批控制流，但它不能证明 SQLite 持久化和 Graph 重建后的恢复能力。本课将使用项目现有的 SQLite Checkpointer，重点验证：
+
+1. 审批暂停状态被保存。
+2. 使用相同数据库和 `thread_id` 重建 Graph 后，仍能读取待审批状态。
+3. 使用 `Command(resume=...)` 恢复后，批准与拒绝仍遵循正确的业务语义。
+4. 不同 `thread_id` 的审批请求相互隔离。
+
+本课仍然使用 mock 研究节点，不会调用真实 LLM 或外部数据源，也不会重构现有 Checkpointer 模块。
+
+### 一、Graph Topology
+
+本课的核心是：暂停状态不能只存在于某个 Python Graph 对象的内存中，而要能够从 SQLite Checkpoint 中恢复。
+
+```
+第一次运行
+    │
+    ▼
+正式 Application Graph
+    │
+    ▼
+validate_input
+    │
+    ▼
+approval_gate
+    │
+    ▼
+interrupt(payload)
+    │
+    ├── SQLite 保存执行检查点
+    │
+    └── Graph 暂停
+             │
+             ▼
+      关闭当前 SQLite 连接
+             │
+             ▼
+      重新建立 Checkpointer
+             │
+             ▼
+      重新编译 Application Graph
+             │
+             ▼
+      使用原 thread_id 读取状态
+             │
+             ▼
+      Command(resume=decision)
+             │
+       ┌─────┴─────┐
+       ▼           ▼
+    批准          拒绝
+       │           │
+       ▼           ▼
+    research    finalize
+       │           │
+       ▼           ▼
+    原业务流程    END
+```
+
+这里需要区分三个概念：
+
+- Graph 重建：创建一个新的编译后 Graph 对象。
+- Checkpoint 恢复：新 Graph 通过同一持久化存储和 `thread_id` 找回之前的执行状态。
+- 业务恢复：使用 `Command(resume=...)` 将审批决定传回暂停的节点，继续执行。
+
+仅仅重新编译 Graph，不会自动恢复某个暂停任务。持久化存储和正确的 `thread_id` 都不可缺少。
+
+### 二、为什么本课不直接使用默认数据库？
+
+项目的 `create_checkpointer()` 默认使用 `data/checkpoints.sqlite`。在本课测试中，我们使用 pytest 提供的 `tmp_path` 创建临时数据库，避免测试数据污染真实开发数据。
+
+测试中会直接创建 `SqliteSaver`，因为我们需要在暂停后关闭第一条 SQLite 连接，再创建第二条连接来模拟 Graph 重建。这样可以更明确地验证持久化边界，而不是只验证同一个对象还能读取内存中的状态。
+
+### 三、新增测试文件
+
+新建 `tests/test_application_hitl_checkpoint.py`。
+
+这个测试文件不修改生产代码，直接复用正式 `build_application_graph()`、现有 SQLite Checkpointer 实现方式，以及测试用 mock 研究节点。
+
+```python
+import sqlite3
+
+import pytest
+import app.application.graph as application_graph_module
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
+
+from app.application.graph import build_application_graph
+
+
+def build_test_graph(database_path, monkeypatch, research_calls):
+    """Build the production Application Graph with SQLite persistence."""
+
+    def fake_research(state):
+        research_calls.append(state["ticker"])
+        return {
+            "current_stage": "research",
+            "stage_errors": {
+                **dict(state.get("stage_errors") or {}),
+                "research": "Stopped by checkpoint test double.",
+            },
+            "application_error": (
+                "research failed: Stopped by checkpoint test double."
+            ),
+        }
+
+    monkeypatch.setattr(
+        application_graph_module,
+        "run_research_stage",
+        fake_research,
+    )
+
+    connection = sqlite3.connect(
+        database_path,
+        check_same_thread=False,
+    )
+    checkpointer = SqliteSaver(connection)
+    checkpointer.setup()
+
+    graph = build_application_graph(checkpointer=checkpointer)
+    return graph, connection
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_status", "should_run_research"),
+    [
+        ("approve", "approved", True),
+        ("reject", "rejected", False),
+    ],
+)
+def test_hitl_checkpoint_survives_graph_recreation(
+    tmp_path,
+    monkeypatch,
+    decision,
+    expected_status,
+    should_run_research,
+):
+    database_path = tmp_path / "hitl-checkpoints.sqlite"
+    thread_id = f"checkpoint-{decision}"
+    config = {"configurable": {"thread_id": thread_id}}
+    research_calls = []
+
+    # First Graph instance: execute until the approval interrupt.
+    graph_1, connection_1 = build_test_graph(
+        database_path,
+        monkeypatch,
+        research_calls,
+    )
+
+    try:
+        graph_1.invoke(
+            {
+                "ticker": "AAPL",
+                "user_query": "Analyze financial condition and competition.",
+            },
+            config,
+        )
+
+        snapshot_1 = graph_1.get_state(config)
+        assert snapshot_1.values["approval_status"] == "pending"
+        assert snapshot_1.tasks
+        assert research_calls == []
+    finally:
+        connection_1.close()
+
+    # Second Graph instance: reopen the same SQLite database.
+    graph_2, connection_2 = build_test_graph(
+        database_path,
+        monkeypatch,
+        research_calls,
+    )
+
+    try:
+        # The pending approval must survive connection and Graph recreation.
+        snapshot_2 = graph_2.get_state(config)
+
+        assert snapshot_2.values["ticker"] == "AAPL"
+        assert snapshot_2.values["approval_status"] == "pending"
+
+        pending_interrupts = [
+            item
+            for task in snapshot_2.tasks
+            for item in task.interrupts
+        ]
+        assert pending_interrupts
+        assert pending_interrupts[0].value["type"] == "research_approval"
+
+        # Resume the existing thread, not a new execution.
+        result = graph_2.invoke(
+            Command(
+                resume={
+                    "decision": decision,
+                    "reason": "Decision submitted after graph recreation.",
+                }
+            ),
+            config,
+        )
+
+        assert result["approval_status"] == expected_status
+
+        if should_run_research:
+            assert research_calls == ["AAPL"]
+        else:
+            assert research_calls == []
+
+    finally:
+        connection_2.close()
+
+
+def test_hitl_checkpoint_threads_are_isolated(
+    tmp_path,
+    monkeypatch,
+):
+    database_path = tmp_path / "hitl-thread-isolation.sqlite"
+    research_calls = []
+
+    graph, connection = build_test_graph(
+        database_path,
+        monkeypatch,
+        research_calls,
+    )
+
+    config_a = {"configurable": {"thread_id": "approval-thread-a"}}
+    config_b = {"configurable": {"thread_id": "approval-thread-b"}}
+
+    try:
+        graph.invoke(
+            {
+                "ticker": "AAPL",
+                "user_query": "Research Apple.",
+            },
+            config_a,
+        )
+        graph.invoke(
+            {
+                "ticker": "MSFT",
+                "user_query": "Research Microsoft.",
+            },
+            config_b,
+        )
+
+        snapshot_a = graph.get_state(config_a)
+        snapshot_b = graph.get_state(config_b)
+
+        assert snapshot_a.values["ticker"] == "AAPL"
+        assert snapshot_b.values["ticker"] == "MSFT"
+        assert snapshot_a.values["approval_status"] == "pending"
+        assert snapshot_b.values["approval_status"] == "pending"
+
+        result_a = graph.invoke(
+            Command(
+                resume={
+                    "decision": "approve",
+                    "reason": "Approved AAPL.",
+                }
+            ),
+            config_a,
+        )
+
+        assert result_a["approval_status"] == "approved"
+        assert research_calls == ["AAPL"]
+
+        # Resuming thread A must not resume thread B.
+        snapshot_b_after = graph.get_state(config_b)
+        assert snapshot_b_after.values["ticker"] == "MSFT"
+        assert snapshot_b_after.values["approval_status"] == "pending"
+
+        result_b = graph.invoke(
+            Command(
+                resume={
+                    "decision": "reject",
+                    "reason": "Rejected MSFT.",
+                }
+            ),
+            config_b,
+        )
+
+        assert result_b["approval_status"] == "rejected"
+        assert research_calls == ["AAPL"]
+
+    finally:
+        connection.close()
+```
+
+#### 测试中的两个重要细节
+
+1\. 为什么关闭第一条连接？
+
+第一阶段结束后关闭 `connection_1`，再用同一个数据库路径建立 `connection_2`。这比始终复用同一个连接更接近运行时重建的场景。
+
+2\. 为什么同时测试线程隔离？
+
+Checkpoint 通常按 `thread_id` 区分执行。若两个审批任务错误地共享执行状态，可能发生一个请求的审批恢复了另一个请求的流程。测试分别使用 AAPL 和 MSFT，确保它们的状态与审批决定不会串线。
+
+需要准确限定：这模拟的是同一测试进程内的 SQLite 连接关闭、重建与 Graph 重建，不是杀死 Python 进程后再启动新进程的完整恢复测试。后者留待更完整的运行时验收。
+
+### 四、Lesson 5 验收标准
+
+| 验收项            | 通过标准                                             |
+|-------------------|------------------------------------------------------|
+| SQLite Checkpoint | 使用临时 SQLite 数据库存储执行状态                   |
+| 中断状态持久化    | Graph 重建后仍可读取 `pending` 审批状态              |
+| 恢复机制          | 同一个 `thread_id` 可通过 `Command(resume=...)` 恢复 |
+| 批准路径          | 恢复后进入研究节点                                   |
+| 拒绝路径          | 恢复后跳过研究节点                                   |
+| 线程隔离          | 一个线程的审批不会恢复另一个线程                     |
+| 资源管理          | 测试结束后关闭 SQLite 连接                           |
+| 回归安全          | 前两课的审批控制流及原有 Report 集成测试继续通过     |
+
+## 五、这一课的架构意义
+
+完成本课后，HITL 的能力将从：
+
+```
+interrupt()
+    ↓
+暂停当前 Graph
+    ↓
+Command(resume=...)
+    ↓
+继续执行
+```
+
+提升为：
+
+```
+正式 Application Graph
+    ↓
+SQLite Checkpoint
+    ↓
+审批暂停状态持久化
+    ↓
+重建 Checkpointer 和 Graph
+    ↓
+恢复同一个 thread_id
+    ↓
+人工审批决定
+    ↓
+批准或拒绝的业务路径
+```
+
+但这还不是完整的生产级审批系统。审批身份认证、权限检查、审批记录的独立审计存储、重复提交处理、超时策略，以及真正跨进程重启的验收，仍然需要后续阶段完成。
