@@ -32,6 +32,7 @@ from app.providers.financial import (
     ValuationResearchProvider,
 )
 from app.providers.unavailable import UnavailableRealProvider
+from app.providers.sina import SinaStockPriceProvider
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,12 @@ def create_provider_bundle(
             stock_price = AkShareStockPriceProvider(client)
             company_info = AkShareCompanyInfoProvider(client)
             income_statement = AkShareIncomeStatementProvider(client)
+        elif resolved.real_provider_source == "sina":
+            # Sina has been verified for A-share quote retrieval only. Do not
+            # imply that its quote endpoint also provides company fundamentals.
+            stock_price = SinaStockPriceProvider()
+            company_info = UnavailableRealProvider("company profile (Sina quote source only)")
+            income_statement = UnavailableRealProvider("annual financial statements (Sina quote source only)")
         else:
             client = AlphaVantageClient(api_key=os.getenv("ALPHA_VANTAGE_API_KEY"))
             stock_price = AlphaVantageStockPriceProvider(client)

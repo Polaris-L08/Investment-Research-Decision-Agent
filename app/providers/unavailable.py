@@ -1,4 +1,4 @@
-"""Fail-closed placeholders for real providers not implemented yet in M7."""
+"""Fail-closed placeholders for real capabilities without a configured adapter."""
 
 from app.providers.config import ProviderConfigurationError
 
@@ -11,9 +11,12 @@ class UnavailableRealProvider:
 
     def _raise(self):
         raise ProviderConfigurationError(
-            f"Real provider capability {self._capability!r} is not implemented yet. "
-            "No Mock fallback was used; implement its real adapter in a later M7 lesson."
+            f"No real provider adapter is configured for capability {self._capability!r}. "
+            "No Mock fallback was used."
         )
+
+    def get_company_info(self, ticker: str):
+        self._raise()
 
     def get_revenue(self, ticker: str):
         self._raise()

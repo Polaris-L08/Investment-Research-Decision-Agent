@@ -1,7 +1,8 @@
 """Manually verify the configured real provider with a live request.
 
 Alpha Vantage: REAL_PROVIDER_SOURCE=alpha_vantage and ALPHA_VANTAGE_API_KEY set.
-AKShare:       REAL_PROVIDER_SOURCE=akshare (no API key; use a six-digit A-share code).
+AKShare:       REAL_PROVIDER_SOURCE=akshare (A-share quote/profile/financial adapters).
+Sina Finance:  REAL_PROVIDER_SOURCE=sina (A-share quote only; six-digit code).
 Usage:         python scripts/smoke_test_real_providers.py [ticker]
 """
 
@@ -21,13 +22,24 @@ def main() -> int:
     if settings.mode != "real":
         parser.error("Set PROVIDER_MODE=real in .env before running this smoke test.")
 
-    ticker = args.ticker or ("000001" if settings.real_provider_source == "akshare" else "AAPL")
+    default_tickers = {
+        "alpha_vantage": "AAPL",
+        "akshare": "000001",
+        "sina": "600000",
+    }
+    ticker = args.ticker or default_tickers[settings.real_provider_source]
     bundle = create_provider_bundle(settings)
     print("Provider bundle:", bundle.mode)
     print("Provider source:", settings.real_provider_source)
     print("Ticker:", ticker)
     print("Stock quote:")
     print(json.dumps(bundle.stock_price.get_stock_price(ticker), indent=2, ensure_ascii=False))
+    if settings.real_provider_source == "sina":
+        print("Company profile: intentionally unavailable for source 'sina'.")
+        print("Annual financials: intentionally unavailable for source 'sina'.")
+        print("This smoke test validates quote connectivity only; it does not imply full data coverage.")
+        return 0
+
     print("Company profile:")
     print(json.dumps(bundle.company_info.get_company_info(ticker), indent=2, ensure_ascii=False))
     print("Latest annual financials:")
