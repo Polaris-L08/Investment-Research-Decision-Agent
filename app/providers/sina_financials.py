@@ -30,7 +30,7 @@ class SinaFinancialStatementClient:
             raise ProviderConfigurationError(
                 "REAL_PROVIDER_SOURCE=sina_baostock requires the optional 'akshare' package "
                 "for Sina's financial-statement parser. Install it with: "
-                "python -m pip install -r requirements-akshare.txt"
+                "python -m pip install -e \".[real-data]\" (or install only AKShare with: python -m pip install akshare)"
             ) from exc
         self._ak_module = ak
         return ak

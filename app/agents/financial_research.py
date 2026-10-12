@@ -69,7 +69,7 @@ financial_research_tool_loop = build_tool_loop_graph(
 def extract_tool_results(
     tool_result: dict,
 ) -> str:
-
+    """Return tool output text for the narrative prompt only."""
     tool_messages = [
         message
         for message in tool_result["messages"]

@@ -5,7 +5,17 @@ description = "Investment Research and Decision Agent built with LangGraph"
 requires-python = ">=3.12"
 dependencies = [
     "langgraph",
+    "langchain-core",
     "pydantic>=2.0",
+    "langchain-openai",
+    "python-dotenv",
+    "requests",
+]
+
+[project.optional-dependencies]
+real-data = [
+    "akshare",
+    "baostock",
 ]
 
 [dependency-groups]
@@ -15,7 +25,6 @@ dev = [
     "langgraph",
     "langgraph-checkpoint-sqlite",
     "pydantic>=2.0",
-    "akshare",
 ]
 
 [build-system]

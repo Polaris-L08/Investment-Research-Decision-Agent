@@ -27,7 +27,7 @@ class BaoStockClient:
         except ImportError as exc:
             raise ProviderConfigurationError(
                 "REAL_PROVIDER_SOURCE=sina_baostock requires the optional 'baostock' package. "
-                "Install it with: python -m pip install -r requirements-baostock.txt"
+                "Install the real-data extras with: python -m pip install -e \".[real-data]\" (or install only BaoStock with: python -m pip install baostock)"
             ) from exc
         self._baostock_module = bs
         return bs
