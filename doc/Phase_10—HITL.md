@@ -557,3 +557,290 @@ research_executed 仍然为 False。
 
 本课仅新增隔离的测试 Graph，不改变正式 Application Graph。
 ```
+
+## Lesson 3：使用 `Command(resume=...)` 恢复 Graph，并处理审批结果
+
+Lesson 2 已经验证了最小 Graph 可以通过 `interrupt()` 暂停。本课继续在独立测试 Graph 中实现恢复流程，暂时不修改正式的 `app/application/graph.py`。
+
+本课的目标不是简单地让程序“继续运行”，而是让审批结果真正决定后续业务路径：
+
+- 批准（approve）：恢复 Graph，进入研究节点。
+- 拒绝（reject）：恢复 Graph，但跳过研究节点，进入终止路径。
+- 无效输入：不能被误判为批准，也不能执行研究。
+
+### 一、先理解恢复机制
+
+在 LangGraph 中，`interrupt()` 暂停后，调用方使用同一个 `thread_id` 和 `Command(resume=...)` 传入恢复值。
+
+![P10-L3-1.png](pic/P10-L3-1.png)
+
+有一个容易忽略的细节：恢复时，LangGraph 会重新进入被中断的节点，并从该节点中的 `interrupt()` 调用处接收恢复值。 因此，`interrupt()` 前面的代码可能再次执行。正式项目中，审批节点应尽量保持纯粹，不要在中断前执行扣款、提交订单、发送交易指令等不可重复的副作用。
+
+### 二、设计审批结果的数据契约
+
+我们不直接把恢复值当作可信的业务决定，而是约定一个明确的数据格式。
+
+批准时：
+
+```python
+{
+    "decision": "approve",
+    "reason": "Research request reviewed and approved.",
+}
+```
+
+拒绝时：
+
+```
+{
+    "decision": "reject",
+    "reason": "Research request requires revision.",
+}
+```
+
+本课约定 `decision` 只允许两个有效值：`approve` 和 `reject`。其他值、错误的数据类型或缺失字段一律视为无效审批结果。
+
+这并不意味着真实系统只要校验一个字典就足够安全。生产环境还需要验证审批人的身份、授权范围、审批记录以及请求与审批决定之间的关联。本课先建立正确的 Graph 控制流。
+
+### 三、修改独立测试 Graph
+
+打开上一课创建的 `tests/test_hitl_interrupt.py`，将文件内容替换为下面的版本。它保留中断机制，同时增加批准、拒绝和无效输入三条路径。
+
+```python
+from typing import TypedDict
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
+
+
+class ApprovalTestState(TypedDict, total=False):
+    ticker: str
+    research_task: str
+    approval_status: str
+    approval_reason: str
+    research_executed: bool
+
+
+def approval_gate(state: ApprovalTestState) -> dict:
+    """Pause and validate the resumed approval decision."""
+
+    decision = interrupt(
+        {
+            "type": "research_approval",
+            "ticker": state["ticker"],
+            "research_task": state["research_task"],
+            "reason_for_approval": "The research task requires human approval.",
+            "requested_action": "run_research",
+            "approval_required": True,
+        }
+    )
+
+    # Do not trust the resumed value without validation.
+    if not isinstance(decision, dict):
+        return {
+            "approval_status": "invalid",
+            "approval_reason": "Approval response must be a dictionary.",
+        }
+
+    action = decision.get("decision")
+    reason = decision.get("reason", "")
+
+    if action not in {"approve", "reject"}:
+        return {
+            "approval_status": "invalid",
+            "approval_reason": "Decision must be 'approve' or 'reject'.",
+        }
+
+    if not isinstance(reason, str):
+        return {
+            "approval_status": "invalid",
+            "approval_reason": "Approval reason must be a string.",
+        }
+
+    return {
+        "approval_status": action,
+        "approval_reason": reason,
+    }
+
+
+def run_research(state: ApprovalTestState) -> dict:
+    """Represent research without calling external services."""
+    return {"research_executed": True}
+
+
+def record_rejection(state: ApprovalTestState) -> dict:
+    """Record that the request was rejected."""
+    return {"research_executed": False}
+
+
+def record_invalid_decision(state: ApprovalTestState) -> dict:
+    """Record that the approval response was invalid."""
+    return {"research_executed": False}
+
+
+def route_after_approval(state: ApprovalTestState) -> str:
+    status = state.get("approval_status")
+
+    if status == "approve":
+        return "research"
+    if status == "reject":
+        return "rejected"
+    return "invalid"
+
+
+def build_hitl_test_graph():
+    builder = StateGraph(ApprovalTestState)
+
+    builder.add_node("approval_gate", approval_gate)
+    builder.add_node("research", run_research)
+    builder.add_node("rejected", record_rejection)
+    builder.add_node("invalid", record_invalid_decision)
+
+    builder.add_edge(START, "approval_gate")
+
+    builder.add_conditional_edges(
+        "approval_gate",
+        route_after_approval,
+        {
+            "research": "research",
+            "rejected": "rejected",
+            "invalid": "invalid",
+        },
+    )
+
+    builder.add_edge("research", END)
+    builder.add_edge("rejected", END)
+    builder.add_edge("invalid", END)
+
+    return builder.compile(checkpointer=MemorySaver())
+
+
+def start_paused_graph():
+    graph = build_hitl_test_graph()
+    config = {
+        "configurable": {
+            "thread_id": "hitl-lesson-3-test"
+        }
+    }
+
+    graph.invoke(
+        {
+            "ticker": "AAPL",
+            "research_task": "Analyze financial condition and competition.",
+            "approval_status": "pending",
+            "research_executed": False,
+        },
+        config,
+    )
+
+    return graph, config
+
+
+def test_approve_resumes_and_executes_research():
+    graph, config = start_paused_graph()
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "approve",
+                "reason": "Research request approved.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "approve"
+    assert result["approval_reason"] == "Research request approved."
+    assert result["research_executed"] is True
+
+
+def test_reject_resumes_without_executing_research():
+    graph, config = start_paused_graph()
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "reject",
+                "reason": "Research request needs revision.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "reject"
+    assert result["research_executed"] is False
+
+
+def test_invalid_decision_does_not_execute_research():
+    graph, config = start_paused_graph()
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "maybe",
+                "reason": "Unclear decision.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "invalid"
+    assert result["research_executed"] is False
+
+
+def test_non_dictionary_resume_does_not_execute_research():
+    graph, config = start_paused_graph()
+
+    result = graph.invoke(
+        Command(resume="approve"),
+        config,
+    )
+
+    assert result["approval_status"] == "invalid"
+    assert result["research_executed"] is False
+```
+
+#### 关键代码解读
+
+1. 恢复操作
+
+```python
+graph.invoke(
+    Command(resume={"decision": "approve", "reason": "..."}),
+    config,
+)
+```
+
+这里的 `config` 与第一次调用完全相同，因此恢复的是同一个 `thread_id` 对应的暂停执行，而不是启动一个新的研究请求。
+
+2. 校验发生在 `interrupt()` 之后
+
+```python
+decision = interrupt(payload)
+```
+
+首次执行时，Graph 在这里暂停。恢复时，传入的值成为 `decision`，随后才执行类型和业务值校验。
+
+3. 业务路由与输入校验分离
+
+`approval_gate` 负责校验和写入审批状态；`route_after_approval` 只负责根据已经校验过的状态选择下一节点。这种职责分离有助于后续增加审计、超时、撤销和人工复核逻辑。
+
+4. 拒绝不等于执行研究后再终止
+
+拒绝路径直接进入 `rejected` 节点，然后结束。它不会经过 `research` 节点。无效输入也有独立终止路径，不能默认为批准。
+
+### 四、Lesson 3 验收条件
+
+| 验收项       | 通过标准                                         |
+|--------------|--------------------------------------------------|
+| 恢复机制     | 使用 `Command(resume=...)` 和原 `thread_id` 恢复 |
+| 批准路径     | `approval_status == "approve"`，研究节点执行     |
+| 拒绝路径     | `approval_status == "reject"`，研究节点不执行    |
+| 无效决定     | 非法决定被标记为 `invalid`，不执行研究           |
+| 错误类型输入 | 例如直接传入字符串 `"approve"`，不会绕过校验     |
+| 路由设计     | 审批、研究、拒绝和无效输入的职责清晰分离         |
+
+这些测试全部通过后，Lesson 3 才算完成。
+
+本课暂不修改正式 Application Graph，也不连接真实研究服务。 下一步才会将这套已验证的控制流集成到正式项目，并结合现有 `ApplicationState`、`ApplicationOutputState` 和 `finalize_application()` 设计完整的审批生命周期。
