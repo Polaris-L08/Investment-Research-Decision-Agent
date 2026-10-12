@@ -80,6 +80,10 @@ class ApplicationState(TypedDict, total=False):
     stage_errors: dict[str, str]
     application_error: str
 
+    # Human-in-the-loop approval
+    approval_status: str
+    approval_reason: str
+
 
 class ApplicationOutputState(TypedDict, total=False):
     """Stable public result returned by the production Application Graph."""
@@ -104,3 +108,7 @@ class ApplicationOutputState(TypedDict, total=False):
     report_markdown: str
     report_rendering_error: str
     application_error: str
+
+    # Public approval result
+    approval_status: str
+    approval_reason: str

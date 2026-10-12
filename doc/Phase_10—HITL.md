@@ -844,3 +844,585 @@ decision = interrupt(payload)
 这些测试全部通过后，Lesson 3 才算完成。
 
 本课暂不修改正式 Application Graph，也不连接真实研究服务。 下一步才会将这套已验证的控制流集成到正式项目，并结合现有 `ApplicationState`、`ApplicationOutputState` 和 `finalize_application()` 设计完整的审批生命周期。
+
+## Lesson 4：将 HITL 审批流程集成到正式 Application Graph
+
+Lesson 3 的独立测试已经通过。现在进入正式项目集成阶段。
+
+本课与前两课有一个关键区别：我们不再只验证 `interrupt()` 和 `Command(resume=...)` 的 API，而是要把它们放进真正的投资研究工作流，同时保留 Phase 9 已经完成的业务阶段与错误处理逻辑。
+
+本课原则：先检查现有状态结构和正式 Graph，再做最小必要修改；不重写整个工作流，不调用真实研究服务来代替审批验证。
+
+### 一、本课的目标与边界
+
+本课计划完成：
+
+1. 在正式 Application Graph 中确定并加入审批节点。
+2. 在 `ApplicationState` 中明确表达审批状态。
+3. 将审批节点放在输入校验之后、研究阶段之前。
+4. 让批准路径继续执行原有研究流程。
+5. 让拒绝路径跳过研究、估值、风险评估和投资决策阶段，并安全结束当前申请。
+6. 让审批结果能够通过正式的输出结构体现出来。
+
+本课暂不实现：
+
+- Web 前端、人工审批 UI 或 HTTP 审批 API。
+- 审批人身份认证与授权。
+- 审批超时、撤销、通知和多级审批。
+- 跨进程重启恢复的完整集成测试。
+- 真实研究服务的额外重构。
+
+这些能力不能仅靠在 Graph 中插入一个 `interrupt()` 就算完成；后续需要结合运行时、持久化和调用方逐步落实。
+
+### 二、正式 Graph 的目标拓扑
+
+当前项目的正式业务路径是：
+
+```text
+START
+  ↓
+validate_input
+  ↓
+research
+  ↓
+valuation
+  ↓
+risk
+  ↓
+investment_decision
+  ↓
+report
+  ↓
+finalize
+  ↓
+END
+```
+
+本课在输入校验和研究阶段之间增加 `approval_gate`，并为拒绝和无效审批设置终止路径。
+
+![P10-L4-1.png](pic/P10-L4-1.png)
+
+这里有一个重要的业务边界：这次审批是“是否允许启动研究”，不是“是否批准最终投资决策”。 投资决策仍由原有 `investment_decision` 阶段生成，不与人工研究审批混为一谈。
+
+### 三、State Design：明确审批生命周期
+
+我检查了 Phase 9 源码中的 `app/application/state.py`。它已经区分 `ApplicationInputState`、`ApplicationState` 和 `ApplicationOutputState`，因此本课沿用这个设计，不把内部审批字段全部暴露给调用方。
+
+#### 1. 修改 `app/application/state.py`
+
+在 `ApplicationState` 的 `# Workflow control and normalized error collection` 部分，增加以下字段：
+
+```python
+# Human-in-the-loop approval
+approval_status: str
+approval_reason: str
+```
+
+在 `ApplicationOutputState` 中也增加：
+
+```python
+# Public approval result
+approval_status: str
+approval_reason: str
+```
+
+本课采用以下状态约定：
+
+| `approval_status` | 含义                           |
+|-------------------|--------------------------------|
+| `pending`         | 已通过输入校验，等待人工审批   |
+| `approved`        | 已批准，允许执行研究           |
+| `rejected`        | 已拒绝，不执行研究             |
+| `invalid`         | 恢复值格式错误或审批决定不合法 |
+
+为什么使用 `approved`，而不是直接将状态设为 `approve`？因为前者表示已经确认的状态，后者更适合表达传入的动作。区分两者可以让后续 API、审计记录和持久化结构更清晰。
+
+`approval_reason` 用于保存审批理由；它不是错误消息字段。拒绝属于合法的业务结果，不应被误记为系统异常。
+
+### 四、实现审批节点并接入正式 Graph
+
+打开 `app/application/graph.py`，按照以下四处修改。由于这个文件包含大量已经通过验收的业务逻辑，本课只修改审批相关位置，保留其他阶段的实现。
+
+#### 修改 1：导入 `interrupt`
+
+在现有 LangGraph 导入部分增加：
+
+```python
+from langgraph.types import interrupt
+```
+
+#### 修改 2：让输入校验进入审批阶段
+
+在 `validate_application_input()` 的成功返回字典中，将原有的：
+
+```text
+"current_stage": "research",
+```
+
+改为：
+
+```text
+"current_stage": "approval",
+"approval_status": "pending",
+"approval_reason": "",
+```
+
+其余字段保持不变。
+
+这样，输入校验通过后，State 明确记录了审批状态；输入校验失败则仍然沿用原有错误路径，不会进入审批节点。
+
+#### 修改 3：增加审批节点和路由函数
+
+将下面两个函数放在 `validate_application_input()` 后面、`run_research_stage()` 前面。
+
+```python
+def approval_gate(state: ApplicationState) -> dict[str, Any]:
+    """Pause the Application Graph until the research request is reviewed."""
+
+    decision = interrupt(
+        {
+            "type": "research_approval",
+            "ticker": state["ticker"],
+            "research_task": state["user_query"],
+            "reason_for_approval": (
+                "Human approval is required before investment research starts."
+            ),
+            "requested_action": "run_research",
+            "approval_required": True,
+        }
+    )
+
+    # A resume value is untrusted input and must be validated.
+    if not isinstance(decision, dict):
+        return {
+            "approval_status": "invalid",
+            "approval_reason": "Approval response must be a dictionary.",
+            "current_stage": "approval",
+            "stage_errors": _stage_errors(
+                state, "approval", "Approval response must be a dictionary."
+            ),
+            "application_error": (
+                "Approval failed: response must be a dictionary."
+            ),
+        }
+
+    action = decision.get("decision")
+    reason = decision.get("reason", "")
+
+    if not isinstance(action, str) or action not in {"approve", "reject"}:
+        message = "Decision must be 'approve' or 'reject'."
+        return {
+            "approval_status": "invalid",
+            "approval_reason": message,
+            "current_stage": "approval",
+            "stage_errors": _stage_errors(state, "approval", message),
+            "application_error": f"Approval failed: {message}",
+        }
+
+    if not isinstance(reason, str):
+        message = "Approval reason must be a string."
+        return {
+            "approval_status": "invalid",
+            "approval_reason": message,
+            "current_stage": "approval",
+            "stage_errors": _stage_errors(state, "approval", message),
+            "application_error": f"Approval failed: {message}",
+        }
+
+    if action == "reject":
+        return {
+            "approval_status": "rejected",
+            "approval_reason": reason.strip(),
+            "current_stage": "rejected",
+            "stage_errors": dict(state.get("stage_errors") or {}),
+            "application_error": "",
+        }
+
+    return {
+        "approval_status": "approved",
+        "approval_reason": reason.strip(),
+        "current_stage": "research",
+        "stage_errors": dict(state.get("stage_errors") or {}),
+        "application_error": "",
+    }
+
+
+def route_after_approval(state: ApplicationState) -> str:
+    """Only a valid approval may enter the research stage."""
+    if state.get("approval_status") == "approved":
+        return "continue"
+    return "end"
+```
+
+这里有两项有意的设计：
+
+- 对无效审批输入，记录明确的 `application_error` 和 `stage_errors["approval"]`。
+- 对拒绝结果，保留 `approval_status="rejected"`，但不设置系统错误。这是一个合法的业务终态。
+
+#### 修改 4：更新 `finalize_application()`
+
+在现有 `finalize_application()` 的返回字典中加入：
+
+```python
+"approval_status": state.get("approval_status", ""),
+"approval_reason": state.get("approval_reason", ""),
+```
+
+这样调用方即使拿到的是拒绝结果，也能从正式输出中判断审批状态，而不需要通过解析错误字符串来猜测。
+
+同时，请在 `build_application_graph()` 中注册审批节点，并将输入校验后的连接改为审批节点。
+
+找到：
+
+```text
+builder.add_node("validate_input", validate_application_input)
+builder.add_node("research", run_research_stage)
+```
+
+改为：
+
+```text
+builder.add_node("validate_input", validate_application_input)
+builder.add_node("approval_gate", approval_gate)
+builder.add_node("research", run_research_stage)
+```
+
+然后将原来的输入校验条件边：
+
+```python
+builder.add_conditional_edges(
+    "validate_input",
+    lambda state: "continue" if not state.get("application_error") else "end",
+    {"continue": "research", "end": "finalize"},
+)
+```
+
+替换为：
+
+```python
+builder.add_conditional_edges(
+    "validate_input",
+    lambda state: "continue" if not state.get("application_error") else "end",
+    {"continue": "approval_gate", "end": "finalize"},
+)
+
+builder.add_conditional_edges(
+    "approval_gate",
+    route_after_approval,
+    {"continue": "research", "end": "finalize"},
+)
+```
+
+其他阶段的条件边、节点和 `finalize → END` 保持不变。
+
+### 五、增加正式 Graph 的集成测试
+
+前两课验证的是独立的最小 Graph。本课必须增加正式 Application Graph 的测试，防止出现“独立测试通过，但正式业务图没有正确接入审批”的问题。
+
+新建 `tests/test_application_hitl.py`。
+
+下面的测试会 mock 研究阶段，不会调用真实研究 Agent、LLM 或外部 Provider。
+
+```python
+import app.application.graph as application_graph_module
+from langgraph.checkpoint.memory import MemorySaver
+
+from app.application.graph import build_application_graph
+
+
+def build_paused_application(monkeypatch):
+    research_calls = []
+
+    def fake_research(state):
+        research_calls.append(state["ticker"])
+        # Stop at the research boundary so downstream business stages
+        # are not part of this HITL integration test.
+        return {
+            "current_stage": "research",
+            "stage_errors": {
+                **dict(state.get("stage_errors") or {}),
+                "research": "Stopped by test double.",
+            },
+            "application_error": "research failed: Stopped by test double.",
+        }
+
+    monkeypatch.setattr(
+        application_graph_module,
+        "run_research_stage",
+        fake_research,
+    )
+
+    graph = build_application_graph(checkpointer=MemorySaver())
+    config = {
+        "configurable": {
+            "thread_id": "application-hitl-test"
+        }
+    }
+
+    graph.invoke(
+        {
+            "ticker": "AAPL",
+            "user_query": "Analyze the company's financial condition.",
+        },
+        config,
+    )
+
+    return graph, config, research_calls
+
+
+def test_application_graph_pauses_before_research(monkeypatch):
+    graph, config, research_calls = build_paused_application(monkeypatch)
+
+    snapshot = graph.get_state(config)
+    pending_interrupts = [
+        interrupt
+        for task in snapshot.tasks
+        for interrupt in task.interrupts
+    ]
+
+    assert pending_interrupts
+    payload = pending_interrupts[0].value
+
+    assert payload["type"] == "research_approval"
+    assert payload["ticker"] == "AAPL"
+    assert payload["requested_action"] == "run_research"
+    assert snapshot.values["approval_status"] == "pending"
+    assert research_calls == []
+
+
+def test_application_graph_approval_enters_research(monkeypatch):
+    graph, config, research_calls = build_paused_application(monkeypatch)
+
+    result = graph.invoke(
+        {
+            "__resume_not_used__": True
+        },
+        config,
+    ) if False else graph.invoke(
+        __import__("langgraph.types", fromlist=["Command"]).Command(
+            resume={
+                "decision": "approve",
+                "reason": "Research approved for execution.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "approved"
+    assert result["approval_reason"] == "Research approved for execution."
+    assert research_calls == ["AAPL"]
+
+
+def test_application_graph_rejection_skips_research(monkeypatch):
+    graph, config, research_calls = build_paused_application(monkeypatch)
+
+    from langgraph.types import Command
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "reject",
+                "reason": "Request needs clarification.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "rejected"
+    assert result["approval_reason"] == "Request needs clarification."
+    assert result["application_error"] == ""
+    assert research_calls == []
+
+
+def test_application_graph_invalid_decision_skips_research(monkeypatch):
+    graph, config, research_calls = build_paused_application(monkeypatch)
+
+    from langgraph.types import Command
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "maybe",
+                "reason": "Unclear decision.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "invalid"
+    assert "Approval failed" in result["application_error"]
+    assert research_calls == []
+```
+
+在运行前，请将第二个测试中的恢复调用简化为普通导入。为了避免使用不必要的动态导入，请在文件顶部增加：
+
+```python
+from langgraph.types import Command
+```
+
+然后将 `test_application_graph_approval_enters_research()` 的恢复部分替换为：
+
+```python
+result = graph.invoke(
+    Command(
+        resume={
+            "decision": "approve",
+            "reason": "Research approved for execution.",
+        }
+    ),
+    config,
+)
+```
+
+这是最终推荐版本。
+
+#### 为什么要 mock 研究阶段？
+
+本课只验收审批控制流。假如测试调用真实研究阶段，失败可能来自 LLM、数据源、研究计划生成或其他业务依赖，就无法准确判断 HITL 本身是否正确。
+
+测试中的 mock 会记录研究节点是否被调用，因此我们可以直接验证：
+
+- 批准：研究节点调用一次。
+- 拒绝：研究节点调用零次。
+- 无效审批：研究节点调用零次。
+
+这比仅仅断言 `approval_status` 更有价值，因为它验证的是实际的执行路径。
+
+为方便直接复制，下面是整理后的 `tests/test_application_hitl.py` 完整版本。请以这个版本为准，避免保留上面示例中用于说明的临时写法。
+
+```python
+import app.application.graph as application_graph_module
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+
+from app.application.graph import build_application_graph
+
+
+def build_paused_application(monkeypatch):
+    research_calls = []
+
+    def fake_research(state):
+        research_calls.append(state["ticker"])
+        return {
+            "current_stage": "research",
+            "stage_errors": {
+                **dict(state.get("stage_errors") or {}),
+                "research": "Stopped by test double.",
+            },
+            "application_error": "research failed: Stopped by test double.",
+        }
+
+    monkeypatch.setattr(
+        application_graph_module,
+        "run_research_stage",
+        fake_research,
+    )
+
+    graph = build_application_graph(checkpointer=MemorySaver())
+    config = {
+        "configurable": {
+            "thread_id": "application-hitl-test"
+        }
+    }
+
+    graph.invoke(
+        {
+            "ticker": "AAPL",
+            "user_query": "Analyze the company's financial condition.",
+        },
+        config,
+    )
+
+    return graph, config, research_calls
+
+
+def test_application_graph_pauses_before_research(monkeypatch):
+    graph, config, research_calls = build_paused_application(monkeypatch)
+
+    snapshot = graph.get_state(config)
+    pending_interrupts = [
+        item
+        for task in snapshot.tasks
+        for item in task.interrupts
+    ]
+
+    assert pending_interrupts
+    payload = pending_interrupts[0].value
+
+    assert payload["type"] == "research_approval"
+    assert payload["ticker"] == "AAPL"
+    assert payload["requested_action"] == "run_research"
+    assert snapshot.values["approval_status"] == "pending"
+    assert research_calls == []
+
+
+def test_application_graph_approval_enters_research(monkeypatch):
+    graph, config, research_calls = build_paused_application(monkeypatch)
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "approve",
+                "reason": "Research approved for execution.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "approved"
+    assert result["approval_reason"] == "Research approved for execution."
+    assert research_calls == ["AAPL"]
+
+
+def test_application_graph_rejection_skips_research(monkeypatch):
+    graph, config, research_calls = build_paused_application(monkeypatch)
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "reject",
+                "reason": "Request needs clarification.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "rejected"
+    assert result["approval_reason"] == "Request needs clarification."
+    assert result["application_error"] == ""
+    assert research_calls == []
+
+
+def test_application_graph_invalid_decision_skips_research(monkeypatch):
+    graph, config, research_calls = build_paused_application(monkeypatch)
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "maybe",
+                "reason": "Unclear decision.",
+            }
+        ),
+        config,
+    )
+
+    assert result["approval_status"] == "invalid"
+    assert "Approval failed" in result["application_error"]
+    assert research_calls == []
+```
+
+### 七、Lesson 4 验收标准
+
+| 验收项          | 通过条件                                               |
+|-----------------|--------------------------------------------------------|
+| 正式 Graph 接入 | `approval_gate` 位于输入校验与研究阶段之间             |
+| State 完整性    | 内部状态包含审批状态和审批理由                         |
+| 输出契约        | `ApplicationOutputState` 能返回审批结果                |
+| 中断行为        | 首次调用暂停在审批节点                                 |
+| 批准路径        | 研究节点被调用一次                                     |
+| 拒绝路径        | 研究节点不被调用，输出 `rejected`                      |
+| 无效输入        | 输出 `invalid`，并记录明确错误                         |
+| 原有业务链      | 未审批通过时，估值、风险、投资决策和报告阶段均不会执行 |
+| 回归测试        | 新增 HITL 测试及 Report Graph 集成测试全部通过         |
+
+现在先完成代码修改并运行上面的命令。 把测试结果发给我；如果失败，请提供完整 traceback。我们会先修复正式 Graph 的集成问题，再决定是否完成 Lesson 4，不提前进入下一课。

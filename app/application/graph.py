@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from app.agents.investment_decision import investment_decision_graph
 from app.agents.models import (
@@ -113,10 +114,92 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
     return {
         "ticker": ticker.strip().upper(),
         "user_query": user_query.strip(),
+        "current_stage": "approval",
+        "approval_status": "pending",
+        "approval_reason": "",
+        "stage_errors": dict(state.get("stage_errors") or {}),
+        "application_error": "",
+    }
+
+
+
+def approval_gate(state: ApplicationState) -> dict[str, Any]:
+    """Pause the Application Graph until the research request is reviewed."""
+
+    decision = interrupt(
+        {
+            "type": "research_approval",
+            "ticker": state["ticker"],
+            "research_task": state["user_query"],
+            "reason_for_approval": (
+                "Human approval is required before investment research starts."
+            ),
+            "requested_action": "run_research",
+            "approval_required": True,
+        }
+    )
+
+    # A resume value is untrusted input and must be validated.
+    if not isinstance(decision, dict):
+        return {
+            "approval_status": "invalid",
+            "approval_reason": "Approval response must be a dictionary.",
+            "current_stage": "approval",
+            "stage_errors": _stage_errors(
+                state, "approval", "Approval response must be a dictionary."
+            ),
+            "application_error": (
+                "Approval failed: response must be a dictionary."
+            ),
+        }
+
+    action = decision.get("decision")
+    reason = decision.get("reason", "")
+
+    if not isinstance(action, str) or action not in {"approve", "reject"}:
+        message = "Decision must be 'approve' or 'reject'."
+        return {
+            "approval_status": "invalid",
+            "approval_reason": message,
+            "current_stage": "approval",
+            "stage_errors": _stage_errors(state, "approval", message),
+            "application_error": f"Approval failed: {message}",
+        }
+
+    if not isinstance(reason, str):
+        message = "Approval reason must be a string."
+        return {
+            "approval_status": "invalid",
+            "approval_reason": message,
+            "current_stage": "approval",
+            "stage_errors": _stage_errors(state, "approval", message),
+            "application_error": f"Approval failed: {message}",
+        }
+
+    if action == "reject":
+        return {
+            "approval_status": "rejected",
+            "approval_reason": reason.strip(),
+            "current_stage": "rejected",
+            "stage_errors": dict(state.get("stage_errors") or {}),
+            "application_error": "",
+        }
+
+    return {
+        "approval_status": "approved",
+        "approval_reason": reason.strip(),
         "current_stage": "research",
         "stage_errors": dict(state.get("stage_errors") or {}),
         "application_error": "",
     }
+
+
+def route_after_approval(state: ApplicationState) -> str:
+    """Only a valid approval may enter the research stage."""
+    if state.get("approval_status") == "approved":
+        return "continue"
+    return "end"
+
 
 
 def run_research_stage(state: ApplicationState) -> dict[str, Any]:
@@ -495,6 +578,8 @@ def finalize_application(state: ApplicationState) -> dict[str, Any]:
         "report_generation_error": state.get("report_generation_error", ""),
         "report_merge_error": state.get("report_merge_error", ""),
         "application_error": state.get("application_error", ""),
+        "approval_status": state.get("approval_status", ""),
+        "approval_reason": state.get("approval_reason", ""),
     }
 
 
@@ -506,7 +591,9 @@ def build_application_graph(*, checkpointer: Any = None):
         output_schema=ApplicationOutputState,
     )
     builder.add_node("validate_input", validate_application_input)
+    builder.add_node("approval_gate", approval_gate)
     builder.add_node("research", run_research_stage)
+
     builder.add_node("valuation", run_valuation_stage)
     builder.add_node("risk", run_risk_stage)
     builder.add_node("investment_decision", run_decision_stage)
@@ -518,6 +605,11 @@ def build_application_graph(*, checkpointer: Any = None):
     builder.add_conditional_edges(
         "validate_input",
         lambda state: "continue" if not state.get("application_error") else "end",
+        {"continue": "approval_gate", "end": "finalize"},
+    )
+    builder.add_conditional_edges(
+        "approval_gate",
+        route_after_approval,
         {"continue": "research", "end": "finalize"},
     )
     builder.add_conditional_edges(
