@@ -33,6 +33,8 @@ from app.providers.financial import (
 )
 from app.providers.unavailable import UnavailableRealProvider
 from app.providers.sina import SinaStockPriceProvider
+from app.providers.baostock import BaoStockClient, BaoStockCompanyInfoProvider
+from app.providers.sina_financials import SinaFinancialStatementClient, SinaIncomeStatementProvider
 
 
 @dataclass(frozen=True)
@@ -77,11 +79,16 @@ def create_provider_bundle(
             company_info = AkShareCompanyInfoProvider(client)
             income_statement = AkShareIncomeStatementProvider(client)
         elif resolved.real_provider_source == "sina":
-            # Sina has been verified for A-share quote retrieval only. Do not
-            # imply that its quote endpoint also provides company fundamentals.
+            # Keep the already verified quote-only option behavior stable.
             stock_price = SinaStockPriceProvider()
             company_info = UnavailableRealProvider("company profile (Sina quote source only)")
             income_statement = UnavailableRealProvider("annual financial statements (Sina quote source only)")
+        elif resolved.real_provider_source == "sina_baostock":
+            # Explicit composite: Sina provides quote + annual income statement;
+            # BaoStock provides company metadata. No implicit Mock fallback.
+            stock_price = SinaStockPriceProvider()
+            company_info = BaoStockCompanyInfoProvider(BaoStockClient())
+            income_statement = SinaIncomeStatementProvider(SinaFinancialStatementClient())
         else:
             client = AlphaVantageClient(api_key=os.getenv("ALPHA_VANTAGE_API_KEY"))
             stock_price = AlphaVantageStockPriceProvider(client)

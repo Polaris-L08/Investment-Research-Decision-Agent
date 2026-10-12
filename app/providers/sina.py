@@ -130,7 +130,30 @@ class SinaStockPriceProvider(StockPriceProvider):
                 f"Sina Finance returned {len(fields)} quote fields for {code}; expected at least 32."
             )
 
-        price = _required_positive_number(fields[3], code, "price")
+        # Sina may publish 0.00 as the current-price field outside the trading
+        # session (for example, before the market opens). In that case the
+        # previous-close field is a valid last-known reference price, but it
+        # must be explicitly marked so downstream consumers do not mistake it
+        # for a live current price.
+        raw_current_price = fields[3].strip()
+        try:
+            current_price = float(raw_current_price)
+        except (TypeError, ValueError) as exc:
+            raise TransientProviderError(
+                f"Sina Finance returned an invalid price for {code}."
+            ) from exc
+
+        if not math.isfinite(current_price) or current_price < 0:
+            raise TransientProviderError(
+                f"Sina Finance returned a non-finite or negative price for {code}."
+            )
+        if current_price == 0:
+            price = _required_positive_number(fields[2], code, "previous_close")
+            price_basis = "previous_close"
+        else:
+            price = current_price
+            price_basis = "current"
+
         trading_date = fields[30].strip() or None
         trading_time = fields[31].strip() or None
         observed_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -144,6 +167,7 @@ class SinaStockPriceProvider(StockPriceProvider):
         result: dict[str, Any] = {
             "ticker": code,
             "price": price,
+            "price_basis": price_basis,
             "latest_trading_day": trading_date,
             "observed_at": observed_at,
             "currency": "CNY",

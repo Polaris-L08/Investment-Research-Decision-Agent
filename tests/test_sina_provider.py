@@ -56,6 +56,7 @@ def test_sina_quote_parses_price_date_volume_and_turnover():
     assert result["ticker"] == "600000"
     assert result["company_name"] == "浦发银行"
     assert result["price"] == 9.54
+    assert result["price_basis"] == "current"
     assert result["latest_trading_day"] == "2026-10-09"
     assert result["source_timestamp"] == "2026-10-09 15:34:59"
     assert result["volume_shares"] == 94795849.0
@@ -98,10 +99,23 @@ def test_sina_rejects_empty_or_mismatched_response():
         mismatch.get_stock_price("600000")
 
 
-def test_sina_rejects_non_positive_price():
+def test_sina_uses_previous_close_when_current_price_is_zero():
+    fields = ["浦发银行", "0", "9.540", "0", "0", "0", "0", "0", "0", "0"]
+    fields += ["0", "0"] * 10
+    fields += ["2026-10-09", "15:34:59", "00"]
+    body = quote_body(payload=",".join(fields))
+    provider = SinaStockPriceProvider(SinaFinanceClient(opener=fake_opener(body)))
+
+    result = provider.get_stock_price("600000")
+
+    assert result["price"] == 9.54
+    assert result["price_basis"] == "previous_close"
+
+
+def test_sina_rejects_non_positive_price_when_previous_close_is_also_unavailable():
     body = quote_body(payload=",".join(["浦发银行", "0", "0", "0"] + ["0"] * 29))
     provider = SinaStockPriceProvider(SinaFinanceClient(opener=fake_opener(body)))
-    with pytest.raises(TransientProviderError, match="non-positive"):
+    with pytest.raises(TransientProviderError, match="previous_close"):
         provider.get_stock_price("600000")
 
 

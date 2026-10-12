@@ -3,6 +3,7 @@
 Alpha Vantage: REAL_PROVIDER_SOURCE=alpha_vantage and ALPHA_VANTAGE_API_KEY set.
 AKShare:       REAL_PROVIDER_SOURCE=akshare (A-share quote/profile/financial adapters).
 Sina Finance:  REAL_PROVIDER_SOURCE=sina (A-share quote only; six-digit code).
+Sina+BaoStock: REAL_PROVIDER_SOURCE=sina_baostock (Sina quote/income statement; BaoStock company metadata).
 Usage:         python scripts/smoke_test_real_providers.py [ticker]
 """
 
@@ -15,7 +16,7 @@ from app.providers.factory import create_provider_bundle
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("ticker", nargs="?", default=None, help="ticker symbol/code; defaults to AAPL for Alpha Vantage or 000001 for AKShare")
+    parser.add_argument("ticker", nargs="?", default=None, help="ticker symbol/code; defaults to AAPL for Alpha Vantage or 600000 for A-share sources")
     args = parser.parse_args()
 
     settings = ProviderSettings.from_env()
@@ -26,6 +27,7 @@ def main() -> int:
         "alpha_vantage": "AAPL",
         "akshare": "000001",
         "sina": "600000",
+        "sina_baostock": "600000",
     }
     ticker = args.ticker or default_tickers[settings.real_provider_source]
     bundle = create_provider_bundle(settings)

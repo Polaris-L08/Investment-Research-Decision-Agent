@@ -32,9 +32,9 @@ class ProviderSettings:
             raise ProviderConfigurationError(
                 "PROVIDER_MODE must be either 'mock' or 'real'."
             )
-        if self.real_provider_source not in {"alpha_vantage", "akshare", "sina"}:
+        if self.real_provider_source not in {"alpha_vantage", "akshare", "sina", "sina_baostock"}:
             raise ProviderConfigurationError(
-                "REAL_PROVIDER_SOURCE must be one of: alpha_vantage, akshare, sina."
+                "REAL_PROVIDER_SOURCE must be one of: alpha_vantage, akshare, sina, sina_baostock."
             )
         if self.app_env == "production" and self.mode == "mock":
             raise ProviderConfigurationError(
