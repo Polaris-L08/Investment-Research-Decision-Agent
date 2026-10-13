@@ -56,7 +56,8 @@ financial_research_prompt = ChatPromptTemplate.from_messages(
 
 structured_financial_research_llm = (
     llm.with_structured_output(
-        FinancialResearchResult
+        FinancialResearchResult,
+        method="function_calling"
     )
 )
 

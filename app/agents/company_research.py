@@ -51,7 +51,7 @@ company_research_prompt = ChatPromptTemplate.from_messages(
 
 
 structured_company_research_llm = (
-    llm.with_structured_output(CompanyResearchResult)
+    llm.with_structured_output(CompanyResearchResult, method="function_calling")
 )
 
 company_research_tool_loop = build_tool_loop_graph(COMPANY_RESEARCH_TOOLS)

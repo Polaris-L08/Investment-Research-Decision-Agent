@@ -51,7 +51,7 @@ research_planner_prompt = ChatPromptTemplate.from_messages(
 
 
 structured_research_planner_llm = (
-    llm.with_structured_output(ResearchPlan)
+    llm.with_structured_output(ResearchPlan, method="function_calling")
 )
 
 

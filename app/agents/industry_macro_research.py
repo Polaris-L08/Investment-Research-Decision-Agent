@@ -58,7 +58,8 @@ industry_macro_research_tool_loop = build_tool_loop_graph(
 
 
 structured_industry_macro_research_llm = llm.with_structured_output(
-    IndustryMacroResearchResult
+    IndustryMacroResearchResult,
+    method="function_calling"
 )
 
 

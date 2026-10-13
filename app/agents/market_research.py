@@ -59,7 +59,8 @@ market_research_tool_loop = build_tool_loop_graph(
 
 
 structured_market_research_llm = llm.with_structured_output(
-    MarketResearchResult
+    MarketResearchResult,
+    method="function_calling"
 )
 
 
