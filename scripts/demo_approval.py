@@ -12,6 +12,52 @@ from app.graph.runtime import (
 )
 
 
+def inspect_checkpoint(graph, config, label: str) -> None:
+    """打印当前 Thread 的最新状态快照和部分历史记录。"""
+    print(f"\n{'=' * 20} {label} {'=' * 20}")
+
+    snapshot = graph.get_state(config)
+
+    print("\n[Latest Snapshot]")
+    print("values:")
+    print(snapshot.values)
+
+    print("\nnext:")
+    print(snapshot.next)
+
+    print("\nconfig:")
+    print(snapshot.config)
+
+    print("\nmetadata:")
+    print(snapshot.metadata)
+
+    print("\ncreated_at:")
+    print(snapshot.created_at)
+
+    configurable = snapshot.config.get("configurable", {})
+    print("\nthread_id:")
+    print(configurable.get("thread_id"))
+
+    print("\ncheckpoint_id:")
+    print(configurable.get("checkpoint_id"))
+
+    print("\n[Checkpoint History]")
+    for index, history_snapshot in enumerate(
+        graph.get_state_history(config)
+    ):
+        history_config = history_snapshot.config.get(
+            "configurable", {}
+        )
+
+        print(
+            f"{index}: "
+            f"thread_id={history_config.get('thread_id')}, "
+            f"checkpoint_id={history_config.get('checkpoint_id')}, "
+            f"created_at={history_snapshot.created_at}, "
+            f"next={history_snapshot.next}"
+        )
+
+
 def print_json(title: str, data) -> None:
     print(f"\n{'=' * 20} {title} {'=' * 20}")
     print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
@@ -53,6 +99,12 @@ def main() -> None:
 
     # 首次执行：预期工作流运行至人工审批节点后暂停。
     result = graph.invoke(initial_state, config=config)
+
+    inspect_checkpoint(
+        graph,
+        config,
+        "After initial invocation / approval interrupt",
+    )
 
     interrupts = result.get("__interrupt__", ())
 
@@ -101,6 +153,12 @@ def main() -> None:
     final_result = graph.invoke(
         Command(resume=approval_payload),
         config=config,
+    )
+
+    inspect_checkpoint(
+        graph,
+        config,
+        "After approval resume",
     )
 
     print_json(
