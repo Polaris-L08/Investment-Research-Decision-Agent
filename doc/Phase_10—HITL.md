@@ -1772,3 +1772,458 @@ SQLite Checkpoint
 ```
 
 但这还不是完整的生产级审批系统。审批身份认证、权限检查、审批记录的独立审计存储、重复提交处理、超时策略，以及真正跨进程重启的验收，仍然需要后续阶段完成。
+
+
+# Phase 10 深化
+
+我们正式调整教学方式，从 P10-D2 的 API 深度补课开始。此前已经通过的实验继续保留；当前先把 `interrupt()`、`Command()` 和恢复机制的核心概念建立起来，再继续实验和后续课程。
+
+本课目标不是再测试几个边界，而是让你能够看懂 LangGraph 的中断与恢复代码，理解每种调用方式为什么存在，以及在投资研究 Agent 中应该怎么选。
+
+## P10-D2（深化版）：`interrupt()` 与 `Command()` 系统性解析
+
+### 一、先建立整体心智模型
+
+一个 LangGraph 人工介入流程，可以理解为三个阶段：
+
+![P10-D2-1.png](pic/P10-D2-1.png)
+
+这里有三个关键点：
+
+1. `interrupt()` 不是普通的 Python `input()`，它将控制权交还给 Graph 调用方。
+2. 中断信息与 Graph State 是不同的概念。中断载荷可以描述问题，但不会因为传入 `interrupt()` 就自动变成业务状态字段。
+3. 恢复不是把 Python 函数的执行栈原封不动地冻结再唤醒。LangGraph 会重新执行被中断的节点，因此中断之前的代码可能再次运行。
+
+第三点已经在你完成的 P10-D1 实验中得到验证。
+
+### 五、把 API 放回投资研究 Agent：应该怎么设计？
+
+假设我们的 Agent 正在研究 AAPL，完成初步分析后，需要人工批准是否继续进行估值和风险分析。
+
+节点可以这样设计：
+
+```
+from langgraph.types import interruptdef approval_node(state):    approval_request = {        "request_id": state["request_id"],        "ticker": state["ticker"],        "question": "是否批准继续进行研究？",        "allowed_decisions": ["approve", "reject"],    }    response = interrupt(approval_request)    if response["decision"] == "reject":        return {            "approval_status": "rejected",            "approval_reason": response["reason"],        }    return {        "approval_status": "approved",        "approval_reason": response["reason"],    }
+```
+
+这段代码展示了 API 的基本用法，但还不是完整的工业级实现：它没有验证恢复数据，也没有检查操作者权限，且假设 `request_id`、`ticker` 和相关状态字段已经存在。
+
+后续我们会进一步把这些能力集成进正式 Application Graph，而不是停留在独立教学脚本。
+
+### 六、一个重要的进阶知识：`response_schema`
+
+我们前面手写了 `validate_resume_value()`，但当前版本的 LangGraph 还提供了 `interrupt()` 的 `response_schema` 参数，可以对恢复值进行类型验证。
+
+官方当前文档指出，这项能力要求 `langgraph>=1.2.12`。传入 Pydantic 模型、`TypedDict` 或 dataclass 时，可以由框架根据类型定义生成 Schema，并验证恢复数据；传入普通 JSON Schema 字典时，则不会自动校验恢复值。
+
+例如：
+
+```python
+from langgraph.types import interrupt
+
+def approval_node(state):
+    approval_request = {
+        "request_id": state["request_id"],
+        "ticker": state["ticker"],
+        "question": "是否批准继续进行研究？",
+        "allowed_decisions": ["approve", "reject"],
+    }
+
+    response = interrupt(approval_request)
+
+    if response["decision"] == "reject":
+        return {
+            "approval_status": "rejected",
+            "approval_reason": response["reason"],
+        }
+
+    return {
+        "approval_status": "approved",
+        "approval_reason": response["reason"],
+    }
+```
+
+这里还有一个需要注意的地方：这个模型只验证字段类型，并没有限制 `decision` 只能是 `approve` 或 `reject`。如果要强制限制取值，应使用 Pydantic 的 `Literal` 或枚举等约束，并且仍需单独实现业务授权检查。
+
+这项能力也为我们重新理解 P10-D2 提供了方向：之前手动校验后抛出 `ValueError`，导致当前环境的检查点状态与原先预期不符。我们应该进一步比较手动校验与框架提供的恢复值 Schema 验证，而不是只修改断言。
+
+---
+
+继续。我们进入 P10-D2 的下一部分：系统学习 `Command` 的四个参数，以及它们在 LangGraph 中的调用位置和执行语义。
+
+先说明一下课程衔接：上一条我给出了 `response_schema` 实验脚本，但你还没有在当前对话中反馈运行结果。因此，我们可以继续学习 API 理论，但暂时不把该实验标记为通过。后续会根据实际输出完成验收。
+
+## P10-D2 · `Command` 深入解析
+
+### 一、先理解：`Command` 是什么？
+
+`Command` 是 LangGraph 提供的一种控制对象。它可以携带状态更新、执行路由或恢复信息。它不是普通的业务字典，也不是所有场景下都能随意替换 `dict` 的通用容器。
+
+你本地版本的真实签名是：
+
+```python
+Command(
+    *,
+    graph=None,
+    update=None,
+    resume=None,
+    goto=(),
+)
+```
+
+四个参数分别是：
+
+- `update`：携带状态更新。
+- `goto`：指定下一步执行的节点或任务。
+- `resume`：向 `interrupt()` 提供恢复值。
+- `graph`：指定命令作用的图层级。
+
+最重要的第一条规则是：要看 `Command` 被用在什么位置。
+
+ - **场景 A：从外部调用 Graph**
+
+```python
+graph.invoke(Command(resume=...), config=config)
+```
+
+典型用途是恢复已暂停的 Graph。
+
+ - **场景 B：节点返回 `Command`**
+
+```python
+def some_node(state):
+    return Command(update=..., goto=...)
+```
+
+典型用途是让节点同时提交状态更新与控制流决策。
+
+这两种场景不能混为一谈。尤其是 `update` 和 `goto`，我们主要通过节点返回它们来使用；而 `resume` 则用于向已经暂停的 Graph 提供恢复值。
+
+### 二、`update`：状态更新，不是直接修改原始字典
+
+先看一个普通节点：
+
+```python
+def research_node(state):
+    return {
+        "research_status": "completed",
+        "research_summary": "公司收入持续增长",
+    }
+```
+
+这里返回字典，LangGraph 会把它当作节点的状态更新。
+
+如果改成：
+
+```python
+from langgraph.types import Command
+
+def research_node(state):
+    return Command(
+        update={
+            "research_status": "completed",
+            "research_summary": "公司收入持续增长",
+        }
+    )
+```
+
+状态更新的含义基本相同，但现在返回的是 `Command`，它还可以携带 `goto` 等控制信息。官方将它描述为把状态更新与控制流组合在一起的机制。
+
+
+#### 状态更新有三个重要规则
+
+**规则 1：只更新需要修改的字段。**
+
+假设当前 State 是：
+
+```python
+{
+    "ticker": "AAPL",
+    "research_status": "pending",
+    "research_summary": "",
+}
+```
+
+节点只返回：
+
+```
+{"research_status": "completed"}
+```
+
+这通常意味着更新 `research_status`，而不是把整个 State 替换成只有一个字段的字典。
+
+**规则 2：状态更新遵循 channel 和 reducer 规则。**
+
+普通字段通常采用新值覆盖的语义；如果某个字段定义了 reducer，例如用于合并列表的 reducer，那么更新结果可能是追加或合并，而不是简单覆盖。
+
+**规则 3：返回 `Command(update=...)` 不等于立即执行外部操作。**
+
+它只是向 LangGraph 提交状态更新指令。真正的外部副作用仍然需要由节点代码、工具或服务执行。
+
+### 三、`goto`：节点自己决定下一步执行什么
+
+这才是 `Command` 与普通字典返回值之间最重要的差别之一。
+
+假设投资研究流程有以下节点：
+
+![P10-D2-2.png](pic/P10-D2-2.png)
+
+可以让风险节点直接返回：
+
+```python
+def risk_assessment(state):
+    if state["risk_level"] == "high":
+        return Command(
+            update={"decision_path": "manual_review"},
+            goto="manual_review",
+        )
+
+    return Command(
+        update={"decision_path": "standard"},
+        goto="investment_decision",
+    )
+```
+
+注意：这里的 `goto` 指定的是 LangGraph 中注册的节点名称，不是 Python 函数名称，也不是 URL。
+
+#### `goto` 与条件边有什么区别？
+
+| 方式                      | 适合的场景                                 |
+|---------------------------|--------------------------------------------|
+| `add_conditional_edges()` | 把路由规则与节点逻辑分开，路由关系集中定义 |
+| `Command(goto=...)`       | 节点需要同时提交状态更新和动态路由         |
+| 静态 `add_edge()`         | 后续节点固定，不需要动态判断               |
+
+一个很重要的陷阱：如果节点已经通过 `Command(goto="manual_review")` 动态路由，同时又给这个节点配置了静态边，例如 `add_edge("risk_assessment", "investment_decision")`，两条路径可能都会被执行。
+
+因此，使用 `Command(goto=...)` 作为动态路由时，不应再为同一个节点配置与之冲突的静态后续边。
+
+### 四、`goto` 还有更高级的用法：`Send`
+
+`goto` 不仅能接受一个节点名称，也能接受 `Send` 对象，或由多个节点名称、`Send` 对象组成的序列。
+
+为什么需要 `Send`？
+
+因为有时我们不只是想决定“下一个节点是谁”，还需要为该节点提供独立的输入。这是 LangGraph 实现动态任务分发、并行处理的基础能力之一。
+
+例如，一个投资研究 Agent 可以把不同的研究任务分发出去：
+
+- 基本面研究；
+- 估值分析；
+- 风险分析。
+
+这些任务可能需要不同的输入，甚至在支持的图拓扑中并行执行。
+
+我们先记住这个原则：节点名称决定去哪里，`Send` 还可以携带发给目标节点的输入。 后续学习并行执行、Map-Reduce 和多 Agent 编排时，再单独深入 `Send`，不在这一课里把它和 `Command` 的基础用法混在一起。
+
+### 五、`graph`：为什么会有 `Command.PARENT`？
+
+这个参数主要服务于**嵌套 Graph，也就是子图与父图之间的控制流**。
+
+假设我们将 Agent 拆成：
+
+- 主图 `investment_agent`
+- 子图 `research_subgraph`
+- 子图 `risk_subgraph`
+
+当 `research_subgraph` 内部的某个节点执行到一半时，发现需要将控制权交给主图中的 `manual_review` 节点，普通的 `goto="manual_review"` 默认是在当前图的路由上下文中寻找目标节点。
+
+如果目标节点属于父图，就可以使用：
+
+```python
+return Command(
+    update={"review_reason": "需要人工确认风险假设"},
+    goto="manual_review",
+    graph=Command.PARENT,
+)
+```
+
+`Command.PARENT` 的含义是将命令发送到最近的父图。若同时更新了父图和子图共享的状态字段，还必须考虑父图对应 State channel 的 reducer 配置。
+
+这项能力在多 Agent 协作、子图交接和复杂流程编排中很有用，但它不是普通节点跳转的必要组成部分。我们会在学习子图时用一个完整案例验证。
+
+### 六、四个参数的正确使用位置
+
+这是本节最值得记住的内容。
+
+| 参数     | 通常如何使用                             | 主要用途             |
+|----------|------------------------------------------|----------------------|
+| `resume` | 传入 `graph.invoke()` / `graph.stream()` | 恢复中断             |
+| `update` | 从节点返回                               | 提交状态更新         |
+| `goto`   | 从节点返回                               | 指定后续节点或任务   |
+| `graph`  | 从子图节点返回                           | 指定命令的目标图层级 |
+
+官方文档明确指出，传入 `invoke()` 或 `stream()` 的常规 `Command` 模式是 `Command(resume=...)`；恢复时也可以组合 `update=...`，同时提供恢复值和状态更新。其余参数主要用于节点返回的控制命令。
+
+这里有一个非常容易写错的例子：
+
+```python
+# 不要将它当作普通的多轮对话输入：
+graph.invoke(
+    Command(update={"messages": [...] }),
+    config=config,
+)
+```
+
+如果目的是向已有会话提交一条新的用户消息，通常应该传入普通输入字典：
+
+```python
+graph.invoke(
+    {"messages": [...]},
+    config=config,
+)
+```
+
+原因是传入 `Command` 会让 LangGraph 按照恢复既有执行状态的语义处理输入，而不是简单地把它当作从 `START` 开始的新输入。尤其在 Graph 已经完成时，这种误用会产生看似“卡住”的行为。
+
+### 七、动手实验：验证 `update` 与 `goto`
+
+现在我们用一个很小的独立 Graph 验证前面讲解的知识，不修改正式项目。
+
+创建文件 `scripts/lesson_p10_d2_command_update_goto.py`：
+
+#### 验收条件
+
+1. 高风险场景只执行 `manual_review`，最终 `decision_path` 为 `manual_review`。
+2. 低风险场景只执行 `investment_decision`，最终 `decision_path` 为 `standard`。
+3. 两种场景的 `final_result` 都符合预期。
+4. 脚本最终输出：
+
+```python
+PASS: Command update/goto experiments completed.
+```
+
+运行成功后，请把输出发给我。下一步我们会深入两个进阶主题：`Command(resume=...)` 与 `Command(resume=..., update=...)` 的区别，以及如何使用中断 ID 定向恢复多个中断。这两项会直接帮助你理解正式 Agent 中更复杂的人工审批流程。
+
+---
+
+本次实验通过，`Command(update=..., goto=...)` 的基本行为已经得到验证。
+
+你的实际输出确认了两个重要结论：
+
+- 高风险分支：`risk_assessment` 更新 `decision_path` 后，将控制流交给 `manual_review`。
+- 低风险分支：同一个节点根据风险等级，更新状态并转到 `investment_decision`。
+
+而且两个分支都只执行了预期的目标节点。这验证了我们之前讲解的核心语义：`Command` 可以把状态更新与动态路由合并到一次节点返回中。
+
+这次实验的验收条件全部满足。
+
+### 八、进阶主题 A：`Command(resume=...)` 与 `Command(resume=..., update=...)`
+
+先看一个实际问题。
+
+投资研究 Agent 在等待人工审批，暂停时的状态为：
+
+```python
+{
+    "ticker": "AAPL",
+    "approval_status": "pending",
+    "approval_reason": "",
+}
+```
+
+人工现在提交了审批结果。我们通常只需要把结果交给 `interrupt()`：
+
+```python
+graph.invoke(
+    Command(
+        resume={
+            "decision": "approve",
+            "reason": "研究范围符合要求",
+        }
+    ),
+    config=config,
+)
+```
+
+但有时，调用方还希望在恢复执行时同步更新其他状态字段，例如记录审批系统的外部工单号。这时就可以研究 `Command` 中 `resume` 和 `update` 的组合用法。
+
+```python
+graph.invoke(
+    Command(
+        resume={
+            "decision": "approve",
+            "reason": "研究范围符合要求",
+        },
+        update={
+            "approval_ticket_id": "APR-2026-001",
+        },
+    ),
+    config=config,
+)
+```
+
+这里要区分两份数据：
+
+- `resume`：传给对应 `interrupt()` 的恢复值。
+- `update`：作为 Graph State 的状态更新。
+
+它们不是同一份数据，也不会自动合并成 `interrupt()` 的返回值。
+
+不过，在我们的正式 Agent 中，是否应该在调用端直接更新 `approval_ticket_id`，还取决于这个字段是否属于调用方可信任的输入。涉及审批结果、操作者身份和权限的关键状态，不能仅仅因为调用方提交了 `update` 就被视为可信。
+
+本地签名确认了 `Command` 同时支持 `resume` 和 `update` 参数，但我们仍要用你安装的 1.2.12 版本验证组合调用的实际行为，而不是只凭签名推断完整执行语义。
+
+### 九、进阶主题 B：用中断 ID 定向恢复
+
+现在看更复杂的情况：假设投资研究 Agent 同时等待两项独立审核。
+
+- 基本面审核：是否接受公司的收入增长假设？
+- 风险审核：是否接受当前的风险评估？
+
+两个节点都调用 `interrupt()`，而且在同一轮 Graph 执行中暂停。此时调用方需要知道每个中断对应的 ID，才能把正确的响应交给正确的节点。
+
+```python
+snapshot = graph.get_state(config)
+
+for item in snapshot.interrupts:
+    print("Interrupt ID:", item.id)
+    print("Payload:", item.value)
+```
+
+每个中断对象都提供 `id` 和 `value`。对于同一轮执行中存在的多个待恢复中断，可以把 ID 映射到各自的恢复值：
+
+```python
+result = graph.invoke(
+    Command(
+        resume={
+            fundamental_interrupt_id: {
+                "decision": "approve",
+            },
+            risk_interrupt_id: {
+                "decision": "reject",
+            },
+        }
+    ),
+    config=config,
+)
+```
+
+这不是简单地把一个字典传给两个节点，而是通过中断 ID 定向分配恢复值。LangGraph 官方文档将这种形式用于同时恢复多个中断。
+
+需要特别区分两种场景：
+
+- 同一轮中有多个待恢复中断：使用 ID 到恢复值的映射，可以分别提供响应。
+- 同一节点依次调用多个 `interrupt()`：恢复过程会按节点重新执行和中断调用的顺序推进，不能简单假设一次映射就能解决所有顺序交互。
+
+对于正式投资 Agent，这种能力适合多个独立审批任务，但不意味着审批权限、超时管理、撤销或审计都由 LangGraph 自动实现。
+
+### 十、动手实验：验证两种恢复方式
+
+创建 `scripts/lesson_p10_d2_command_resume_advanced.py`。
+
+#### 验收条件
+
+1. 第一项实验中，审批节点恢复后得到 `approve`，同时最终状态包含 `approval_ticket_id="APR-2026-001"`。
+2. 第二项实验中，能够从 `snapshot.interrupts` 中识别两个中断及其 ID。
+3. 基本面审核得到 `approve`，风险审核得到 `reject`，两个结果没有互相错配。
+4. 两个实验最终的 `snapshot.next` 都是空元组。
+5. 最终输出：
+
+```
+PASS: Advanced Command experiments completed.
+```
+
+如果第一项实验未通过，不要直接修改断言；请把完整异常和输出发给我。我们需要确认当前版本中组合 `resume` 与 `update` 的真实语义。
+
+完成后，P10-D2 的核心 API 知识就覆盖了 `interrupt()`、`response_schema`、`Command` 的四个参数，以及多中断的定向恢复。之后我们再把这些知识映射到正式 Application Graph，继续推进 Human-in-the-Loop 的工程实现。
