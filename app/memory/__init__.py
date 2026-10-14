@@ -9,6 +9,7 @@ from app.memory.models import (
 )
 from app.memory.policy import MemoryWritePolicy, WriteDecision, WritePolicyResult
 from app.memory.service import MemoryService, MemoryWriteResult
+from app.memory.scope import MemoryScope
 from app.memory.sqlite_repository import (
     MemoryNotFoundError,
     MemoryScopeError,
@@ -26,6 +27,7 @@ __all__ = [
     "WritePolicyResult",
     "MemoryService",
     "MemoryWriteResult",
+    "MemoryScope",
     "MemoryNotFoundError",
     "MemoryScopeError",
     "SQLiteMemoryRepository",
