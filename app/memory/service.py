@@ -7,6 +7,7 @@ from datetime import datetime
 
 from app.memory.models import MemoryCandidate, MemoryItem, MemoryType
 from app.memory.policy import MemoryWritePolicy, WriteDecision, WritePolicyResult
+from app.memory.retrieval import MemoryRetriever, MemorySearchQuery, MemorySearchHit
 from app.memory.sqlite_repository import SQLiteMemoryRepository
 from app.memory.scope import MemoryScope
 
@@ -23,9 +24,11 @@ class MemoryService:
         self,
         repository: SQLiteMemoryRepository,
         policy: MemoryWritePolicy | None = None,
+        retriever: MemoryRetriever | None = None,
     ) -> None:
         self.repository = repository
         self.policy = policy or MemoryWritePolicy()
+        self.retriever = retriever or MemoryRetriever()
 
     def write(
         self,
@@ -72,12 +75,7 @@ class MemoryService:
             memory_id, owner_id=scope.owner_id, namespace=scope.namespace
         )
 
-    def list_active(
-        self,
-        *,
-        scope: MemoryScope,
-        memory_type: MemoryType | None = None,
-        now: datetime | None = None,
+    def list_active(self, *, scope: MemoryScope, memory_type: MemoryType | None = None, now: datetime | None = None,
     ) -> list[MemoryItem]:
         return self.repository.list_active(
             owner_id=scope.owner_id,
@@ -85,6 +83,10 @@ class MemoryService:
             memory_type=memory_type,
             now=now,
         )
+
+    def search(self, query: MemorySearchQuery, *, scope: MemoryScope) -> list[MemorySearchHit]:
+        items = self.repository.list_active(owner_id=scope.owner_id, namespace=scope.namespace, now=query.as_of)
+        return self.retriever.search(items,query)
 
     def supersede(
         self,

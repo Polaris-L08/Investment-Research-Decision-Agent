@@ -8,6 +8,7 @@ from app.memory.models import (
     MemoryType,
 )
 from app.memory.policy import MemoryWritePolicy, WriteDecision, WritePolicyResult
+from app.memory.retrieval import MemorySearchQuery, MemorySearchHit, MemoryRetriever
 from app.memory.service import MemoryService, MemoryWriteResult
 from app.memory.scope import MemoryScope
 from app.memory.sqlite_repository import (
@@ -25,6 +26,9 @@ __all__ = [
     "MemoryWritePolicy",
     "WriteDecision",
     "WritePolicyResult",
+    "MemoryRetriever",
+    "MemorySearchHit",
+    "MemorySearchQuery",
     "MemoryService",
     "MemoryWriteResult",
     "MemoryScope",

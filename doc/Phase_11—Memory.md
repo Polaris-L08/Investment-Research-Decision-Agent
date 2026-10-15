@@ -565,7 +565,6 @@ All 6 tests passed.
 
  - 独立写入策略实验的 6 项测试全部通过。
 
-
 ## Lesson 4：Memory Scope 与访问隔离
 
 前三课的工程补丁已经通过你的测试。现在进入下一课，重点从“记忆如何存储和管理”推进到“谁可以访问哪些记忆，以及如何用代码和测试保证隔离”。
@@ -653,3 +652,117 @@ service.revoke(
 | 在真实身份认证上下文中创建 Scope                  | 后续接入 FastAPI 时实现 |
 | 在 LangGraph 工作流中传播可信 Scope               | 后续集成                |
 | 完整项目回归测试                                  | 等待你本地运行          |
+
+
+## Lesson 5：记忆检索、相关性排序与筛选
+
+这次重新开始，我们直接以工程交付为目标，不再重复前四课的概念讲解。
+
+本课要为现有 Memory 模块增加真正可调用的检索能力：根据当前研究任务查找相关记忆，过滤无效记录，按相关性排序，并限制返回数量。同时保留上一课建立的 `MemoryScope` 访问隔离。
+
+### 一、本课工程目标
+
+| 标记     | 工作内容                           | 验收标准              |
+|----------|------------------------------------|-----------------------|
+| 学习     | 理解候选召回、排序、过滤和截断     | 能解释检索流程        |
+| 实验     | 用固定数据验证相关性排序           | 测试结果可重复        |
+| 当前实现 | 新增检索器并接入 Memory Service    | 可从正式 Service 调用 |
+| 后续实现 | 语义向量检索、混合检索、Token 预算 | 按实际需要逐步扩展    |
+
+第一版采用可解释的关键词检索，不引入向量数据库。它可以在当前小规模记忆库中提供真实可用的基础能力，后续再根据检索质量评估决定是否引入语义检索。
+
+例如，用户请求分析 NVIDIA 时，检索器应该优先返回“关注 FCF 和估值下行风险”这样的长期偏好，而不是把所有历史研究记录全部返回。
+
+### 二、工程补丁与文件结构
+
+Lesson 11.5 工程补丁
+
+包含检索器、Service 集成、公共接口导出、自动化测试和 README。
+
+下载 Lesson 11.5 ZIP 补丁
+
+本次基于仓库中已有的 `MemoryItem`、`MemoryType`、`MemoryScope`、`SQLiteMemoryRepository` 和 `MemoryService` 接口进行设计。
+
+补丁包含以下文件：
+
+| 文件                             | 作用                             |
+|----------------------------------|----------------------------------|
+| `app/memory/retrieval.py`        | 新增检索查询、相关性评分和排序   |
+| `app/memory/service.py`          | 在现有 Service 中增加 `search()` |
+| `app/memory/__init__.py`         | 导出检索相关接口                 |
+| `tests/test_memory_retrieval.py` | 新增检索自动化测试               |
+| `README.md`                      | 合并说明、测试命令及已知限制     |
+
+注意：`service.py` 和 `__init__.py` 是更新文件，合并时请先检查差异，不要覆盖你自己后来添加的修改。
+
+### 三、检索器的核心设计
+
+新增的 `MemorySearchQuery` 支持以下参数：
+
+```python
+MemorySearchQuery(
+    query="FCF valuation downside risk",
+    memory_types=None,
+    limit=5,
+    min_score=0.15,
+)
+```
+
+参数含义：
+
+- `query`：当前研究任务或用户请求的检索文本。
+- `memory_types`：可选的记忆类型过滤条件。
+- `limit`：最多返回多少条记忆。
+- `min_score`：最低相关性阈值。
+- `as_of`：可选的检索参考时间，用于测试和历史时点查询。
+
+检索结果包含 `item`、`score` 和 `matched_terms`。其中 `score` 是排序用的启发式相关性分数，不是事实可信度，也不是投资结论的置信度。
+
+Service 的调用方式如下：
+
+```python
+from app.memory import MemoryScope, MemorySearchQuery
+
+scope = MemoryScope(
+    owner_id="user_a",
+    namespace="investment_agent",
+)
+
+hits = service.search(
+    MemorySearchQuery(
+        query="FCF valuation downside risk",
+        limit=5,
+        min_score=0.15,
+    ),
+    scope=scope,
+)
+
+for hit in hits:
+    print(hit.score, hit.matched_terms, hit.item.content)
+```
+
+调用链是：
+
+![P11-L5-1.png](pic/P11-L5-1.png)
+
+这保证了相关性排序发生在权限与有效性过滤之后，而不是先搜索所有用户的数据再尝试过滤。
+
+### 四、本课测试与验收
+
+补丁新增了以下测试场景：
+
+1. 相关记忆优先于弱相关记忆。
+2. 只返回指定类型的记忆。
+3. 无关内容会被最低相关性阈值过滤。
+4. 检索遵守 Owner 和 Namespace 隔离。
+5. 撤销和过期的记忆不会被返回。
+6. 返回数量受 `limit` 限制，排序结果可重复。
+7. 空查询、非法阈值、非法数量和无时区的参考时间会被拒绝。
+
+### 五、当前能力边界
+
+本课完成后，Memory 有了真正的基础检索能力，但还有三项明确限制：
+
+- 当前是关键词检索，不理解所有语义相近的表达。
+- 当前会读取指定 Scope 内的有效记忆，再在 Python 中排序；记忆规模增长后，需要优化候选召回。
+- 检索结果尚未与 LangGraph 的 Research、Valuation 等节点集成，因此还没有证明这些记忆会在真实研究任务中被正确使用。
