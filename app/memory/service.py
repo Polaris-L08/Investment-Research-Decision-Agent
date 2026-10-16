@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
+from app.memory.governance import MemoryGovernance, GovernanceAction, governance_to_write_decision
 from app.memory.models import MemoryCandidate, MemoryItem, MemoryType
 from app.memory.policy import MemoryWritePolicy, WriteDecision, WritePolicyResult
 from app.memory.retrieval import MemoryRetriever, MemorySearchQuery, MemorySearchHit
@@ -25,10 +26,12 @@ class MemoryService:
         repository: SQLiteMemoryRepository,
         policy: MemoryWritePolicy | None = None,
         retriever: MemoryRetriever | None = None,
+        governance: MemoryGovernance | None = None,
     ) -> None:
         self.repository = repository
         self.policy = policy or MemoryWritePolicy()
         self.retriever = retriever or MemoryRetriever()
+        self.governance = governance or MemoryGovernance()
 
     def write(
         self,
@@ -36,10 +39,10 @@ class MemoryService:
         *,
         scope: MemoryScope,
     ) -> MemoryWriteResult:
-        """Write only within the trusted scope supplied by the application.
+        """Write within trusted scope after policy and governance checks.
 
-        Candidate scope fields are treated as claims, not as authority. They
-        must match the trusted scope exactly before the policy is evaluated.
+        The order is deliberate: scope validation -> write policy -> governance
+        -> persistence. A candidate's own scope fields never grant authority.
         """
         if candidate.owner_id != scope.owner_id or candidate.namespace != scope.namespace:
             return MemoryWriteResult(
@@ -47,27 +50,28 @@ class MemoryService:
                 "Candidate scope does not match the trusted access scope.",
             )
 
-        result: WritePolicyResult = self.policy.evaluate(candidate)
-        if result.decision != WriteDecision.WRITE:
-            return MemoryWriteResult(result.decision, result.reason)
+        policy_result: WritePolicyResult = self.policy.evaluate(candidate)
+        if policy_result.decision != WriteDecision.WRITE:
+            return MemoryWriteResult(policy_result.decision, policy_result.reason)
 
-        # Exact duplicate suppression is scope-local and type-specific.
-        normalized = " ".join(candidate.content.casefold().split())
-        for existing in self.repository.list_active(
-            owner_id=candidate.owner_id,
-            namespace=candidate.namespace,
+        now = datetime.now(timezone.utc)
+        existing_items = self.repository.list_active(
+            owner_id=scope.owner_id,
+            namespace=scope.namespace,
             memory_type=candidate.memory_type,
-        ):
-            if " ".join(existing.content.casefold().split()) == normalized:
-                return MemoryWriteResult(
-                    WriteDecision.SKIP_DUPLICATE,
-                    "An equivalent active memory already exists in this scope.",
-                    existing,
-                )
+            now=now,
+        )
+        governance_result = self.governance.evaluate(candidate, existing_items, now=now)
+        if governance_result.action != GovernanceAction.ALLOW:
+            return MemoryWriteResult(
+                governance_to_write_decision(governance_result.action),
+                governance_result.reason,
+                governance_result.existing_item,
+            )
 
         item = MemoryItem.from_candidate(candidate)
         stored = self.repository.create(item)
-        return MemoryWriteResult(WriteDecision.WRITE, result.reason, stored)
+        return MemoryWriteResult(WriteDecision.WRITE, policy_result.reason, stored)
 
     def get(self, memory_id: str, *, scope: MemoryScope) -> MemoryItem:
         """Read a memory using a trusted scope, never an ID alone."""

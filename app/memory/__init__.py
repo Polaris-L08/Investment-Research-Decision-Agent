@@ -1,5 +1,4 @@
-"""Long-term memory models, policy, service, and repository."""
-
+"""Long-term memory models, policy, governance, service, and repository."""
 from app.memory.models import (
     MemoryCandidate,
     MemoryItem,
@@ -8,6 +7,13 @@ from app.memory.models import (
     MemoryType,
 )
 from app.memory.policy import MemoryWritePolicy, WriteDecision, WritePolicyResult
+from app.memory.governance import (
+    GovernanceAction,
+    GovernanceResult,
+    MemoryGovernance,
+    normalize_conflict_key,
+    normalize_memory_content,
+)
 from app.memory.retrieval import MemorySearchQuery, MemorySearchHit, MemoryRetriever
 from app.memory.service import MemoryService, MemoryWriteResult
 from app.memory.scope import MemoryScope
@@ -26,6 +32,11 @@ __all__ = [
     "MemoryWritePolicy",
     "WriteDecision",
     "WritePolicyResult",
+    "GovernanceAction",
+    "GovernanceResult",
+    "MemoryGovernance",
+    "normalize_conflict_key",
+    "normalize_memory_content",
     "MemoryRetriever",
     "MemorySearchHit",
     "MemorySearchQuery",
