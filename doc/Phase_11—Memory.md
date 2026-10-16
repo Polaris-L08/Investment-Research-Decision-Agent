@@ -1651,3 +1651,365 @@ assert result.omitted_memory_ids == ("m3",)
 - 缺少 `conflict_key` 时，不会假装具备通用语义矛盾检测能力。
 - 已撤销的记忆不再阻止同一标识的新记忆写入。
 - 治理判断使用的 `now` 必须带时区。
+
+## Lesson 8：长期记忆与投资研究工作流集成
+
+本课分为五步：
+
+1. 设计阶段：明确 Memory 与 LangGraph 工作流的职责边界，确定检索、注入、写入的时机。
+2. 代码检查阶段：对照当前项目的 `State`、`Graph` 和 Memory 接口，确定具体修改点。
+3. 工程实现阶段：逐个文件修改，每个新增类和关键方法都解释设计原因。
+4. 测试阶段：先跑新增单元测试，再跑 Memory 回归测试和完整项目测试。
+5. 验收阶段：逐项检查本课的验收条件，未通过的部分先修复，不提前进入 Lesson 11.9。
+
+我会继续保持之前约定的教学风格：不只告诉你“改哪一行”，还要解释为什么这么改、调用链如何变化、测试能证明什么，以及当前实现还有哪些限制。
+
+### 第一步：先明确系统设计
+
+#### 1. Memory 不应该成为投资研究的事实来源
+
+假设用户要求分析一家公司的未来 12 个月投资价值。
+
+Memory 中可能包含：
+
+- 用户希望报告采用悲观、基准、乐观三种情景；
+- 上次研究发现公司收入高度依赖少数客户；
+- 上次分析给出的目标价为 120 美元。
+
+这些信息不能被一视同仁地直接放进研究结论。
+
+| 信息类型     | 在工作流中的用途               | 不允许的行为                   |
+|--------------|--------------------------------|--------------------------------|
+| 用户偏好     | 调整报告格式、研究深度与关注点 | 修改财务数据或强行改变投资结论 |
+| 历史研究发现 | 形成待核实的研究线索           | 未验证就当作当前事实           |
+| 历史投资结论 | 供本次分析比较和解释变化       | 直接复用为当前目标价或推荐评级 |
+
+因此，我们需要把长期记忆作为一种有来源、有作用域、受预算约束的辅助上下文，而不是把它当作新的财务数据源。
+
+#### 2. 当前 Graph 的调用链是什么？
+
+对照项目当前的 `app/application/graph.py`，核心流程是：
+
+`validate_input → approval_gate → research → valuation → risk → investment_decision → report → finalize`。
+
+
+我们只需要在获得人工审批后、进入研究之前插入一个节点：
+
+![P11-L8-1.png](pic/P11-L8-1.png)
+
+为什么把 Memory 检索放在人工审批之后？
+
+因为在用户请求尚未批准时，没有必要消耗检索资源，也不应该提前进入研究阶段。审批被拒绝时，Graph 直接进入 `finalize`，不经过 Memory 节点。
+
+为什么不在每个研究子 Agent 中单独检索？
+
+本课先采用集中检索：Application Graph 统一建立记忆上下文，再交给 Research Supervisor。这样能够避免多个 Agent 重复查询、使用不同记忆范围或消耗不一致的 Token 预算。未来若某个专门的研究 Agent 确实需要更细粒度的记忆，可以再单独设计。
+
+### 第二步：修改工程代码
+
+我将本课分成三个修改点。下面逐个说明实际补丁做了什么，以及为什么需要这些修改。
+
+#### 修改点 A：新增 `app/memory/workflow.py`
+
+这个模块把已有 Memory 能力包装成 LangGraph 能调用的节点。它不负责重新实现数据库、检索算法或 Token 预算，而是协调已有组件。
+
+##### A.1 先定义记忆使用规则
+
+```python
+MEMORY_CONTEXT_INSTRUCTION = (
+    "The following is long-term memory from prior interactions or research. "
+    "Use it only as background context for personalization and research leads. "
+    "It is not verified evidence for current financial facts, prices, forecasts, "
+    "or investment conclusions. Re-verify factual claims using current sources. "
+    "If memory conflicts with current sourced evidence, prefer the current "
+    "evidence and state the discrepancy when relevant. Do not cite memory as an "
+    "external source.\n\n"
+)
+```
+
+这段常量不是检索算法，而是给下游研究模型的使用边界：
+
+- 记忆可以帮助个性化和提出研究线索。
+- 财务数据、市场价格和投资结论需要当前证据支持。
+- 如果历史记忆与当前可靠来源冲突，应优先采用当前来源。
+- 不能把记忆本身伪装成外部数据来源。
+
+这是必要的约束，但并非绝对安全保证。LLM 仍可能误用上下文；后续的 Evaluation 阶段还需要针对证据引用、结论一致性和记忆干扰设计测试。
+
+##### A.2 创建节点工厂函数
+
+核心接口是：
+
+```python
+def make_memory_context_node(
+    memory_service: MemoryService | None,
+    *,
+    context_packer: MemoryContextPacker | None = None,
+    result_limit: int = 10,
+    min_score: float = 0.12,
+):
+```
+
+这里使用的是节点工厂模式：函数先接收依赖，再返回一个真正供 LangGraph 执行的节点函数。
+
+各个参数的作用如下：
+
+| 参数             | 用途               | 为什么需要                              |
+|------------------|--------------------|-----------------------------------------|
+| `memory_service` | 访问长期记忆       | 复用现有 Service 的作用域校验与检索逻辑 |
+| `context_packer` | 控制记忆上下文大小 | 复用 Lesson 11.6 的预算管理             |
+| `result_limit`   | 限制候选结果数     | 避免检索大量无关记忆                    |
+| `min_score`      | 设置最低相关性分数 | 过滤低相关结果                          |
+
+`MemoryService` 是可选的，因此旧的 Graph 调用方不需要立刻配置 Memory。参数检查也会拒绝不合理的结果数或分数阈值。
+
+##### A.3 为什么身份信息必须来自运行时配置？
+
+节点读取作用域的逻辑是：
+
+```python
+configurable = (config or {}).get("configurable", {})
+
+owner_id = configurable.get("memory_owner_id")
+namespace = configurable.get("memory_namespace")
+```
+
+这两个值决定访问哪个用户的长期记忆。它们不能来自用户的自然语言请求，也不能由图状态自行声明。
+
+原因是：如果用户在请求中写入另一个人的 `owner_id`，系统不能因此允许跨用户访问。
+
+因此，`memory_owner_id` 和 `memory_namespace` 应由经过认证的应用层提供，再通过 LangGraph 的 `config["configurable"]` 传递给节点。
+
+这不是完整的身份认证系统；节点依赖上层正确地提供可信配置。后续 FastAPI 阶段必须明确建立这条信任边界。
+
+##### A.4 组合检索、排序与预算管理
+
+节点取得可信作用域后，主要执行以下调用：
+
+```python
+scope = MemoryScope(
+    owner_id=owner_id,
+    namespace=namespace,
+)
+
+hits = memory_service.search(
+    MemorySearchQuery(
+        query=query_text,
+        limit=result_limit,
+        min_score=min_score,
+    ),
+    scope=scope,
+)
+
+packed = packer.pack(hits)
+```
+
+这三步的职责不同：
+
+1. `MemoryScope` 确定允许读取的用户和命名空间。
+2. `MemoryService.search()` 从该作用域的活动记忆中检索并排序。
+3. `MemoryContextPacker.pack()` 将检索结果压缩到预算内，并保留记忆 ID、来源类型和时间信息。
+
+这样就不需要在新节点里重复编写 SQL、相关性算法或 Token 截断逻辑。
+
+##### A.5 检索失败时如何处理？
+
+节点返回三个状态字段：
+
+```python
+{
+    "memory_context": "",
+    "memory_context_memory_ids": [],
+    "memory_context_error": "",
+}
+```
+
+分别表示：
+
+- `memory_context`：实际注入研究流程的文本。
+- `memory_context_memory_ids`：本次使用的记忆 ID，便于诊断和后续审计。
+- `memory_context_error`：检索失败时记录的错误信息。
+
+如果没有配置 Memory Service、没有可信作用域，或者检索发生异常，节点不会伪造记忆，而是返回空上下文。由于记忆在本课中是可选增强功能，主研究流程仍可继续。
+
+这属于降级运行（graceful degradation），而不是把 Memory 错误当成研究结论。后续 Observability 阶段还需要把这些错误字段纳入结构化日志和指标。
+
+#### 修改点 B：扩展 `ApplicationState`
+
+当前 `app/application/state.py` 的 `ApplicationState` 已经管理股票代码、研究结果、估值、风险、投资决策和报告等共享状态。
+
+本课新增三个字段：
+
+```python
+memory_context: str
+memory_context_memory_ids: list[str]
+memory_context_error: str
+```
+
+为什么需要放在共享 State 中？
+
+因为 LangGraph 节点之间通过 State 传递结果。`load_memory_context` 产生的数据必须能被后续 `research` 节点读取。
+
+这里有一个重要区别：
+
+- `ApplicationState` 是内部工作流状态，可以保存记忆上下文和诊断信息。
+- `ApplicationOutputState` 是对外输出协议，不必因为内部增加了 Memory 字段，就自动把完整记忆暴露给 API 调用方。
+
+这是刻意的最小权限设计：内部可以追踪使用了哪些记忆，但公开接口只返回经过定义的业务结果。
+
+#### 修改点 C：修改 `app/application/graph.py`
+
+这里有两处关键修改。
+
+**第一处：把 Memory 上下文传给 Research Supervisor。**
+
+原有代码会构建研究请求：
+
+```python
+research_query = (
+    f"{state['user_query']}\n\n"
+    "This is a complete investment research and decision workflow. "
+    "Research all four areas: company, financial, market, and "
+    "industry/macro. The downstream valuation, risk analysis, "
+    "investment decision, and final report require all four outputs."
+)
+```
+
+补丁在请求中加入 Memory 上下文：
+
+```python
+memory_context = state.get("memory_context", "")
+
+memory_section = (
+    "\n\nLong-term memory context (background only; not evidence):\n"
+    + memory_context
+    if memory_context
+    else ""
+)
+
+research_query = (
+    f"{state['user_query']}\n\n"
+    f"{memory_section}\n\n"
+    "This is a complete investment research and decision workflow. "
+    "Research all four areas: company, financial, market, and "
+    "industry/macro. The downstream valuation, risk analysis, "
+    "investment decision, and final report require all four outputs."
+)
+```
+
+这里有两层作用：
+
+1. `memory_context` 为空时，不改变正常研究请求的业务含义。
+2. 存在记忆时，明确把它标记为背景，而不是本次研究的证据。
+
+注意：`memory_context` 本身已经带有 `MEMORY_CONTEXT_INSTRUCTION`，因此这里不需要再拼接第二份完整指令。代码中的标题只负责标明上下文来源。
+
+**第二处：把节点加入 Graph 拓扑。**
+
+补丁给 `build_application_graph()` 增加两个可选参数：
+
+```python
+def build_application_graph(
+    *,
+    checkpointer: Any = None,
+    memory_service: MemoryService | None = None,
+    memory_context_packer: MemoryContextPacker | None = None,
+):
+```
+
+然后注册节点：
+
+```python
+builder.add_node(
+    "load_memory_context",
+    make_memory_context_node(
+        memory_service,
+        context_packer=memory_context_packer,
+    ),
+)
+```
+
+最后，把审批后的路由改为：
+
+```python
+builder.add_conditional_edges(
+    "approval_gate",
+    route_after_approval,
+    {"continue": "load_memory_context", "end": "finalize"},
+)
+
+builder.add_edge("load_memory_context", "research")
+```
+
+为什么 `build_application_graph()` 采用依赖注入，而不是直接在 `graph.py` 里创建 SQLite Repository？
+
+因为 Graph 负责业务流程编排，不应同时承担数据库连接生命周期、存储路径、依赖配置和测试替身管理。由应用启动层创建 `MemoryService` 并注入 Graph，之后更容易在测试、开发和生产环境中使用不同的存储配置。
+
+这里也解释了为什么仅仅新增节点还不够：如果没有把它注册到 Graph，并且没有把审批后的路由指向它，节点永远不会执行。
+
+### 第三步：安装补丁并验证修改
+
+#### 1. 应用补丁
+
+先在 PyCharm 中确认项目当前分支和工作区状态。建议先提交或备份已经通过的 Lesson 11.7 修改，避免本课变更覆盖你的未提交工作。
+
+将 ZIP 解压到项目根目录：
+
+```
+Investment-Research-Decision-Agent/
+├── app/
+│   ├── application/
+│   │   ├── graph.py       # 应用 Graph 补丁
+│   │   └── state.py       # 增加 Memory 状态字段
+│   └── memory/
+│       └── workflow.py    # 新增
+├── patches/
+│   └── lesson_11_8_graph.patch
+└── tests/
+    └── test_memory_workflow.py
+```
+
+然后在项目根目录运行：
+
+```
+git apply patches/lesson_11_8_graph.patch
+```
+
+如果提示补丁上下文不匹配，不要使用强制覆盖。先检查你的 `graph.py` 和 `state.py` 是否与补丁对应版本一致，再逐处应用修改。
+
+#### 2. 第一轮：只运行新增测试
+
+在 PyCharm Terminal 中执行：
+
+```
+pytest tests/test_memory_workflow.py -q
+```
+
+这些测试分别验证什么？
+
+| 测试                                                               | 验证目标                                   |
+|--------------------------------------------------------------------|--------------------------------------------|
+| `test_node_loads_relevant_memory_with_trusted_runtime_scope`       | 能检索相关记忆，保留记忆 ID 和使用规则     |
+| `test_node_does_not_read_memory_without_trusted_scope`             | 不会因请求中包含其他用户信息而跨作用域读取 |
+| `test_node_is_safe_noop_when_memory_service_is_not_configured`     | 不配置 Memory 时仍能返回合法的空上下文     |
+| `test_node_reports_failure_without_leaking_partial_memory_context` | 检索异常时不会把部分结果误当成成功的上下文 |
+
+我已经对补丁中的新增 Python 文件执行了编译和语法检查，均通过。但由于当前环境无法连接 GitHub，我不能在这里运行你项目的完整测试套件，也不能宣称上述 pytest 测试已经通过。
+
+### Lesson 11.8 验收清单
+
+ - 新增 Memory workflow 测试全部通过
+
+ - Memory Context、Repository、Governance 回归测试全部通过
+
+ - 完整 pytest 测试套件通过
+
+ - 未配置 Memory Service 时，原有 Graph 调用仍兼容
+
+ - 人工拒绝审批时，不会进入 Memory 检索和 Research
+
+ - 可信作用域生效，不能读取其他用户的记忆
+
+ - 检索结果受到 Lesson 11.6 的上下文预算约束
+
+ - Research 收到记忆上下文，但不把记忆当作当前财务证据
