@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-"""Production Application workflow state and public contracts.
+"""Typed state contracts for the top-level investment application graph."""
 
-This module defines the shared data boundary for the future top-level
-Application Graph. It intentionally does not implement graph orchestration.
-"""
-
-from typing import TypedDict, NotRequired
+from typing import NotRequired, TypedDict
 
 from app.agents.models import (
     CompanyResearchResult,
@@ -41,7 +37,14 @@ class ApplicationState(TypedDict, total=False):
     # Request context
     ticker: str
     user_query: str
-
+    # Internal long-term-memory context. Memory text is never returned publicly.
+    memory_context: str
+    memory_context_memory_ids: list[str]
+    memory_context_error: str
+    memory_capture_decision: str
+    memory_capture_reason: str
+    memory_capture_memory_id: str
+    memory_capture_error: str
     # Research stage
     research_plan: ResearchPlan | None
     completed_research_areas: list[ResearchArea]
@@ -100,15 +103,21 @@ class ApplicationOutputState(TypedDict, total=False):
     investment_decision: InvestmentDecision | None
     decision_error: str
     report: InvestmentReport | None
-    research_errors: dict[str, str]
-    stage_errors: dict[str, str]
     report_assembly_error: str
     report_generation_error: str
     report_merge_error: str
     report_markdown: str
     report_rendering_error: str
+    research_errors: dict[str, str]
+    stage_errors: dict[str, str]
     application_error: str
 
     # Public approval result
     approval_status: str
     approval_reason: str
+    # Safe operational metadata only; never expose retrieved memory text.
+    memory_context_error: str
+    memory_capture_decision: str
+    memory_capture_reason: str
+    memory_capture_memory_id: str
+    memory_capture_error: str

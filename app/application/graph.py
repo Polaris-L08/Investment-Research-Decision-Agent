@@ -8,6 +8,7 @@ in the Report Graph.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -37,6 +38,9 @@ from app.application.state import (
     ApplicationState,
 )
 from app.investment.models import InvestmentDecision
+from app.memory import MemoryService, SQLiteMemoryRepository
+from app.memory.context import MemoryContextPacker
+from app.memory.workflow import make_memory_context_node, make_memory_capture_node
 from app.report import InvestmentReport
 from app.risk.models import RiskAnalysis
 from app.valuation.models import ValuationResult, ValuationAssumptions, ValuationInputs
@@ -205,8 +209,15 @@ def route_after_approval(state: ApplicationState) -> str:
 def run_research_stage(state: ApplicationState) -> dict[str, Any]:
     """Invoke the Research Supervisor and verify required research outputs."""
     try:
+        memory_context = state.get("memory_context", "")
+        memory_section = (
+            "Long-term memory context (untrusted background only; not evidence):\n"
+            + memory_context
+            if memory_context else ""
+        )
         research_query = (
             f"{state['user_query']}\n\n"
+            f"{memory_section}\n\n"
             "This is a complete investment research and decision workflow. "
             "Research all four areas: company, financial, market, and "
             "industry/macro. The downstream valuation, risk analysis, "
@@ -239,8 +250,7 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
                 "valuation_research_error",
             )
         }
-        # Application-level overrides are explicit and take precedence, but
-        # they are not part of ResearchSupervisor's public input contract.
+        # Application-level overrides are explicit and take precedence.
         if state.get("valuation_inputs") is not None:
             updates["valuation_inputs"] = state["valuation_inputs"]
         if state.get("valuation_assumptions") is not None:
@@ -580,18 +590,47 @@ def finalize_application(state: ApplicationState) -> dict[str, Any]:
         "application_error": state.get("application_error", ""),
         "approval_status": state.get("approval_status", ""),
         "approval_reason": state.get("approval_reason", ""),
+        "memory_context_error": state.get("memory_context_error", ""),
+        "memory_capture_decision": state.get("memory_capture_decision", ""),
+        "memory_capture_reason": state.get("memory_capture_reason", ""),
+        "memory_capture_memory_id": state.get("memory_capture_memory_id", ""),
+        "memory_capture_error": state.get("memory_capture_error", ""),
     }
 
 
-def build_application_graph(*, checkpointer: Any = None):
-    """Compile the production Application workflow graph."""
-    builder = StateGraph(
-        ApplicationState,
-        input_schema=ApplicationInputState,
-        output_schema=ApplicationOutputState,
-    )
+def _build_default_memory_service() -> MemoryService:
+    """Create persistent cross-run memory; override its path with an environment variable."""
+    database_path = os.environ.get("MEMORY_DATABASE_PATH", "data/memory.sqlite3")
+    return MemoryService(SQLiteMemoryRepository(database_path))
+
+
+def build_application_graph(
+        *,
+        checkpointer: Any = None,
+        memory_service: MemoryService | None = None,
+        memory_context_packer: MemoryContextPacker | None = None,
+        memory_history_ttl_days: int = 180,
+        enable_default_memory: bool = True,
+):
+    """Compile the production Application workflow graph.
+
+    Pass ``memory_service`` to inject a configured service in tests/deployments.
+    When it is omitted (or None) and ``enable_default_memory`` is true, the graph
+    creates a persistent SQLite-backed service. Set ``enable_default_memory``
+    false to intentionally disable memory for a test or isolated deployment.
+    """
+    if memory_history_ttl_days < 1:
+        raise ValueError("memory_history_ttl_days must be >= 1")
+    if memory_service is None and enable_default_memory:
+        memory_service = _build_default_memory_service()
+
+    builder = StateGraph(ApplicationState, input_schema=ApplicationInputState, output_schema=ApplicationOutputState)
     builder.add_node("validate_input", validate_application_input)
     builder.add_node("approval_gate", approval_gate)
+    builder.add_node(
+        "load_memory_context",
+        make_memory_context_node(memory_service, context_packer=memory_context_packer),
+    )
     builder.add_node("research", run_research_stage)
 
     builder.add_node("valuation", run_valuation_stage)
@@ -599,6 +638,7 @@ def build_application_graph(*, checkpointer: Any = None):
     builder.add_node("investment_decision", run_decision_stage)
 
     builder.add_node("report", run_report_stage)
+    builder.add_node("capture_memory", make_memory_capture_node(memory_service, history_ttl_days=memory_history_ttl_days))
     builder.add_node("finalize", finalize_application)
 
     builder.add_edge(START, "validate_input")
@@ -610,8 +650,9 @@ def build_application_graph(*, checkpointer: Any = None):
     builder.add_conditional_edges(
         "approval_gate",
         route_after_approval,
-        {"continue": "research", "end": "finalize"},
+        {"continue": "load_memory_context", "end": "finalize"},
     )
+    builder.add_edge("load_memory_context", "research")
     builder.add_conditional_edges(
         "research", route_after_research,
         {"continue": "valuation", "end": "finalize"},
@@ -628,7 +669,10 @@ def build_application_graph(*, checkpointer: Any = None):
         "investment_decision", route_after_decision,
         {"continue": "report", "end": "finalize"},
     )
-    builder.add_edge("report", "finalize")
+    # Capture node decides whether the report was successful; failed reports
+    # still pass through it so the caller receives a clear "skipped" reason.
+    builder.add_edge("report", "capture_memory")
+    builder.add_edge("capture_memory", "finalize")
     builder.add_edge("finalize", END)
     return builder.compile(checkpointer=checkpointer)
 
