@@ -32,6 +32,7 @@ from app.application.contracts import (
     normalize_valuation_output,
     validate_ticker_consistency,
 )
+from app.application.errors import make_error_detail
 from app.application.state import (
     ApplicationInputState,
     ApplicationOutputState,
@@ -66,10 +67,28 @@ def _failure_update(
     message: str,
     result_key: str | None = None,
     error_key: str | None = None,
+    exc: Exception | None = None,
+    error_code: str | None = None,
+    error_category: str | None = None,
+    retryable: bool | None = None,
+    handling_owner: str | None = None,
 ) -> dict[str, Any]:
+    error_details = list(state.get("error_details") or [])
+    error_details.append(
+        make_error_detail(
+            stage=stage,
+            message=message,
+            exc=exc,
+            code=error_code,
+            category=error_category,  # type: ignore[arg-type]
+            retryable=retryable,
+            handling_owner=handling_owner,
+        )
+    )
     update: dict[str, Any] = {
         "current_stage": stage,
         "stage_errors": _stage_errors(state, stage, message),
+        "error_details": error_details,
         "application_error": f"{stage} failed: {message}",
     }
     if result_key:
@@ -85,11 +104,15 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
     user_query = state.get("user_query", "")
     if not isinstance(ticker, str) or not ticker.strip():
         return _failure_update(
-            state, stage="input", message="Ticker must be a non-empty string."
+            state, stage="input", message="Ticker must be a non-empty string.",
+            error_code="INPUT_VALIDATION_ERROR", error_category="input_validation",
+            retryable=False, handling_owner="application_input_boundary"
         )
     if not isinstance(user_query, str) or not user_query.strip():
         return _failure_update(
-            state, stage="input", message="User query must be a non-empty string."
+            state, stage="input", message="User query must be a non-empty string.",
+            error_code="INPUT_VALIDATION_ERROR", error_category="input_validation",
+            retryable=False, handling_owner="application_input_boundary"
         )
 
     # Valuation inputs are optional at the public request boundary. Validate
@@ -101,6 +124,8 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
             state,
             stage="input",
             message="If provided, valuation_inputs must be a ValuationInputs instance.",
+            error_code="INPUT_VALIDATION_ERROR", error_category="input_validation",
+            retryable=False, handling_owner="application_input_boundary",
         )
     supplied_assumptions = state.get("valuation_assumptions")
     if supplied_assumptions is not None and not isinstance(
@@ -113,6 +138,8 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
                 "If provided, valuation_assumptions must be a "
                 "ValuationAssumptions instance."
             ),
+            error_code="INPUT_VALIDATION_ERROR", error_category="input_validation",
+            retryable=False, handling_owner="application_input_boundary",
         )
 
     return {
@@ -152,6 +179,16 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
             "stage_errors": _stage_errors(
                 state, "approval", "Approval response must be a dictionary."
             ),
+            "error_details": list(state.get("error_details") or []) + [
+                make_error_detail(
+                    stage="approval",
+                    message="Approval response must be a dictionary.",
+                    code="INVALID_APPROVAL_RESPONSE",
+                    category="input_validation",
+                    retryable=False,
+                    handling_owner="approval_boundary",
+                )
+            ],
             "application_error": (
                 "Approval failed: response must be a dictionary."
             ),
@@ -167,6 +204,16 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
             "approval_reason": message,
             "current_stage": "approval",
             "stage_errors": _stage_errors(state, "approval", message),
+            "error_details": list(state.get("error_details") or []) + [
+                make_error_detail(
+                    stage="approval",
+                    message=message,
+                    code="INVALID_APPROVAL_RESPONSE",
+                    category="input_validation",
+                    retryable=False,
+                    handling_owner="approval_boundary",
+                )
+            ],
             "application_error": f"Approval failed: {message}",
         }
 
@@ -177,6 +224,16 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
             "approval_reason": message,
             "current_stage": "approval",
             "stage_errors": _stage_errors(state, "approval", message),
+            "error_details": list(state.get("error_details") or []) + [
+                make_error_detail(
+                    stage="approval",
+                    message=message,
+                    code="INVALID_APPROVAL_RESPONSE",
+                    category="input_validation",
+                    retryable=False,
+                    handling_owner="approval_boundary",
+                )
+            ],
             "application_error": f"Approval failed: {message}",
         }
 
@@ -328,7 +385,7 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
         }
     except Exception as exc:
         return _failure_update(
-            state, stage="research", message=str(exc)
+            state, stage="research", message=str(exc) or type(exc).__name__, exc=exc
         )
 
 
@@ -350,6 +407,8 @@ def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
                 "Valuation cannot run: ValuationInputs are missing. Provide "
                 "explicit EPS or integrate a trusted valuation-input provider."
             ),
+            error_code="MISSING_VALUATION_INPUT", error_category="business_input",
+            retryable=False, handling_owner="valuation_boundary",
             result_key="valuation",
             error_key="valuation_error",
         )
@@ -361,6 +420,8 @@ def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
                 "Valuation cannot run: ValuationAssumptions are missing. Provide "
                 "an explicit valuation multiple and rationale; no default is applied."
             ),
+            error_code="MISSING_VALUATION_ASSUMPTIONS", error_category="business_input",
+            retryable=False, handling_owner="valuation_boundary",
             result_key="valuation",
             error_key="valuation_error",
         )
@@ -394,7 +455,7 @@ def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
         }
     except Exception as exc:
         return _failure_update(
-            state, stage="valuation", message=str(exc),
+            state, stage="valuation", message=str(exc) or type(exc).__name__, exc=exc,
             result_key="valuation", error_key="valuation_error",
         )
 
@@ -436,7 +497,7 @@ def run_risk_stage(state: ApplicationState) -> dict[str, Any]:
         }
     except Exception as exc:
         return _failure_update(
-            state, stage="risk", message=str(exc),
+            state, stage="risk", message=str(exc) or type(exc).__name__, exc=exc,
             result_key="risk_analysis", error_key="risk_error",
         )
 
@@ -482,7 +543,7 @@ def run_decision_stage(state: ApplicationState) -> dict[str, Any]:
         }
     except Exception as exc:
         return _failure_update(
-            state, stage="investment_decision", message=str(exc),
+            state, stage="investment_decision", message=str(exc) or type(exc).__name__, exc=exc,
             result_key="investment_decision", error_key="decision_error",
         )
 
@@ -539,8 +600,22 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
             raise StageContractError("Report Graph field 'report_markdown' must be a string.")
 
         application_error = ""
+        error_details = list(state.get("error_details") or [])
         if report_errors:
             application_error = "Report stage ended with errors: " + "; ".join(report_errors)
+            for field_name, stage_name in error_fields:
+                message = normalized_errors[field_name]
+                if message:
+                    error_details.append(
+                        make_error_detail(
+                            stage=stage_name,
+                            message=message,
+                            code="STAGE_REPORTED_FAILURE",
+                            category="stage_reported_failure",
+                            retryable=None,
+                            handling_owner="report_graph_boundary",
+                        )
+                    )
 
         return {
             "report": report,
@@ -548,6 +623,7 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
             "report_markdown": report_markdown,
             "current_stage": "completed" if not report_errors else "report",
             "stage_errors": stage_errors,
+            "error_details": error_details,
             "application_error": application_error,
         }
     except Exception as exc:
@@ -561,6 +637,9 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
             "report_markdown": state.get("report_markdown", ""),
             "current_stage": "report",
             "stage_errors": _stage_errors(state, "report", message),
+            "error_details": list(state.get("error_details") or []) + [
+                make_error_detail(stage="report", message=message, exc=exc)
+            ],
             "application_error": f"Report stage failed: {message}",
         }
 

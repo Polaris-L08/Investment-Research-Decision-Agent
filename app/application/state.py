@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Typed state contracts for the top-level investment application graph."""
 
-from typing import NotRequired, TypedDict
+from typing import NotRequired, TypedDict, Any
 
 from app.agents.models import (
     CompanyResearchResult,
@@ -81,6 +81,7 @@ class ApplicationState(TypedDict, total=False):
     # Workflow control and normalized error collection
     current_stage: str
     stage_errors: dict[str, str]
+    error_details: list[dict[str, Any]]
     application_error: str
 
     # Human-in-the-loop approval
