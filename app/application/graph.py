@@ -26,13 +26,13 @@ from app.agents.report import report_graph
 from app.agents.research_supervisor import research_supervisor_graph
 from app.agents.risk import risk_graph
 from app.agents.valuation import valuation_graph
+from app.application.errors import make_error_detail
 from app.application.contracts import (
     StageContractError,
     normalize_stage_output,
     normalize_valuation_output,
     validate_ticker_consistency,
 )
-from app.application.errors import make_error_detail
 from app.application.state import (
     ApplicationInputState,
     ApplicationOutputState,
@@ -52,7 +52,6 @@ _REQUIRED_RESEARCH_FIELDS = (
     "market_research",
     "industry_macro_research",
 )
-
 
 def _stage_errors(state: Mapping[str, Any], stage: str, message: str) -> dict[str, str]:
     errors = dict(state.get("stage_errors") or {})
@@ -263,8 +262,8 @@ def route_after_approval(state: ApplicationState) -> str:
 
 
 
-def run_research_stage(state: ApplicationState) -> dict[str, Any]:
-    """Invoke the Research Supervisor and verify required research outputs."""
+def run_research_stage(state: ApplicationState, config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Invoke the Research Supervisor under stage and workflow budgets."""
     try:
         memory_context = state.get("memory_context", "")
         memory_section = (

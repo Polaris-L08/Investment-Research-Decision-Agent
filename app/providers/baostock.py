@@ -5,38 +5,97 @@ statements are provided by the separately identified Sina endpoints.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 from app.providers.config import ProviderConfigurationError
 from app.providers.exceptions import TransientProviderError
 from app.providers.financial import CompanyInfoProvider
+from app.runtime.isolation import provider_sdk_timeout_seconds, run_isolated_python_json
+
+
+_BAOSTOCK_WORKER_SCRIPT = r'''import contextlib, importlib, io, json, sys
+payload = json.load(sys.stdin)
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        bs = importlib.import_module("baostock")
+        login_result = bs.login()
+        if str(getattr(login_result, "error_code", "1")) != "0":
+            raise RuntimeError("BaoStock login failed: " + str(getattr(login_result, "error_msg", "unknown provider error")))
+        try:
+            def collect(result, label):
+                error_code = str(getattr(result, "error_code", "0"))
+                if error_code != "0":
+                    raise RuntimeError("BaoStock " + label + " query failed: " + str(getattr(result, "error_msg", "unknown provider error")))
+                fields = list(getattr(result, "fields", []) or [])
+                rows = []
+                while result.next():
+                    rows.append(dict(zip(fields, result.get_row_data())))
+                return rows
+            basic = collect(bs.query_stock_basic(code=payload["code"]), "stock basic")
+            industry = collect(bs.query_stock_industry(code=payload["code"]), "stock industry")
+        finally:
+            try:
+                bs.logout()
+            except Exception:
+                pass
+    print("__IRDA_RESULT__" + json.dumps({"basic": basic, "industry": industry}, ensure_ascii=False, default=str))
+except Exception as exc:
+    print("__IRDA_ERROR__" + json.dumps({"type": type(exc).__name__, "message": str(exc), "module": getattr(exc, "name", None)}, ensure_ascii=False))
+    sys.exit(2)
+'''
 
 
 class BaoStockClient:
-    """Thin, lazy BaoStock client with explicit login/logout boundaries."""
+    """BaoStock client with a bounded worker for production SDK sessions.
+
+    An injected module remains in-process for deterministic unit tests.
+    """
 
     def __init__(self, baostock_module: Any | None = None) -> None:
         self._baostock_module = baostock_module
-
-    def _module(self) -> Any:
-        if self._baostock_module is not None:
-            return self._baostock_module
-        try:
-            import baostock as bs
-        except ImportError as exc:
-            raise ProviderConfigurationError(
-                "REAL_PROVIDER_SOURCE=sina_baostock requires the optional 'baostock' package. "
-                "Install the real-data extras with: python -m pip install -e \".[real-data]\" (or install only BaoStock with: python -m pip install baostock)"
-            ) from exc
-        self._baostock_module = bs
-        return bs
+        self._injected_baostock_module = baostock_module is not None
 
     def get_company_records(self, ticker: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         code = _baostock_code(ticker)
-        bs = self._module()
+        if not self._injected_baostock_module:
+            returncode, stdout, _stderr = run_isolated_python_json(
+                script=_BAOSTOCK_WORKER_SCRIPT,
+                payload={"code": code},
+                timeout_seconds=provider_sdk_timeout_seconds(),
+                operation_name="BaoStock company metadata query",
+            )
+            marker = next(
+                (line for line in reversed(stdout.splitlines()) if line.startswith("__IRDA_")),
+                None,
+            )
+            if marker is None:
+                raise TransientProviderError(
+                    "BaoStock worker failed without a result marker "
+                    f"(exit={returncode})."
+                )
+            if marker.startswith("__IRDA_ERROR__"):
+                detail = json.loads(marker.removeprefix("__IRDA_ERROR__"))
+                if detail.get("type") == "ModuleNotFoundError" and detail.get("module") == "baostock":
+                    raise ProviderConfigurationError(
+                        "REAL_PROVIDER_SOURCE=sina_baostock requires the optional 'baostock' package. "
+                        "Install it with: python -m pip install baostock"
+                    )
+                if detail.get("type") == "TimeoutError":
+                    raise TimeoutError("BaoStock timed out inside its SDK worker.")
+                raise TransientProviderError(
+                    "BaoStock company metadata request failed: "
+                    f"{detail.get('type', 'Error')}: {detail.get('message', '')}".rstrip()
+                )
+            payload = json.loads(marker.removeprefix("__IRDA_RESULT__"))
+            return payload["basic"], payload["industry"]
+
+        bs = self._baostock_module
         try:
             login_result = bs.login()
+        except TimeoutError:
+            raise
         except Exception as exc:
             raise TransientProviderError(
                 f"BaoStock login failed: {type(exc).__name__}."
@@ -53,7 +112,7 @@ class BaoStockClient:
             industry_result = bs.query_stock_industry(code=code)
             industry_records = _collect_result(industry_result, "stock industry")
             return basic_records, industry_records
-        except (ProviderConfigurationError, TransientProviderError):
+        except (ProviderConfigurationError, TransientProviderError, TimeoutError):
             raise
         except Exception as exc:
             raise TransientProviderError(

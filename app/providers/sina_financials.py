@@ -5,6 +5,7 @@ not use AKShare's Eastmoney endpoints for financial statements.
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 import threading
@@ -13,6 +14,30 @@ from typing import Any
 from app.providers.config import ProviderConfigurationError
 from app.providers.exceptions import TransientProviderError
 from app.providers.financial import RevenueInfoProvider, NetIncomeInfoProvider
+from app.runtime.isolation import provider_sdk_timeout_seconds, run_isolated_python_json
+
+
+_SINA_FINANCIAL_WORKER_SCRIPT = r'''import contextlib, importlib, io, json, sys
+payload = json.load(sys.stdin)
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        module = importlib.import_module("akshare")
+        frame = module.stock_financial_report_sina(stock=payload["stock"], symbol="利润表")
+        if frame is None:
+            records = []
+        elif hasattr(frame, "to_dict"):
+            records = frame.to_dict(orient="records")
+        elif isinstance(frame, dict):
+            records = [frame]
+        elif isinstance(frame, list):
+            records = frame
+        else:
+            raise TypeError("Sina financial statement returned an unsupported table structure.")
+    print("__IRDA_RESULT__" + json.dumps(records, ensure_ascii=False, default=str))
+except Exception as exc:
+    print("__IRDA_ERROR__" + json.dumps({"type": type(exc).__name__, "message": str(exc), "module": getattr(exc, "name", None)}, ensure_ascii=False))
+    sys.exit(2)
+'''
 
 
 class SinaFinancialStatementClient:
@@ -21,28 +46,47 @@ class SinaFinancialStatementClient:
     def __init__(self, ak_module: Any | None = None) -> None:
         self._ak_module = ak_module
 
-    def _module(self) -> Any:
-        if self._ak_module is not None:
-            return self._ak_module
-        try:
-            import akshare as ak
-        except ImportError as exc:
-            raise ProviderConfigurationError(
-                "REAL_PROVIDER_SOURCE=sina_baostock requires the optional 'akshare' package "
-                "for Sina's financial-statement parser. Install it with: "
-                "python -m pip install -e \".[real-data]\" (or install only AKShare with: python -m pip install akshare)"
-            ) from exc
-        self._ak_module = ak
-        return ak
-
     def get_income_statement_records(self, ticker: str) -> list[dict[str, Any]]:
         code = _normalize_a_share_ticker(ticker)
         symbol = _sina_symbol(code)
-        ak = self._module()
+        if self._ak_module is None:
+            returncode, stdout, _stderr = run_isolated_python_json(
+                script=_SINA_FINANCIAL_WORKER_SCRIPT,
+                payload={"stock": symbol},
+                timeout_seconds=provider_sdk_timeout_seconds(),
+                operation_name="Sina Finance income-statement request",
+            )
+            marker = next(
+                (line for line in reversed(stdout.splitlines()) if line.startswith("__IRDA_")),
+                None,
+            )
+            if marker is None:
+                raise TransientProviderError(
+                    "Sina Finance worker failed without a result marker "
+                    f"(exit={returncode})."
+                )
+            if marker.startswith("__IRDA_ERROR__"):
+                detail = json.loads(marker.removeprefix("__IRDA_ERROR__"))
+                if detail.get("type") == "ModuleNotFoundError" and detail.get("module") == "akshare":
+                    raise ProviderConfigurationError(
+                        "REAL_PROVIDER_SOURCE=sina_baostock requires the optional 'akshare' package "
+                        "for Sina's financial-statement parser. Install it with: "
+                        "python -m pip install akshare"
+                    )
+                if detail.get("type") == "TimeoutError":
+                    raise TimeoutError("Sina Finance income-statement request timed out inside its SDK worker.")
+                raise TransientProviderError(
+                    f"Sina Finance income-statement request failed for {code}: "
+                    f"{detail.get('type', 'Error')}."
+                )
+            return _records(json.loads(marker.removeprefix("__IRDA_RESULT__")))
+
         try:
-            frame = ak.stock_financial_report_sina(stock=symbol, symbol="利润表")
+            frame = self._ak_module.stock_financial_report_sina(stock=symbol, symbol="利润表")
             return _records(frame)
         except ProviderConfigurationError:
+            raise
+        except TimeoutError:
             raise
         except Exception as exc:
             raise TransientProviderError(

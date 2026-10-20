@@ -7,7 +7,7 @@ and Mock mode independent from network/data-provider packages.
 from __future__ import annotations
 
 from datetime import datetime
-import importlib
+import json
 import math
 import re
 import threading
@@ -15,12 +15,36 @@ from typing import Any, Callable
 
 from app.providers.config import ProviderConfigurationError
 from app.providers.exceptions import TransientProviderError
+from app.runtime.isolation import provider_sdk_timeout_seconds, run_isolated_python_json
 from app.providers.financial import (
     CompanyInfoProvider,
     NetIncomeInfoProvider,
     RevenueInfoProvider,
     StockPriceProvider,
 )
+
+
+_AKSHARE_WORKER_SCRIPT = r'''import contextlib, importlib, io, json, sys
+payload = json.load(sys.stdin)
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        module = importlib.import_module("akshare")
+        result = getattr(module, payload["method"])(**payload["kwargs"])
+        if result is None:
+            records = []
+        elif hasattr(result, "to_dict"):
+            records = result.to_dict(orient="records")
+        elif isinstance(result, dict):
+            records = [result]
+        elif isinstance(result, list):
+            records = result
+        else:
+            raise TypeError("AKShare returned an unsupported table structure.")
+    print("__IRDA_RESULT__" + json.dumps(records, ensure_ascii=False, default=str))
+except Exception as exc:
+    print("__IRDA_ERROR__" + json.dumps({"type": type(exc).__name__, "message": str(exc), "module": getattr(exc, "name", None)}, ensure_ascii=False))
+    sys.exit(2)
+'''
 
 
 class AkShareClient:
@@ -34,27 +58,57 @@ class AkShareClient:
         cache_ttl_seconds: float = 60.0,
     ) -> None:
         self._ak_module = ak_module
+        self._injected_ak_module = ak_module is not None
         self._clock = clock
         self._cache_ttl_seconds = max(0.0, float(cache_ttl_seconds))
         self._snapshot_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._cache_lock = threading.Lock()
-
-    def _ak(self) -> Any:
-        if self._ak_module is None:
-            try:
-                self._ak_module = importlib.import_module("akshare")
-            except ImportError as exc:
-                raise ProviderConfigurationError(
-                    "REAL_PROVIDER_SOURCE=akshare requires the optional 'akshare' package. "
-                    "Install it in the active virtual environment with: python -m pip install akshare"
-                ) from exc
-        return self._ak_module
 
     def _now(self) -> float:
         if self._clock is not None:
             return self._clock()
         import time
         return time.monotonic()
+
+    def _call_api(self, method: str, **kwargs: Any) -> list[dict[str, Any]]:
+        """Call AKShare directly for injected test modules, otherwise in a worker."""
+        if self._injected_ak_module:
+            try:
+                return _records(getattr(self._ak_module, method)(**kwargs))
+            except (ProviderConfigurationError, TimeoutError):
+                raise
+            except Exception as exc:
+                raise TransientProviderError(
+                    f"AKShare {method} request failed: {type(exc).__name__}."
+                ) from exc
+
+        returncode, stdout, _stderr = run_isolated_python_json(
+            script=_AKSHARE_WORKER_SCRIPT,
+            payload={"method": method, "kwargs": kwargs},
+            timeout_seconds=provider_sdk_timeout_seconds(),
+            operation_name=f"AKShare {method}",
+        )
+        marker = next(
+            (line for line in reversed(stdout.splitlines()) if line.startswith("__IRDA_")),
+            None,
+        )
+        if marker is None:
+            raise TransientProviderError(
+                f"AKShare {method} worker failed without a result marker (exit={returncode})."
+            )
+        if marker.startswith("__IRDA_ERROR__"):
+            detail = json.loads(marker.removeprefix("__IRDA_ERROR__"))
+            if detail.get("type") == "ModuleNotFoundError" and detail.get("module") == "akshare":
+                raise ProviderConfigurationError(
+                    "REAL_PROVIDER_SOURCE=akshare requires the optional 'akshare' package. "
+                    "Install it in the active virtual environment with: python -m pip install akshare"
+                )
+            if detail.get("type") == "TimeoutError":
+                raise TimeoutError(f"AKShare {method} timed out inside its SDK worker.")
+            raise TransientProviderError(
+                f"AKShare {method} request failed: {detail.get('type', 'Error')}."
+            )
+        return _records(json.loads(marker.removeprefix("__IRDA_RESULT__")))
 
     def get_a_share_spot_records(self) -> list[dict[str, Any]]:
         """Return a cached all-market spot snapshot to avoid one download per ticker."""
@@ -66,9 +120,8 @@ class AkShareClient:
                     return records
 
             try:
-                frame = self._ak().stock_zh_a_spot_em()
-                records = _records(frame)
-            except ProviderConfigurationError:
+                records = self._call_api("stock_zh_a_spot_em")
+            except (ProviderConfigurationError, TimeoutError):
                 raise
             except Exception as exc:
                 raise TransientProviderError(
@@ -85,8 +138,8 @@ class AkShareClient:
     def get_individual_info_records(self, ticker: str) -> list[dict[str, Any]]:
         code = _normalize_a_share_ticker(ticker)
         try:
-            return _records(self._ak().stock_individual_info_em(symbol=code))
-        except ProviderConfigurationError:
+            return self._call_api("stock_individual_info_em", symbol=code)
+        except (ProviderConfigurationError, TimeoutError):
             raise
         except Exception as exc:
             raise TransientProviderError(
@@ -96,8 +149,8 @@ class AkShareClient:
     def get_profit_statement_records(self, ticker: str) -> list[dict[str, Any]]:
         code = _normalize_a_share_ticker(ticker)
         try:
-            return _records(self._ak().stock_profit_sheet_by_report_em(symbol=code))
-        except ProviderConfigurationError:
+            return self._call_api("stock_profit_sheet_by_report_em", symbol=code)
+        except (ProviderConfigurationError, TimeoutError):
             raise
         except Exception as exc:
             raise TransientProviderError(

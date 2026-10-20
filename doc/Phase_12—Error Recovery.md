@@ -257,3 +257,117 @@ def test_build_llm_configures_bounded_retries(monkeypatch):
 ```
 
 这两个测试验证的是配置契约，而不是实际 OpenAI 网络请求的重试行为。真实 SDK 重试行为仍需在后续故障注入测试中验证。
+
+
+## Lesson 3：Timeout & Cancellation Boundaries
+
+本课正式进入代码实现。目标不是简单地给所有函数加一个 `timeout` 参数，而是明确系统在哪些边界可以限制等待时间、哪些边界能够传播取消信号，以及哪些能力目前还不能保证。
+
+本次交付以 Phase 11 源码为基线，结合 Lesson 1 的错误分类实现和 Lesson 2 的重试策略。不重写 Application Graph，不增加通用重试循环，也不把“停止等待”误称为“底层任务已取消”。
+
+### 一、本课目标
+
+完成本课后，我们要具备以下能力：
+
+1. LLM 的单次 HTTP 请求有明确的 timeout 配置。
+2. 可以通过环境变量调整 timeout，且非法配置会明确报错。
+3. 保留 Lesson 2 的有限重试策略，不引入重复的 Application 级重试。
+4. 验证现有 Provider 的请求 timeout 确实传递到了 HTTP 调用层。
+5. 验证 Research、Risk、Investment Decision、Report 阶段不会把取消信号转换成普通失败状态。
+6. 明确区分请求超时、阶段 deadline、整个工作流 deadline，不夸大当前系统的保证。
+
+### 二、先审计当前实现
+
+#### 1. 当前调用拓扑
+
+```text
+Application Graph
+        ⬇
+Research / Valuation / Risk / Decision / Report
+                ⬇
+LLM client / Data Provider / Memory
+```
+
+#### 2. 审计结果
+
+| 边界             | 原有能力                                                          | 本课处理                                           |
+|------------------|-------------------------------------------------------------------|----------------------------------------------------|
+| LLM 请求         | Lesson 2 已配置最多 2 次 SDK retry，但没有显式配置请求 timeout    | 增加默认 30 秒的请求 timeout，并支持环境变量覆盖   |
+| Alpha Vantage    | HTTP opener 默认接收 10 秒 timeout                                | 保留实现，增加定向测试                             |
+| Sina Finance     | HTTP opener 默认接收 10 秒 timeout                                | 保留实现，增加定向测试                             |
+| Application 阶段 | 通过同步 `.invoke()` 调用子图，普通异常由 `except Exception` 处理 | 测试取消信号继续传播，不改成普通失败状态           |
+| 整个 Graph       | 没有可靠的全流程硬 deadline                                       | 不虚构这一能力，后续在 Lesson 7 进行集成设计与验证 |
+
+这里有一个重要区别：Provider 已有请求 timeout，不代表整个业务阶段最多运行 10 秒。 例如，Alpha Vantage 的请求限流等待发生在 HTTP 请求之前，因此不受 HTTP timeout 限制。
+
+### 三、代码修改
+
+#### 文件清单
+
+| 文件                                           | 处理方式                                        |
+|------------------------------------------------|-------------------------------------------------|
+| `app/llm/client.py`                            | 替换为完整的新版本，保留 Lesson 2 的 retry 设置 |
+| `.env.example`                                 | 替换为完整更新版本，增加 timeout 配置示例       |
+| `tests/test_application_timeout_boundaries.py` | 新增 LLM timeout 配置和取消传播测试             |
+| `tests/test_provider_timeout_boundaries.py`    | 新增 Provider 请求 timeout 测试                 |
+
+本课没有修改 `app/application/graph.py` 或 `app/application/state.py`：审计发现现有阶段边界的 `except Exception` 不会捕获现代 Python 中继承自 `BaseException` 的 `asyncio.CancelledError`。本课通过测试验证这个现有行为，而不是为了增加代码改动而重复实现。
+
+### 四、核心实现讲解
+
+#### 1. LLM 请求 timeout
+
+`app/llm/client.py` 增加了以下配置：
+
+```
+LLM_MAX_RETRIES = 2# 单次 HTTP 请求的 timeout，不是整个 LLM 调用的总 deadline。LLM_REQUEST_TIMEOUT_SECONDS = 30.0
+```
+
+构建客户端时，将 timeout 显式传给 `ChatOpenAI`：
+
+```
+client_options = {    "model": os.getenv("LLM_MODEL"),    "api_key": os.getenv("OPENAI_API_KEY"),    "base_url": os.getenv("OPENAI_BASE_URL"),    "temperature": 0,    "timeout": _configured_request_timeout(),    "max_retries": LLM_MAX_RETRIES,    "extra_body": {        "thinking": {            "type": "disabled"        }    },}
+```
+
+这里保留了 Lesson 2 的重试所有权：由 OpenAI SDK 管理 HTTP 请求级重试，Application Graph 不再增加一层通用 retry。
+
+新增的 `_configured_request_timeout()` 会读取环境变量，并验证配置：
+
+- `30`：有效。
+- `12.5`：有效。
+- `0` 或负数：报错。
+- 非数字字符串：报错。
+
+在 `.env` 中可以配置：
+
+```
+LLM_REQUEST_TIMEOUT_SECONDS=30
+```
+
+如果不设置，则使用默认值 30 秒。
+
+#### 2. 为什么 30 秒不代表整个 LLM 调用最多 30 秒？
+
+Lesson 2 配置的是最多 2 次 retry，即初次请求加最多 2 次重试。
+
+假设每次 HTTP 请求都耗尽 30 秒 timeout，那么仅请求等待时间就可能接近：
+
+\\[ T\_{\text{requests}} \approx 3 \times 30 = 90\text{ 秒} \\]
+
+实际总时间还可能包括退避、调度和其他开销。
+
+因此，我们当前保证的是每次请求有明确的 timeout 配置，重试次数有限，而不是保证整个逻辑调用一定在 30 秒内结束。
+
+如果未来需要总耗时不超过 45 秒的严格 deadline，就必须把剩余时间预算传播到后续请求与重试中，不能简单地重复使用 30 秒。
+
+#### 3. 为什么不直接给同步 `.invoke()` 套一个 timeout？
+
+例如，用线程执行同步 Graph，再用 `asyncio.wait_for()` 限制等待时间，可能出现这样的情况：
+
+1. 调用方在 30 秒后停止等待。
+2. 后台线程仍在执行网络请求或其他同步工作。
+3. 调用方已经报告 timeout，但底层任务仍可能继续运行。
+
+这不符合我们对取消语义的严格要求。
+
+因此，本课不引入这种包装，也不声称现有同步 Graph 已经支持强制取消。后续需要结合恢复状态、剩余预算和副作用语义，设计并验证更完整的执行边界。
