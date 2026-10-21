@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 
 
@@ -24,7 +26,35 @@ class ResearchPlan(BaseModel):
     )
 
 
-class CompanyResearchResult(BaseModel):
+class ResearchResultBase(BaseModel):
+    """Shared provenance/status contract for every research-area result.
+
+    Status is operational metadata, not an LLM-authored conclusion.
+    Complete results have no degradation reason; degraded results must explain
+    the limitation explicitly.
+    """
+
+    data_status: Literal["complete", "degraded"] = Field(
+        default="complete",
+        description="Whether this result followed the normal or degraded path.",
+    )
+    degradation_reason: str = Field(
+        default="",
+        description="Why this result is degraded; empty for complete results.",
+    )
+
+    @model_validator(mode="after")
+    def validate_degradation_metadata(self):
+        reason = self.degradation_reason.strip()
+        object.__setattr__(self, "degradation_reason", reason)
+        if self.data_status == "degraded" and not reason:
+            raise ValueError("A degraded research result requires degradation_reason.")
+        if self.data_status == "complete" and reason:
+            raise ValueError("A complete research result must not have degradation_reason.")
+        return self
+
+
+class CompanyResearchResult(ResearchResultBase):
     ticker: str = Field(
         description="Stock ticker symbol."
     )
@@ -46,7 +76,7 @@ class CompanyResearchResult(BaseModel):
     )
 
 
-class FinancialResearchResult(BaseModel):
+class FinancialResearchResult(ResearchResultBase):
     ticker: str = Field(
         description="Stock ticker symbol."
     )
@@ -68,14 +98,14 @@ class FinancialResearchResult(BaseModel):
     )
 
 
-class MarketResearchResult(BaseModel):
+class MarketResearchResult(ResearchResultBase):
     ticker: str
     market_index: str
     market_return: float
     summary: str
 
 
-class IndustryMacroResearchResult(BaseModel):
+class IndustryMacroResearchResult(ResearchResultBase):
     ticker: str = Field(description="Stock ticker symbol.")
     industry: str = Field(description="Industry associated with the company.")
     industry_growth: float = Field(

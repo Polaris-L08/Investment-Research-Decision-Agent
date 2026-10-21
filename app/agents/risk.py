@@ -90,6 +90,9 @@ Risk analysis requirements:
    uncertainty_notes.
 7. Do not generate Buy, Sell, Hold, or any other investment recommendation.
 8. Do not create a new target price or modify the supplied valuation.
+9. Inspect each research result's data_status and degradation_reason. Treat degraded
+   inputs as explicit evidence limitations, reflect them in uncertainty_notes, and
+   do not describe them as fully verified or complete.
 """
 
     try:

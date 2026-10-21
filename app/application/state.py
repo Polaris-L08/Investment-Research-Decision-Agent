@@ -53,6 +53,9 @@ class ApplicationState(TypedDict, total=False):
     market_research: MarketResearchResult | None
     industry_macro_research: IndustryMacroResearchResult | None
     research_errors: dict[str, str]
+    research_data_status: str
+    degraded_research_areas: list[str]
+    research_degradation_reasons: dict[str, str]
     planning_error: str
     supervisor_error: str
 
@@ -81,7 +84,6 @@ class ApplicationState(TypedDict, total=False):
     # Workflow control and normalized error collection
     current_stage: str
     stage_errors: dict[str, str]
-    error_details: list[dict[str, Any]]
     application_error: str
 
     # Human-in-the-loop approval
@@ -110,6 +112,9 @@ class ApplicationOutputState(TypedDict, total=False):
     report_markdown: str
     report_rendering_error: str
     research_errors: dict[str, str]
+    research_data_status: str
+    degraded_research_areas: list[str]
+    research_degradation_reasons: dict[str, str]
     stage_errors: dict[str, str]
     application_error: str
 

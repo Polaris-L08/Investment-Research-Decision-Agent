@@ -120,6 +120,10 @@ Decision requirements:
     valuation, and risk analysis.
 13. Do not produce a report.
 14. Do not provide portfolio allocation or trading instructions.
+15. Inspect each research result's data_status and degradation_reason. Degraded
+    inputs must lower the strength of claims and conviction when material, and
+    their limitations must be reflected in supporting evidence or thesis caveats.
+    Never describe degraded inputs as fully verified or complete.
 """
 
     try:
