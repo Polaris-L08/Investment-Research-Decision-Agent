@@ -38,6 +38,15 @@ def test_finalizer_does_not_expose_memory_context_text():
 def test_only_approved_runs_enter_memory_read_path():
     from app.application.graph import route_after_approval
 
-    assert route_after_approval({"approval_status": "approved"}) == "continue"
+    assert route_after_approval({
+        "approval_status": "approved",
+        "execution_status": "running",
+        "application_error": "",
+    }) == "continue"
+    assert route_after_approval({
+        "approval_status": "approved",
+        "execution_status": "failed",
+        "application_error": "research failed",
+    }) == "end"
     assert route_after_approval({"approval_status": "rejected"}) == "end"
     assert route_after_approval({"approval_status": "invalid"}) == "end"

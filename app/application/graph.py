@@ -76,6 +76,9 @@ def _failure_update(
 ) -> dict[str, Any]:
     update: dict[str, Any] = {
         "current_stage": stage,
+        # One canonical lifecycle value drives routing; detailed errors remain
+        # available for diagnostics and stage-specific API fields.
+        "execution_status": "failed",
         "stage_errors": _stage_errors(state, stage, message),
         "application_error": f"{stage} failed: {message}",
     }
@@ -126,6 +129,7 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
         "ticker": ticker.strip().upper(),
         "user_query": user_query.strip(),
         "current_stage": "approval",
+        "execution_status": "running",
         "approval_status": "pending",
         "approval_reason": "",
         "stage_errors": dict(state.get("stage_errors") or {}),
@@ -156,6 +160,7 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
             "approval_status": "invalid",
             "approval_reason": "Approval response must be a dictionary.",
             "current_stage": "approval",
+            "execution_status": "failed",
             "stage_errors": _stage_errors(
                 state, "approval", "Approval response must be a dictionary."
             ),
@@ -173,6 +178,7 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
             "approval_status": "invalid",
             "approval_reason": message,
             "current_stage": "approval",
+            "execution_status": "failed",
             "stage_errors": _stage_errors(state, "approval", message),
             "application_error": f"Approval failed: {message}",
         }
@@ -183,6 +189,7 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
             "approval_status": "invalid",
             "approval_reason": message,
             "current_stage": "approval",
+            "execution_status": "failed",
             "stage_errors": _stage_errors(state, "approval", message),
             "application_error": f"Approval failed: {message}",
         }
@@ -192,6 +199,7 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
             "approval_status": "rejected",
             "approval_reason": reason.strip(),
             "current_stage": "rejected",
+            "execution_status": "rejected",
             "stage_errors": dict(state.get("stage_errors") or {}),
             "application_error": "",
         }
@@ -200,14 +208,20 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
         "approval_status": "approved",
         "approval_reason": reason.strip(),
         "current_stage": "research",
+        "execution_status": "running",
         "stage_errors": dict(state.get("stage_errors") or {}),
         "application_error": "",
     }
 
 
 def route_after_approval(state: ApplicationState) -> str:
-    """Only a valid approval may enter the research stage."""
-    if state.get("approval_status") == "approved":
+    """Only a valid approval in a healthy execution may enter Research."""
+    if (
+        state.get("approval_status") == "approved"
+        and state.get("execution_status") == "running"
+        and not state.get("application_error")
+        and not (state.get("stage_errors") or {})
+    ):
         return "continue"
     return "end"
 
@@ -324,6 +338,7 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
                 raise StageContractError(
                     f"Complete research result '{area}' must have an empty degradation_reason."
                 )
+
         updates["degraded_research_areas"] = degraded_areas
         updates["research_degradation_reasons"] = degradation_reasons
 
@@ -388,6 +403,7 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
         return {
             **updates,
             "current_stage": "valuation",
+            "execution_status": "running",
             "stage_errors": dict(state.get("stage_errors") or {}),
             "application_error": "",
         }
@@ -398,7 +414,23 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
 
 
 def route_after_research(state: ApplicationState) -> str:
-    return "continue" if not state.get("application_error") and not state.get("stage_errors", {}).get("research") else "end"
+    """Continue only when Research explicitly returned a healthy running state.
+
+    The lifecycle marker is the canonical recovery decision. The error fields
+    are checked as defensive consistency guards so an inconsistent state cannot
+    route into valuation merely because a result object happens to exist.
+    """
+    required_outputs_present = all(
+        state.get(field) is not None for field in _REQUIRED_RESEARCH_FIELDS
+    )
+    can_continue = (
+        state.get("execution_status") == "running"
+        and required_outputs_present
+        and state.get("research_data_status") in {"complete", "degraded"}
+        and not state.get("application_error")
+        and not (state.get("stage_errors") or {})
+    )
+    return "continue" if can_continue else "end"
 
 
 def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
@@ -454,6 +486,7 @@ def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
             "valuation": result,
             "valuation_error": "",
             "current_stage": "risk",
+            "execution_status": "running",
             "stage_errors": dict(state.get("stage_errors") or {}),
             "application_error": "",
         }
@@ -465,7 +498,15 @@ def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
 
 
 def route_after_valuation(state: ApplicationState) -> str:
-    return "continue" if state.get("valuation") is not None and not state.get("valuation_error") else "end"
+    """Prevent Risk from running unless Valuation succeeded without error."""
+    can_continue = (
+        state.get("execution_status") == "running"
+        and state.get("valuation") is not None
+        and not state.get("valuation_error")
+        and not (state.get("stage_errors") or {})
+        and not state.get("application_error")
+    )
+    return "continue" if can_continue else "end"
 
 
 def run_risk_stage(state: ApplicationState) -> dict[str, Any]:
@@ -496,6 +537,7 @@ def run_risk_stage(state: ApplicationState) -> dict[str, Any]:
             "risk_analysis": result,
             "risk_error": "",
             "current_stage": "investment_decision",
+            "execution_status": "running",
             "stage_errors": dict(state.get("stage_errors") or {}),
             "application_error": "",
         }
@@ -507,7 +549,15 @@ def run_risk_stage(state: ApplicationState) -> dict[str, Any]:
 
 
 def route_after_risk(state: ApplicationState) -> str:
-    return "continue" if state.get("risk_analysis") is not None and not state.get("risk_error") else "end"
+    """Prevent Investment Decision from consuming a missing/failed risk result."""
+    can_continue = (
+        state.get("execution_status") == "running"
+        and state.get("risk_analysis") is not None
+        and not state.get("risk_error")
+        and not (state.get("stage_errors") or {})
+        and not state.get("application_error")
+    )
+    return "continue" if can_continue else "end"
 
 
 def run_decision_stage(state: ApplicationState) -> dict[str, Any]:
@@ -542,6 +592,7 @@ def run_decision_stage(state: ApplicationState) -> dict[str, Any]:
             "investment_decision": result,
             "decision_error": "",
             "current_stage": "report",
+            "execution_status": "running",
             "stage_errors": dict(state.get("stage_errors") or {}),
             "application_error": "",
         }
@@ -553,7 +604,15 @@ def run_decision_stage(state: ApplicationState) -> dict[str, Any]:
 
 
 def route_after_decision(state: ApplicationState) -> str:
-    return "continue" if state.get("investment_decision") is not None and not state.get("decision_error") else "end"
+    """Enter Report only after a valid investment decision has been produced."""
+    can_continue = (
+        state.get("execution_status") == "running"
+        and state.get("investment_decision") is not None
+        and not state.get("decision_error")
+        and not (state.get("stage_errors") or {})
+        and not state.get("application_error")
+    )
+    return "continue" if can_continue else "end"
 
 
 def run_report_stage(state: ApplicationState) -> dict[str, Any]:
@@ -625,6 +684,7 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
             **normalized_errors,
             "report_markdown": report_markdown,
             "current_stage": "completed" if not report_errors else "report",
+            "execution_status": "completed" if not report_errors else "failed",
             "stage_errors": stage_errors,
             "application_error": application_error,
         }
@@ -638,9 +698,32 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
             "report_rendering_error": state.get("report_rendering_error", ""),
             "report_markdown": state.get("report_markdown", ""),
             "current_stage": "report",
+            "execution_status": "failed",
             "stage_errors": _stage_errors(state, "report", message),
             "application_error": f"Report stage failed: {message}",
         }
+
+
+def _terminal_execution_status(state: Mapping[str, Any]) -> str:
+    """Normalize the lifecycle value at the public terminal boundary.
+
+    A finalizer must never report ``running``. Error details take precedence
+    over a stale lifecycle marker because nodes merge partial State updates.
+    Approval rejection is a business outcome, not an execution failure.
+    """
+    if state.get("approval_status") == "rejected":
+        return "rejected"
+    if state.get("application_error") or state.get("stage_errors"):
+        return "failed"
+
+    status = state.get("execution_status")
+    if status in {"completed", "failed", "rejected"}:
+        return status
+    if state.get("current_stage") == "completed":
+        return "completed"
+    # A terminal route without an explicit terminal lifecycle is a contract
+    # violation. Fail closed rather than exposing an ambiguous "running" run.
+    return "failed"
 
 
 def finalize_application(state: ApplicationState) -> dict[str, Any]:
@@ -666,6 +749,7 @@ def finalize_application(state: ApplicationState) -> dict[str, Any]:
         "degraded_research_areas": list(state.get("degraded_research_areas") or []),
         "research_degradation_reasons": dict(state.get("research_degradation_reasons") or {}),
         "stage_errors": dict(state.get("stage_errors") or {}),
+        "execution_status": _terminal_execution_status(state),
         "report_assembly_error": state.get("report_assembly_error", ""),
         "report_generation_error": state.get("report_generation_error", ""),
         "report_merge_error": state.get("report_merge_error", ""),

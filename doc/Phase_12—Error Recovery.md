@@ -617,3 +617,85 @@ Lesson 4 的 `app/application/graph.py` 中，`run_research_stage()` 目前仍�
 - 部分结果中已有的降级状态和原因仍会保留。
 - `route_after_research()` 会停止下游流程。
 - 最终 Application 输出会包含失败领域。
+
+
+## Lesson 6：Recovery State & Routing
+
+本课正式进入 生产 Graph 的错误状态与恢复路由设计。我们会以 `app/application/graph.py` 为主线，检查错误如何进入 State、如何决定下一步，以及最终调用方能否明确判断一次执行是成功、失败还是被拒绝。
+
+本课遵循已经确认的 Phase 12 八课计划：Lesson 6 不再把幂等性作为独立主题。之前的 Memory 幂等性代码属于已有实现，需要时再按 Lesson 2 的副作用重复执行安全要求进行检查；本课不因此重做 Memory 模块。
+
+### 一、先审计当前生产实现
+
+当前工作基线由 Phase 11 代码、Lesson 5 的 Partial Research 修改，以及现有 Lesson 6 Memory 文件组成。这里先审查生产 Graph，不把教学用的 `app/graph/graph.py` 当成主入口。
+
+目前主要执行路径是：
+
+![P12-L6-1.png](pic/P12-L6-1.png)
+
+当前代码已经有一些正确的保护措施：
+
+- `_failure_update()` 会记录 `current_stage`、`stage_errors` 和 `application_error`，并且可以清空对应阶段的无效结果。
+- Research 的路由会阻止不完整的必需研究数据进入估值阶段。
+- Valuation、Risk 和 Investment Decision 都有条件路由；关键阶段失败时不会正常进入依赖它的下游阶段。
+- Report 错误会保留独立的错误字段，并进入最终输出路径，而不是直接丢弃整次执行结果。
+
+但这还不等于恢复状态契约已经统一。接下来需要处理的核心问题，是各阶段的错误字段、全局错误字段和路由判断之间是否始终保持一致。
+
+### 二、本课实施：统一执行状态契约
+
+我建议增加一个明确的 `execution_status` 字段，作为整个 Application 工作流的统一生命周期状态。它不替代现有错误字段，而是统一回答：这次执行是否还允许继续，最终以什么状态结束？
+
+| `execution_status` | 含义                         | 后续行为                                   |
+|--------------------|------------------------------|--------------------------------------------|
+| `running`          | 当前阶段成功，工作流可以继续 | 检查阶段结果和错误状态，再决定是否进入下游 |
+| `completed`        | 工作流正常完成               | 返回成功结果                               |
+| `failed`           | 关键阶段或执行过程失败       | 进入终止输出路径，不再执行依赖该阶段的节点 |
+| `rejected`         | 用户拒绝了审批请求           | 正常终止，但不把业务拒绝误报成系统异常     |
+
+注意两个容易混淆的概念：
+
+- `execution_status` 表示工作流执行状态。
+- `research_data_status` 表示研究数据完整性，例如 `complete`、`degraded`、`partial`。
+
+例如，研究使用了明确标记的备用数据源，最终报告仍可能正常完成：`execution_status = "completed"`，而 `research_data_status = "degraded"`。相反，如果四个必需研究领域中有一个缺失，研究数据可以保留为 `partial`，但整体执行必须安全终止。
+
+#### 修改后的状态转换
+
+![P12-L6-2.png](pic/P12-L6-2.png)
+
+### 三、具体改动
+
+主要改动如下。
+
+| 文件                                                 | 改动目的                                                   |
+|------------------------------------------------------|------------------------------------------------------------|
+| `app/application/state.py`                           | 在内部 State 和公开 Output State 中增加 `execution_status` |
+| `app/application/graph.py`                           | 统一阶段状态转换、增强失败路由、规范最终输出状态           |
+| `app/memory/workflow.py`                             | 防止失败或状态不一致的执行被记录为成功的长期研究历史       |
+| `tests/test_application_recovery_routing.py`         | 新增状态契约、正常路径和关键阶段失败路由测试               |
+| `tests/test_application_hitl.py`                     | 验证审批拒绝、无效审批和后续阶段失败的状态                 |
+| `tests/test_application_graph_report_integration.py` | 验证报告成功与失败的执行状态                               |
+| `tests/test_application_graph_memory_integration.py` | 验证审批路由的状态约束                                     |
+| `tests/test_memory_workflow.py`                      | 验证失败状态不能被误记录为成功的 Memory 历史               |
+
+其中有两个值得特别注意的设计。
+
+第一，路由不能只看结果对象是否存在。 例如 State 里可能保留一个旧的 `risk_analysis`，但如果 `execution_status` 已经是 `failed`，就不能仅因为结果对象存在而进入 Investment Decision。
+
+第二，最终输出不能出现含糊的终止状态。 新增的 `_terminal_execution_status()` 会在输出边界进行状态规范化。如果终止路径仍然保留 `running`，或者存在未清除的错误记录，就不能将这次执行报告为成功。
+
+此外，Memory capture 也会检查执行状态。因为 State 使用的是增量更新，不能只依赖 `current_stage == "completed"` 这样的单个字段来证明执行成功。
+
+### Lesson 6 验收条件
+
+#### 验收清单
+
+执行失败、正常完成、审批拒绝具有明确且不同的状态。
+关键阶段失败时，下游依赖节点不会执行。
+Research 缺少必需结果或状态为 partial 时，不会进入 Valuation。
+错误记录不会被旧结果对象或过期状态覆盖。
+所有失败路径都能终止，不引入无限恢复循环。
+公开输出包含明确的 execution_status，不会将未完成执行误报为成功。
+失败的执行不会被记录为成功的长期 Memory 历史。
+正常路径与代表性关键阶段失败测试均在项目实际虚拟环境中通过。

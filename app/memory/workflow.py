@@ -139,7 +139,15 @@ def make_memory_capture_node(
         if state.get("approval_status") != "approved":
             result["memory_capture_reason"] = "Research was not approved."
             return result
-        if state.get("current_stage") != "completed" or state.get("application_error"):
+        # The canonical lifecycle status is authoritative when present. The
+        # None allowance preserves direct legacy unit callers; the production
+        # Application Graph always supplies this field before capture.
+        if (
+            state.get("execution_status") not in (None, "completed")
+            or state.get("current_stage") != "completed"
+            or state.get("application_error")
+            or state.get("stage_errors")
+        ):
             result["memory_capture_reason"] = "The application workflow did not complete successfully."
             return result
         if state.get("report") is None or not state.get("report_markdown"):
@@ -174,6 +182,10 @@ def make_memory_capture_node(
             normalized_ticker = ticker.strip().upper()
             capture_date = observed_at.date().isoformat()
             conflict_key = f"research_history|{normalized_ticker}|{capture_date}"
+            # The same approved ticker's daily history marker is one logical write.
+            # Keep this key stable across graph retries and checkpoint replays; the
+            # repository enforces uniqueness atomically within the trusted memory scope.
+            idempotency_key = f"application_research_history|{normalized_ticker}|{capture_date}"
             candidate = MemoryCandidate(
                 memory_type=MemoryType.RESEARCH_HISTORY,
                 content=(
@@ -192,6 +204,7 @@ def make_memory_capture_node(
                     "ticker": normalized_ticker,
                     "capture_date": capture_date,
                     "conflict_key": conflict_key,
+                    "idempotency_key": idempotency_key,
                     "capture_kind": "successful_application_report",
                 },
             )

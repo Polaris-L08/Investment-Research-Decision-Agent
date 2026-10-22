@@ -60,6 +60,7 @@ def test_report_stage_invokes_report_graph_and_returns_public_fields(monkeypatch
     assert result["report_markdown"].startswith("# AAPL")
     assert result["application_error"] == ""
     assert result["current_stage"] == "completed"
+    assert result["execution_status"] == "completed"
 
 
 def test_report_stage_collects_report_errors_without_losing_report(monkeypatch):
@@ -96,6 +97,7 @@ def test_report_stage_collects_report_errors_without_losing_report(monkeypatch):
     assert result["stage_errors"]["report_generation"] == "LLM unavailable"
     assert "LLM unavailable" in result["application_error"]
     assert result["current_stage"] == "report"
+    assert result["execution_status"] == "failed"
 
 
 def test_runtime_factory_builds_production_application_graph():

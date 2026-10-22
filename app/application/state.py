@@ -84,6 +84,9 @@ class ApplicationState(TypedDict, total=False):
 
     # Workflow control and normalized error collection
     current_stage: str
+    # Canonical execution lifecycle: running, completed, failed, or rejected.
+    # Routing uses this field together with the stage result contract.
+    execution_status: str
     stage_errors: dict[str, str]
     application_error: str
 
@@ -119,6 +122,7 @@ class ApplicationOutputState(TypedDict, total=False):
     research_degradation_reasons: dict[str, str]
     stage_errors: dict[str, str]
     application_error: str
+    execution_status: str
 
     # Public approval result
     approval_status: str

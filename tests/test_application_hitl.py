@@ -78,6 +78,7 @@ def test_application_graph_approval_enters_research(monkeypatch):
     )
 
     assert result["approval_status"] == "approved"
+    assert result["execution_status"] == "failed"
     assert result["approval_reason"] == "Research approved for execution."
     assert research_calls == ["AAPL"]
 
@@ -96,6 +97,7 @@ def test_application_graph_rejection_skips_research(monkeypatch):
     )
 
     assert result["approval_status"] == "rejected"
+    assert result["execution_status"] == "rejected"
     assert result["approval_reason"] == "Request needs clarification."
     assert result["application_error"] == ""
     assert research_calls == []
@@ -115,5 +117,6 @@ def test_application_graph_invalid_decision_skips_research(monkeypatch):
     )
 
     assert result["approval_status"] == "invalid"
+    assert result["execution_status"] == "failed"
     assert "Approval failed" in result["application_error"]
     assert research_calls == []
