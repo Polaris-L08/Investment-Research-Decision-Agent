@@ -497,3 +497,123 @@ degradation_reason: str = ""
  - Tool loop 本身失败时不尝试 LLM fallback。
  - Company Research Agent 与父图定向测试通过。
  - 受 CompanyResearchResult 变更影响的下游定向回归通过。
+
+
+## Lesson 5：Partial Failure & Partial Research Results
+
+本课开始进入部分失败与部分研究结果处理。它建立在 Lesson 4 的 fallback / degraded mode 之上，但解决的是另一个问题：
+
+> 当多个 research subgraph 中只有一部分失败时，系统是否能够保留成功的研究结果、明确标记失败的研究领域，并在不伪造数据、不掩盖错误的前提下继续执行？
+
+本课不会把所有异常都转化为成功，也不会绕过之前建立的 timeout、cancellation 和错误边界。
+
+### 一、本课的学习目标
+
+完成本课后，你应当能够：
+
+1. 区分整个 research 阶段失败与部分 research 失败。
+2. 保留成功 subgraph 的真实结果，不因其他 subgraph 失败而丢弃。
+3. 明确记录各研究领域的状态，例如 `complete`、`degraded`、`failed`。
+4. 让下游节点知道哪些领域有完整结果、哪些领域只有降级结果、哪些领域没有可用结果。
+5. 为部分失败编写可重复的单元测试和集成测试。
+
+### 二、当前源码审计：已有能力与真正的缺口
+
+我检查了项目计划、Phase 11 源码基线，以及 Lesson 4 交付包中的相关实现。这里有一个重要发现：项目已经有一部分部分失败处理机制，因此 Lesson 5 不应从零重写研究编排。
+
+#### 2.1 Research Supervisor 已经支持什么？
+
+生产研究编排入口是 `app/agents/research_supervisor.py` 中的 `research_supervisor_graph`。
+
+当前 `route_and_execute()` 已经包含以下行为：
+
+- 子图正常返回失败结果时，记录对应研究领域的错误。
+- 子图抛出普通 `Exception` 时，将该异常记录为研究错误。
+- 随后通过 `mark_completed()` 标记当前领域已处理，并继续执行计划中的其他研究领域。
+- 只有违反子图输出契约等 Supervisor 级错误，才会停止后续研究执行。
+
+因此，现有 Supervisor 已经具备一项重要能力：单个研究领域失败，不必立刻终止其他领域的研究。
+
+相关测试也已经存在：
+
+- `tests/test_research_supervisor.py::test_child_error_is_recorded_and_later_areas_still_execute`
+- `tests/test_research_supervisor.py::test_child_exception_is_converted_to_research_error`
+
+这两项属于现有能力，应优先验证，而不是重新实现。
+
+#### 2.2 真正的缺口在 Application 层
+
+Lesson 4 的 `app/application/graph.py` 中，`run_research_stage()` 目前仍然采用接近 all-or-nothing 的策略：
+
+1. 检查四个 research 输出是否全部存在。
+2. 如果有任意一个输出缺失，就把 Research 阶段标记为失败。
+3. 即使四个输出都存在，只要 `research_errors` 非空，也会把整个 Research 阶段标记为失败。
+4. 只有上述检查全部通过，才继续验证结果类型和 `complete` / `degraded` 状态。
+
+这意味着 Supervisor 虽然能够继续完成其他研究领域，但 Application 还不能把这种执行结果表达成明确的“部分成功”。
+
+此外，`research_parallel.py` 和 `research_fanout.py` 都明确标注为历史实验，不是生产编排入口。本课不应修改它们来实现生产行为。
+
+### 三、本课采用的失败策略
+
+为了避免为了“部分成功”而悄悄降低投资结论的证据门槛，本课采用以下规则。
+
+| Research 结果                                           | Application 行为                       | 是否继续投资决策流程         |
+|---------------------------------------------------------|----------------------------------------|------------------------------|
+| 四个领域全部正常完成                                    | 标记 `complete`                        | 是                           |
+| 四个领域均有结果，但部分结果是 Lesson 4 的有效 fallback | 标记 `degraded`，保留降级原因          | 可以，但下游必须识别降级状态 |
+| 部分领域有结果，另一些领域失败                          | 标记 `partial`，保留成功结果和失败记录 | 否，停止在 Research 边界     |
+| 没有任何可用研究结果，或 Supervisor 发生致命契约错误    | 标记失败                               | 否                           |
+
+这里有一条必须坚持的边界：
+
+部分成功不等于可以生成完整投资建议。
+
+当前生产 Application 会明确要求四个研究领域，并且估值、风险、投资决策和报告的现有输入契约都建立在这四项研究结果之上。因此，本课不会擅自把某个领域改成可选项，也不会用空对象、默认数据或虚构的 fallback 填补缺失结果。
+
+本课首先让系统能够如实表达“研究部分完成”，同时保留成功结果和错误信息。未来如果业务需求明确允许某些研究领域为可选项，再单独定义最低证据门槛及其对下游决策的影响。
+
+### 四、目标 Graph topology
+
+![P12-L5-1.png](pic/P12-L5-1.png)
+
+注意，图中的 `partial` 是 Research 数据状态，不是某个研究子图的成功状态。单个子图仍然应该明确返回正常结果、有效降级结果，或者失败结果。
+
+### 五、本课代码修改
+
+
+文件清单
+
+ - `app/application/graph.py` — 部分结果分类、错误保留和下游停止边界
+ - `app/application/state.py` — 增加 `failed_research_areas` 状态契约
+ - `tests/test_application_degraded_status.py` — 增加部分失败测试
+ - `PHASE12_LESSON5_NOTES.md` — 修改说明、验收标准与测试记录
+
+#### 5.1 新增状态字段
+
+新增的 `failed_research_areas` 会明确记录失败的研究领域。例如：
+
+```python
+{
+    "research_data_status": "partial",
+    "failed_research_areas": ["company"],
+    "research_errors": {
+        "company": "Company research provider failed."
+    },
+    "financial_research": financial_result,
+    "market_research": market_result,
+    "industry_macro_research": industry_result,
+}
+```
+
+这段数据表示：公司研究失败，但其他领域的有效结果仍被保留。这里的 `financial_result` 等是示意变量，不是实际运行结果。
+
+#### 5.2 新增测试覆盖
+
+新增测试验证：
+
+- 一个研究领域失败时，其他有效结果不会丢失。
+- `research_data_status` 会被设置为 `partial`。
+- 部分结果中已有的降级状态和原因仍会保留。
+- `route_after_research()` 会停止下游流程。
+- 最终 Application 输出会包含失败领域。

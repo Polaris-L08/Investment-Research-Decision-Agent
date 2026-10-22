@@ -6,7 +6,7 @@ from app.agents.models import (
     IndustryMacroResearchResult,
     MarketResearchResult,
 )
-from app.application.graph import finalize_application, run_research_stage
+from app.application.graph import finalize_application, run_research_stage, route_after_research
 
 
 def _research_result(status="complete", reason=""):
@@ -104,3 +104,52 @@ def test_report_markdown_discloses_degraded_research_input():
 def test_final_output_does_not_default_failed_or_unreached_research_to_complete():
     result = finalize_application({"ticker": "AAPL", "application_error": "research failed"})
     assert result["research_data_status"] == "not_available"
+
+
+def test_partial_research_preserves_successes_and_stops_downstream():
+    payload = _research_result()
+    payload["company_research"] = None
+    payload["research_errors"] = {
+        "company": "Company research provider failed."
+    }
+
+    with patch("app.application.graph.research_supervisor_graph.invoke", return_value=payload):
+        result = run_research_stage({"ticker": "AAPL", "user_query": "Research Apple"})
+
+    assert result["research_data_status"] == "partial"
+    assert result["failed_research_areas"] == ["company"]
+    assert result["research_errors"] == payload["research_errors"]
+    assert result["company_research"] is None
+    assert result["financial_research"] is payload["financial_research"]
+    assert result["market_research"] is payload["market_research"]
+    assert result["industry_macro_research"] is payload["industry_macro_research"]
+    assert result["current_stage"] == "research"
+    assert result["application_error"]
+    assert route_after_research(result) == "end"
+
+
+def test_partial_research_retains_degraded_status_for_available_areas():
+    payload = _research_result("degraded", "LLM synthesis failed; provider data retained.")
+    payload["market_research"] = None
+    payload["research_errors"] = {"market": "Market provider unavailable."}
+
+    with patch("app.application.graph.research_supervisor_graph.invoke", return_value=payload):
+        result = run_research_stage({"ticker": "AAPL", "user_query": "Research Apple"})
+
+    assert result["research_data_status"] == "partial"
+    assert result["failed_research_areas"] == ["market"]
+    assert result["degraded_research_areas"] == ["company"]
+    assert result["research_degradation_reasons"] == {
+        "company": "LLM synthesis failed; provider data retained."
+    }
+    assert route_after_research(result) == "end"
+
+
+def test_public_output_includes_failed_research_areas():
+    result = finalize_application({
+        "ticker": "AAPL",
+        "research_data_status": "partial",
+        "failed_research_areas": ["company"],
+    })
+    assert result["research_data_status"] == "partial"
+    assert result["failed_research_areas"] == ["company"]

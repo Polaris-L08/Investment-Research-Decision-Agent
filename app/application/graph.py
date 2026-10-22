@@ -26,7 +26,6 @@ from app.agents.report import report_graph
 from app.agents.research_supervisor import research_supervisor_graph
 from app.agents.risk import risk_graph
 from app.agents.valuation import valuation_graph
-from app.application.errors import make_error_detail
 from app.application.contracts import (
     StageContractError,
     normalize_stage_output,
@@ -52,6 +51,14 @@ _REQUIRED_RESEARCH_FIELDS = (
     "market_research",
     "industry_macro_research",
 )
+
+_RESEARCH_FIELD_TO_AREA = {
+    "company_research": "company",
+    "financial_research": "financial",
+    "market_research": "market",
+    "industry_macro_research": "industry_macro",
+}
+
 
 def _stage_errors(state: Mapping[str, Any], stage: str, message: str) -> dict[str, str]:
     errors = dict(state.get("stage_errors") or {})
@@ -268,48 +275,38 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
                 ),
             }
 
-        missing = [field for field in _REQUIRED_RESEARCH_FIELDS if updates.get(field) is None]
-        if missing:
-            message = "Required research output(s) missing: " + ", ".join(missing)
-            if research_errors:
-                details = "; ".join(f"{key}: {value}" for key, value in research_errors.items())
-                message = f"{message}. Research errors: {details}"
-            return {
-                **updates,
-                **_failure_update(
-                    {**state, **updates}, stage="research", message=message
-                ),
-            }
-        if research_errors:
-            details = "; ".join(f"{key}: {value}" for key, value in research_errors.items())
-            return {
-                **updates,
-                **_failure_update(
-                    {**state, **updates},
-                    stage="research",
-                    message=f"One or more research areas failed: {details}",
-                ),
-            }
-
-        validate_ticker_consistency(
-            state["ticker"],
-            company_research=updates["company_research"],
-            financial_research=updates["financial_research"],
-            market_research=updates["market_research"],
-            industry_macro_research=updates["industry_macro_research"],
-        )
-        # Validate the shared per-result status contract and derive a stable
-        # application-level summary. Degraded success is distinct from a failed
-        # research area; Lesson 4 does not yet allow missing-area partial success.
-        research_results = {
-            "company": updates["company_research"],
-            "financial": updates["financial_research"],
-            "market": updates["market_research"],
-            "industry_macro": updates["industry_macro_research"],
+        expected_types = {
+            "company_research": CompanyResearchResult,
+            "financial_research": FinancialResearchResult,
+            "market_research": MarketResearchResult,
+            "industry_macro_research": IndustryMacroResearchResult,
         }
+
+        # Validate every result that is present before classifying the run as
+        # partial. A malformed object must not be treated as usable evidence.
+        available_research: dict[str, Any] = {}
+        for key, expected_type in expected_types.items():
+            research_result = updates.get(key)
+            if research_result is None:
+                continue
+            if not isinstance(research_result, expected_type):
+                raise StageContractError(
+                    f"Research field '{key}' must be {expected_type.__name__}."
+                )
+            available_research[key] = research_result
+
+        if available_research:
+            validate_ticker_consistency(
+                state["ticker"],
+                **available_research,
+            )
+
         degraded_areas: list[str] = []
         degradation_reasons: dict[str, str] = {}
-        for area, research_result in research_results.items():
+        for field, area in _RESEARCH_FIELD_TO_AREA.items():
+            research_result = updates.get(field)
+            if research_result is None:
+                continue
             status = getattr(research_result, "data_status", None)
             reason = getattr(research_result, "degradation_reason", None)
             if status not in {"complete", "degraded"}:
@@ -329,19 +326,55 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
                 )
         updates["degraded_research_areas"] = degraded_areas
         updates["research_degradation_reasons"] = degradation_reasons
-        updates["research_data_status"] = "degraded" if degraded_areas else "complete"
-        expected_types = {
-            "company_research": CompanyResearchResult,
-            "financial_research": FinancialResearchResult,
-            "market_research": MarketResearchResult,
-            "industry_macro_research": IndustryMacroResearchResult,
-        }
-        for key, expected_type in expected_types.items():
-            if not isinstance(updates[key], expected_type):
-                raise StageContractError(
-                    f"Research field '{key}' must be {expected_type.__name__}."
-                )
 
+        missing = [
+            field
+            for field in _REQUIRED_RESEARCH_FIELDS
+            if updates.get(field) is None
+        ]
+        if missing or research_errors:
+            # Partial means at least one validated research result is usable,
+            # but the required evidence set is incomplete. It is deliberately
+            # not a successful Application run: downstream valuation, risk,
+            # decision, and report stages must not execute with missing inputs.
+            updates["research_data_status"] = (
+                "partial" if available_research else "not_available"
+            )
+            failed_areas = set(research_errors)
+            failed_areas.update(
+                _RESEARCH_FIELD_TO_AREA[field]
+                for field in missing
+                if field in _RESEARCH_FIELD_TO_AREA
+            )
+            area_order = list(_RESEARCH_FIELD_TO_AREA.values())
+            updates["failed_research_areas"] = [
+                area for area in area_order if area in failed_areas
+            ] + sorted(failed_areas.difference(area_order))
+
+            details: list[str] = []
+            if missing:
+                details.append(
+                    "Required research output(s) missing: " + ", ".join(missing)
+                )
+            if research_errors:
+                error_details = "; ".join(
+                    f"{key}: {value}" for key, value in research_errors.items()
+                )
+                details.append("Research errors: " + error_details)
+            message = ". ".join(details)
+            return {
+                **updates,
+                **_failure_update(
+                    {**state, **updates},
+                    stage="research",
+                    message=message,
+                ),
+            }
+
+        updates["failed_research_areas"] = []
+        updates["research_data_status"] = (
+            "degraded" if degraded_areas else "complete"
+        )
         if updates.get("valuation_inputs") is not None and not isinstance(
             updates["valuation_inputs"], ValuationInputs
         ):
@@ -629,6 +662,7 @@ def finalize_application(state: ApplicationState) -> dict[str, Any]:
         "report_rendering_error": state.get("report_rendering_error", ""),
         "research_errors": dict(state.get("research_errors") or {}),
         "research_data_status": state.get("research_data_status", "not_available"),
+        "failed_research_areas": list(state.get("failed_research_areas") or []),
         "degraded_research_areas": list(state.get("degraded_research_areas") or []),
         "research_degradation_reasons": dict(state.get("research_degradation_reasons") or {}),
         "stage_errors": dict(state.get("stage_errors") or {}),

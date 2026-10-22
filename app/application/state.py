@@ -54,6 +54,7 @@ class ApplicationState(TypedDict, total=False):
     industry_macro_research: IndustryMacroResearchResult | None
     research_errors: dict[str, str]
     research_data_status: str
+    failed_research_areas: list[str]
     degraded_research_areas: list[str]
     research_degradation_reasons: dict[str, str]
     planning_error: str
@@ -113,6 +114,7 @@ class ApplicationOutputState(TypedDict, total=False):
     report_rendering_error: str
     research_errors: dict[str, str]
     research_data_status: str
+    failed_research_areas: list[str]
     degraded_research_areas: list[str]
     research_degradation_reasons: dict[str, str]
     stage_errors: dict[str, str]
