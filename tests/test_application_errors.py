@@ -1,5 +1,4 @@
 """Tests for the Application error taxonomy introduced in Phase 12 Lesson 1."""
-
 from app.application.contracts import StageContractError
 from app.application.errors import classify_exception, make_error_detail
 from app.providers.config import ProviderConfigurationError
@@ -72,7 +71,6 @@ def test_child_stage_string_does_not_falsely_claim_root_exception_or_retryabilit
 
 def test_application_stage_failure_keeps_structured_exception_diagnostics(monkeypatch):
     import app.application.graph as application_graph_module
-
     class FailingResearchGraph:
         def invoke(self, payload):
             raise TransientProviderError("temporary upstream outage")
@@ -89,6 +87,19 @@ def test_application_stage_failure_keeps_structured_exception_diagnostics(monkey
     assert result["error_details"][-1]["exception_type"] == "TransientProviderError"
     assert result["error_details"][-1]["category"] == "transient_provider"
     assert result["error_details"][-1]["retryable"] is True
+
+
+def test_invalid_public_input_is_recorded_as_non_retryable_validation_error():
+    from app.application.graph import validate_application_input
+
+    result = validate_application_input({"ticker": " ", "user_query": "research"})
+
+    detail = result["error_details"][-1]
+    assert result["execution_status"] == "failed"
+    assert detail["code"] == "INVALID_TICKER"
+    assert detail["category"] == "input_validation"
+    assert detail["retryable"] is False
+    assert detail["handling_owner"] == "application_input_boundary"
 
 
 def test_application_stage_does_not_convert_cancellation_into_failure_state(monkeypatch):

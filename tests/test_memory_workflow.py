@@ -146,6 +146,46 @@ def test_capture_skips_failed_report_without_writing(tmp_path, monkeypatch):
     assert "did not complete successfully" in result["memory_capture_reason"]
 
 
+def test_capture_skips_when_structured_errors_conflict_with_completed_status(tmp_path, monkeypatch):
+    """防止陈旧或合并错误的生命周期状态绕过 Memory 写入门禁。"""
+    service = build_service(tmp_path)
+
+    def should_not_write(candidate, *, scope):
+        raise AssertionError("write must not be called when structured errors remain")
+
+    monkeypatch.setattr(service, "write", should_not_write)
+    node = make_memory_capture_node(service)
+    result = node(
+        {
+            "ticker": "ACME",
+            "approval_status": "approved",
+            "current_stage": "completed",
+            "execution_status": "completed",
+            "application_error": "",
+            "stage_errors": {},
+            "error_details": [{
+                "stage": "report_generation",
+                "code": "REPORT_SUBSTAGE_REPORTED_FAILURE",
+                "category": "stage_reported_failure",
+                "retryable": None,
+                "handling_owner": "report_graph_boundary",
+                "exception_type": "",
+                "message": "narrative generation failed",
+            }],
+            "report": object(),
+            "report_markdown": "# report",
+        },
+        {"configurable": {
+            "memory_owner_id": "user_a",
+            "memory_namespace": "investment_agent",
+            "memory_source_reference": "application-run:test-structured-error",
+        }},
+    )
+
+    assert result["memory_capture_decision"] == "skipped"
+    assert "did not complete successfully" in result["memory_capture_reason"]
+
+
 def test_capture_write_failure_does_not_raise_or_change_report_status(tmp_path, monkeypatch):
     service = build_service(tmp_path)
 

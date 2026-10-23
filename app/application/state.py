@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from app.application.errors import ApplicationErrorDetail
+
 """Typed state contracts for the top-level investment application graph."""
 
-from typing import NotRequired, TypedDict, Any
+from typing import NotRequired, TypedDict
 
 from app.agents.models import (
     CompanyResearchResult,
@@ -88,6 +90,9 @@ class ApplicationState(TypedDict, total=False):
     # Routing uses this field together with the stage result contract.
     execution_status: str
     stage_errors: dict[str, str]
+    # 结构化错误明细：保留错误类别、是否可重试、处理责任边界等诊断信息。
+    # 与 stage_errors 的区别是：stage_errors 面向快速定位，error_details 面向统一诊断与恢复策略。
+    error_details: list[ApplicationErrorDetail]
     application_error: str
 
     # Human-in-the-loop approval
@@ -121,6 +126,7 @@ class ApplicationOutputState(TypedDict, total=False):
     degraded_research_areas: list[str]
     research_degradation_reasons: dict[str, str]
     stage_errors: dict[str, str]
+    error_details: list[ApplicationErrorDetail]
     application_error: str
     execution_status: str
 

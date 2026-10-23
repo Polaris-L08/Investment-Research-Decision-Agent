@@ -147,7 +147,10 @@ def make_memory_capture_node(
             or state.get("current_stage") != "completed"
             or state.get("application_error")
             or state.get("stage_errors")
+            or state.get("error_details")
         ):
+            # 结构化错误也是失败事实。即使某个节点误把 execution_status 写成
+            # completed，只要错误详情仍存在，就不能将本次执行记入长期研究历史。
             result["memory_capture_reason"] = "The application workflow did not complete successfully."
             return result
         if state.get("report") is None or not state.get("report_markdown"):

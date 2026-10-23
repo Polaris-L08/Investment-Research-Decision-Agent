@@ -43,6 +43,66 @@ def test_failed_execution_cannot_route_downstream_even_if_result_is_present():
     assert route_after_risk(state) == "end"
 
 
+def test_structured_error_detail_alone_fails_closed_for_routing_and_terminal_status():
+    """结构化错误与生命周期字段不一致时，路由和终态仍必须失败关闭。"""
+    state = {
+        "execution_status": "running",
+        "application_error": "",
+        "stage_errors": {},
+        "error_details": [{
+            "stage": "risk",
+            "code": "TRANSIENT_PROVIDER_FAILURE",
+            "category": "transient_provider",
+            "retryable": True,
+            "handling_owner": "provider_retry_policy",
+            "exception_type": "TransientProviderError",
+            "message": "provider unavailable",
+        }],
+        "risk_analysis": object(),
+        "risk_error": "",
+    }
+
+    assert route_after_risk(state) == "end"
+    assert finalize_application(state)["execution_status"] == "failed"
+
+
+def test_every_critical_stage_route_rejects_structured_errors_even_if_status_is_running():
+    """各关键条件边都必须检查结构化错误，不能只依赖 execution_status。"""
+    error_details = [{
+        "stage": "upstream",
+        "code": "STAGE_CONTRACT_VIOLATION",
+        "category": "stage_contract",
+        "retryable": False,
+        "handling_owner": "application_stage_boundary",
+        "exception_type": "StageContractError",
+        "message": "invalid output",
+    }]
+    healthy_base = {
+        "execution_status": "running",
+        "application_error": "",
+        "stage_errors": {},
+        "error_details": error_details,
+    }
+
+    assert route_after_research({
+        **healthy_base,
+        "research_data_status": "complete",
+        "company_research": object(),
+        "financial_research": object(),
+        "market_research": object(),
+        "industry_macro_research": object(),
+    }) == "end"
+    assert route_after_valuation({
+        **healthy_base, "valuation": object(), "valuation_error": ""
+    }) == "end"
+    assert route_after_risk({
+        **healthy_base, "risk_analysis": object(), "risk_error": ""
+    }) == "end"
+    assert route_after_decision({
+        **healthy_base, "investment_decision": object(), "decision_error": ""
+    }) == "end"
+
+
 def test_research_requires_running_status_and_no_research_error():
     healthy = {
         "execution_status": "running",

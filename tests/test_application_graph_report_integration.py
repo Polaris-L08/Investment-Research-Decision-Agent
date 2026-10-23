@@ -98,6 +98,74 @@ def test_report_stage_collects_report_errors_without_losing_report(monkeypatch):
     assert "LLM unavailable" in result["application_error"]
     assert result["current_stage"] == "report"
     assert result["execution_status"] == "failed"
+    assert result["error_details"][-1]["stage"] == "report_generation"
+    assert result["error_details"][-1]["category"] == "stage_reported_failure"
+
+
+def test_report_stage_rejects_empty_success_payload(monkeypatch):
+    """报告子图不能以空报告、空 Markdown 和空错误伪装成成功。"""
+    class EmptyReportGraph:
+        def invoke(self, payload):
+            return {
+                "report": None,
+                "report_assembly_error": "",
+                "report_generation_error": "",
+                "report_merge_error": "",
+                "report_markdown": "",
+                "report_rendering_error": "",
+            }
+
+    monkeypatch.setattr(application_graph_module, "report_graph", EmptyReportGraph())
+    result = run_report_stage({
+        "ticker": "AAPL",
+        "company_research": object(),
+        "financial_research": object(),
+        "market_research": object(),
+        "industry_macro_research": object(),
+        "valuation": object(),
+        "risk_analysis": object(),
+        "investment_decision": object(),
+        "stage_errors": {},
+        "error_details": [],
+    })
+
+    assert result["execution_status"] == "failed"
+    assert result["application_error"]
+    assert result["error_details"][-1]["category"] == "stage_contract"
+
+
+def test_report_stage_rejects_report_for_another_ticker(monkeypatch):
+    """最终报告必须与本次请求的 ticker 一致。"""
+    report = build_test_report()
+    report = report.model_copy(update={"ticker": "MSFT"})
+
+    class MismatchedReportGraph:
+        def invoke(self, payload):
+            return {
+                "report": report,
+                "report_assembly_error": "",
+                "report_generation_error": "",
+                "report_merge_error": "",
+                "report_markdown": "# Wrong ticker report",
+                "report_rendering_error": "",
+            }
+
+    monkeypatch.setattr(application_graph_module, "report_graph", MismatchedReportGraph())
+    result = run_report_stage({
+        "ticker": "AAPL",
+        "company_research": object(),
+        "financial_research": object(),
+        "market_research": object(),
+        "industry_macro_research": object(),
+        "valuation": object(),
+        "risk_analysis": object(),
+        "investment_decision": object(),
+        "stage_errors": {},
+        "error_details": [],
+    })
+
+    assert result["execution_status"] == "failed"
+    assert result["error_details"][-1]["category"] == "stage_contract"
 
 
 def test_runtime_factory_builds_production_application_graph():

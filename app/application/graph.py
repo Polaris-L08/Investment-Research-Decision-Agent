@@ -32,6 +32,7 @@ from app.application.contracts import (
     normalize_valuation_output,
     validate_ticker_consistency,
 )
+from app.application.errors import ErrorCategory, make_error_detail
 from app.application.state import (
     ApplicationInputState,
     ApplicationOutputState,
@@ -73,33 +74,73 @@ def _failure_update(
     message: str,
     result_key: str | None = None,
     error_key: str | None = None,
+    exc: Exception | None = None,
+    error_code: str | None = None,
+    error_category: ErrorCategory | None = None,
+    retryable: bool | None = None,
+    handling_owner: str | None = None,
 ) -> dict[str, Any]:
+    """生成统一失败状态，并将结构化错误追加到本次执行的 State。
+
+    这里不执行重试或降级；它只记录失败事实及分类结果，随后由 Graph
+    的条件边决定是否允许进入下游阶段。若有原始异常，必须传入 ``exc``，
+    以免把 Provider、超时、契约错误等不同故障都压扁成普通字符串。
+    """
+    # 子图只返回错误字符串时，不猜测底层异常类型或可重试性；只有捕获到
+    # 原始异常时，才由错误分类器给出更具体的诊断。
+    normalized_message = message.strip() or (
+        (str(exc).strip() or type(exc).__name__)
+        if exc is not None
+        else "Stage failed without an error message."
+    )
+    detail = make_error_detail(
+        stage=stage,
+        message=normalized_message,
+        exc=exc,
+        code=error_code,
+        category=error_category,
+        retryable=retryable,
+        handling_owner=handling_owner,
+    )
+    previous_details = state.get("error_details") or []
+    if not isinstance(previous_details, list):
+        # State 是内部契约；如果历史状态本身损坏，也要保留当前故障的可诊断性。
+        previous_details = []
+
     update: dict[str, Any] = {
         "current_stage": stage,
-        # One canonical lifecycle value drives routing; detailed errors remain
-        # available for diagnostics and stage-specific API fields.
+        # 统一生命周期状态是路由的首要依据；错误详情用于诊断，不代替路由状态。
         "execution_status": "failed",
-        "stage_errors": _stage_errors(state, stage, message),
-        "application_error": f"{stage} failed: {message}",
+        "stage_errors": _stage_errors(state, stage, normalized_message),
+        "error_details": [*previous_details, detail],
+        "application_error": f"{stage} failed: {normalized_message}",
     }
     if result_key:
         update[result_key] = None
     if error_key:
-        update[error_key] = message
+        update[error_key] = normalized_message
     return update
 
 
 def validate_application_input(state: ApplicationState) -> dict[str, Any]:
-    """Validate the public request, without requiring valuation-stage inputs."""
+    """验证公开请求，并初始化本次执行的错误集合。
+
+    估值输入允许在请求入口缺省，因为研究阶段可以独立执行；但若调用方
+    显式传入错误类型，则应立即拒绝，不能等到后续阶段才暴露类型错误。
+    """
     ticker = state.get("ticker", "")
     user_query = state.get("user_query", "")
     if not isinstance(ticker, str) or not ticker.strip():
         return _failure_update(
-            state, stage="input", message="Ticker must be a non-empty string."
+            state, stage="input", message="Ticker must be a non-empty string.",
+            error_code="INVALID_TICKER", error_category="input_validation",
+            retryable=False, handling_owner="application_input_boundary",
         )
     if not isinstance(user_query, str) or not user_query.strip():
         return _failure_update(
-            state, stage="input", message="User query must be a non-empty string."
+            state, stage="input", message="User query must be a non-empty string.",
+            error_code="INVALID_USER_QUERY", error_category="input_validation",
+            retryable=False, handling_owner="application_input_boundary",
         )
 
     # Valuation inputs are optional at the public request boundary. Validate
@@ -111,6 +152,10 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
             state,
             stage="input",
             message="If provided, valuation_inputs must be a ValuationInputs instance.",
+            error_code="INVALID_VALUATION_INPUTS_TYPE",
+            error_category="input_validation",
+            retryable=False,
+            handling_owner="application_input_boundary",
         )
     supplied_assumptions = state.get("valuation_assumptions")
     if supplied_assumptions is not None and not isinstance(
@@ -123,6 +168,10 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
                 "If provided, valuation_assumptions must be a "
                 "ValuationAssumptions instance."
             ),
+            error_code="INVALID_VALUATION_ASSUMPTIONS_TYPE",
+            error_category="input_validation",
+            retryable=False,
+            handling_owner="application_input_boundary",
         )
 
     return {
@@ -133,13 +182,19 @@ def validate_application_input(state: ApplicationState) -> dict[str, Any]:
         "approval_status": "pending",
         "approval_reason": "",
         "stage_errors": dict(state.get("stage_errors") or {}),
+        "error_details": list(state.get("error_details") or []),
         "application_error": "",
     }
 
 
 
 def approval_gate(state: ApplicationState) -> dict[str, Any]:
-    """Pause the Application Graph until the research request is reviewed."""
+    """暂停工作流等待人工审批，并校验恢复执行时传入的审批结果。
+
+    ``interrupt`` 的恢复值属于外部输入，不能因为它来自 HITL 流程就被视为可信。
+    非法恢复值记录为不可重试的输入契约错误；用户明确拒绝则是业务终态，不能
+    误记为执行失败。
+    """
 
     decision = interrupt(
         {
@@ -156,17 +211,16 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
 
     # A resume value is untrusted input and must be validated.
     if not isinstance(decision, dict):
+        message = "Approval response must be a dictionary."
         return {
+            **_failure_update(
+                state, stage="approval", message=message,
+                error_code="INVALID_APPROVAL_RESPONSE_TYPE",
+                error_category="input_validation", retryable=False,
+                handling_owner="approval_boundary",
+            ),
             "approval_status": "invalid",
-            "approval_reason": "Approval response must be a dictionary.",
-            "current_stage": "approval",
-            "execution_status": "failed",
-            "stage_errors": _stage_errors(
-                state, "approval", "Approval response must be a dictionary."
-            ),
-            "application_error": (
-                "Approval failed: response must be a dictionary."
-            ),
+            "approval_reason": message,
         }
 
     action = decision.get("decision")
@@ -175,23 +229,27 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
     if not isinstance(action, str) or action not in {"approve", "reject"}:
         message = "Decision must be 'approve' or 'reject'."
         return {
+            **_failure_update(
+                state, stage="approval", message=message,
+                error_code="INVALID_APPROVAL_DECISION",
+                error_category="input_validation", retryable=False,
+                handling_owner="approval_boundary",
+            ),
             "approval_status": "invalid",
             "approval_reason": message,
-            "current_stage": "approval",
-            "execution_status": "failed",
-            "stage_errors": _stage_errors(state, "approval", message),
-            "application_error": f"Approval failed: {message}",
         }
 
     if not isinstance(reason, str):
         message = "Approval reason must be a string."
         return {
+            **_failure_update(
+                state, stage="approval", message=message,
+                error_code="INVALID_APPROVAL_REASON",
+                error_category="input_validation", retryable=False,
+                handling_owner="approval_boundary",
+            ),
             "approval_status": "invalid",
             "approval_reason": message,
-            "current_stage": "approval",
-            "execution_status": "failed",
-            "stage_errors": _stage_errors(state, "approval", message),
-            "application_error": f"Approval failed: {message}",
         }
 
     if action == "reject":
@@ -201,6 +259,7 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
             "current_stage": "rejected",
             "execution_status": "rejected",
             "stage_errors": dict(state.get("stage_errors") or {}),
+            "error_details": list(state.get("error_details") or []),
             "application_error": "",
         }
 
@@ -210,17 +269,19 @@ def approval_gate(state: ApplicationState) -> dict[str, Any]:
         "current_stage": "research",
         "execution_status": "running",
         "stage_errors": dict(state.get("stage_errors") or {}),
+        "error_details": list(state.get("error_details") or []),
         "application_error": "",
     }
 
 
 def route_after_approval(state: ApplicationState) -> str:
-    """Only a valid approval in a healthy execution may enter Research."""
+    """仅允许无错误的有效审批进入 Research。"""
     if (
         state.get("approval_status") == "approved"
         and state.get("execution_status") == "running"
         and not state.get("application_error")
         and not (state.get("stage_errors") or {})
+        and not (state.get("error_details") or [])
     ):
         return "continue"
     return "end"
@@ -285,7 +346,8 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
             return {
                 **updates,
                 **_failure_update(
-                    {**state, **updates}, stage="research", message=message
+                    {**state, **updates}, stage="research", message=message,
+                    error_code="RESEARCH_SUPERVISOR_REPORTED_FAILURE",
                 ),
             }
 
@@ -383,6 +445,7 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
                     {**state, **updates},
                     stage="research",
                     message=message,
+                    error_code="RESEARCH_EVIDENCE_INCOMPLETE",
                 ),
             }
 
@@ -409,16 +472,15 @@ def run_research_stage(state: ApplicationState) -> dict[str, Any]:
         }
     except Exception as exc:
         return _failure_update(
-            state, stage="research", message=str(exc)
+            state, stage="research", message=str(exc), exc=exc
         )
 
 
 def route_after_research(state: ApplicationState) -> str:
-    """Continue only when Research explicitly returned a healthy running state.
+    """仅当研究证据完整且错误契约一致时，才允许进入估值阶段。
 
-    The lifecycle marker is the canonical recovery decision. The error fields
-    are checked as defensive consistency guards so an inconsistent state cannot
-    route into valuation merely because a result object happens to exist.
+    execution_status 是主要生命周期标记；业务错误、阶段错误和结构化错误
+    都是防御性检查，防止 State 合并后出现“有结果但实际失败”的错误路由。
     """
     required_outputs_present = all(
         state.get(field) is not None for field in _REQUIRED_RESEARCH_FIELDS
@@ -429,6 +491,7 @@ def route_after_research(state: ApplicationState) -> str:
         and state.get("research_data_status") in {"complete", "degraded"}
         and not state.get("application_error")
         and not (state.get("stage_errors") or {})
+        and not (state.get("error_details") or [])
     )
     return "continue" if can_continue else "end"
 
@@ -449,6 +512,10 @@ def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
             ),
             result_key="valuation",
             error_key="valuation_error",
+            error_code="VALUATION_INPUTS_MISSING",
+            error_category="business_input",
+            retryable=False,
+            handling_owner="valuation_input_boundary",
         )
     if not isinstance(state.get("valuation_assumptions"), ValuationAssumptions):
         return _failure_update(
@@ -460,6 +527,10 @@ def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
             ),
             result_key="valuation",
             error_key="valuation_error",
+            error_code="VALUATION_ASSUMPTIONS_MISSING",
+            error_category="business_input",
+            retryable=False,
+            handling_owner="valuation_input_boundary",
         )
 
     try:
@@ -493,17 +564,18 @@ def run_valuation_stage(state: ApplicationState) -> dict[str, Any]:
     except Exception as exc:
         return _failure_update(
             state, stage="valuation", message=str(exc),
-            result_key="valuation", error_key="valuation_error",
+            result_key="valuation", error_key="valuation_error", exc=exc,
         )
 
 
 def route_after_valuation(state: ApplicationState) -> str:
-    """Prevent Risk from running unless Valuation succeeded without error."""
+    """只有估值结果有效且没有任何遗留错误时，才允许运行 Risk。"""
     can_continue = (
         state.get("execution_status") == "running"
         and state.get("valuation") is not None
         and not state.get("valuation_error")
         and not (state.get("stage_errors") or {})
+        and not (state.get("error_details") or [])
         and not state.get("application_error")
     )
     return "continue" if can_continue else "end"
@@ -544,17 +616,18 @@ def run_risk_stage(state: ApplicationState) -> dict[str, Any]:
     except Exception as exc:
         return _failure_update(
             state, stage="risk", message=str(exc),
-            result_key="risk_analysis", error_key="risk_error",
+            result_key="risk_analysis", error_key="risk_error", exc=exc,
         )
 
 
 def route_after_risk(state: ApplicationState) -> str:
-    """Prevent Investment Decision from consuming a missing/failed risk result."""
+    """阻止 Investment Decision 消费缺失、失败或状态不一致的风险结果。"""
     can_continue = (
         state.get("execution_status") == "running"
         and state.get("risk_analysis") is not None
         and not state.get("risk_error")
         and not (state.get("stage_errors") or {})
+        and not (state.get("error_details") or [])
         and not state.get("application_error")
     )
     return "continue" if can_continue else "end"
@@ -599,24 +672,30 @@ def run_decision_stage(state: ApplicationState) -> dict[str, Any]:
     except Exception as exc:
         return _failure_update(
             state, stage="investment_decision", message=str(exc),
-            result_key="investment_decision", error_key="decision_error",
+            result_key="investment_decision", error_key="decision_error", exc=exc,
         )
 
 
 def route_after_decision(state: ApplicationState) -> str:
-    """Enter Report only after a valid investment decision has been produced."""
+    """只有投资决策结果有效且工作流没有遗留错误时，才允许进入报告阶段。"""
     can_continue = (
         state.get("execution_status") == "running"
         and state.get("investment_decision") is not None
         and not state.get("decision_error")
         and not (state.get("stage_errors") or {})
+        and not (state.get("error_details") or [])
         and not state.get("application_error")
     )
     return "continue" if can_continue else "end"
 
 
 def run_report_stage(state: ApplicationState) -> dict[str, Any]:
-    """Run the complete Report Graph as one Application business stage."""
+    """执行报告子图，并把内部报告错误统一映射到 Application 契约。
+
+    报告子图可以返回部分诊断信息，但只有在结构化报告和 Markdown 都存在、
+    且所有报告子阶段均未报告错误时，顶层工作流才可以标记为 completed。
+    否则会把故障写入统一错误集合，并由 Memory 节点跳过长期历史写入。
+    """
     try:
         raw = report_graph.invoke(
             {
@@ -635,6 +714,9 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
         report = raw.get("report")
         if report is not None and not isinstance(report, InvestmentReport):
             raise StageContractError("Report Graph 'report' must be an InvestmentReport or None.")
+        if report is not None:
+            # 报告是最终对外结果，必须确认其证券代码与本次请求一致。
+            validate_ticker_consistency(state["ticker"], report=report)
 
         error_fields = (
             ("report_assembly_error", "report_assembly"),
@@ -643,6 +725,9 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
             ("report_rendering_error", "report_rendering"),
         )
         stage_errors = dict(state.get("stage_errors") or {})
+        # 结构化错误不能只存在于 stage_errors 字符串字典中；逐个子阶段记录
+        # 错误详情，才能保留错误来源和“根异常未知”的语义。
+        error_details = list(state.get("error_details") or [])
         report_errors: list[str] = []
         normalized_errors: dict[str, str] = {}
         for field_name, stage_name in error_fields:
@@ -655,12 +740,28 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
             if normalized_errors[field_name]:
                 stage_errors[stage_name] = normalized_errors[field_name]
                 report_errors.append(f"{stage_name}: {normalized_errors[field_name]}")
+                error_details.append(
+                    make_error_detail(
+                        stage=stage_name,
+                        message=normalized_errors[field_name],
+                        code="REPORT_SUBSTAGE_REPORTED_FAILURE",
+                        handling_owner="report_graph_boundary",
+                    )
+                )
 
         report_markdown = raw.get("report_markdown", "")
         if report_markdown is None:
             report_markdown = ""
         if not isinstance(report_markdown, str):
             raise StageContractError("Report Graph field 'report_markdown' must be a string.")
+        report_markdown = report_markdown.strip()
+
+        # 没有子阶段错误却缺少报告主体，说明子图违反了成功输出契约。
+        # 不能仅凭 error 字段为空就把空报告标记为成功。
+        if not report_errors and (report is None or not report_markdown):
+            raise StageContractError(
+                "Report Graph reported no errors but did not return both a structured report and non-empty Markdown."
+            )
 
         degraded_areas = list(state.get("degraded_research_areas") or [])
         if degraded_areas:
@@ -675,45 +776,61 @@ def run_report_stage(state: ApplicationState) -> dict[str, Any]:
             caveat = "\n".join(caveat_lines)
             report_markdown = f"{caveat}\n\n---\n\n{report_markdown}" if report_markdown else caveat
 
+        # 即使当前报告子图没有返回错误，之前阶段遗留的错误也不能被本节点清空。
+        prior_errors_exist = bool(
+            state.get("application_error")
+            or state.get("stage_errors")
+            or state.get("error_details")
+        )
         application_error = ""
         if report_errors:
             application_error = "Report stage ended with errors: " + "; ".join(report_errors)
+        elif prior_errors_exist:
+            application_error = state.get("application_error") or (
+                "Report stage cannot complete because prior workflow errors remain."
+            )
+
+        workflow_failed = bool(report_errors or prior_errors_exist)
 
         return {
             "report": report,
             **normalized_errors,
             "report_markdown": report_markdown,
-            "current_stage": "completed" if not report_errors else "report",
-            "execution_status": "completed" if not report_errors else "failed",
+            "current_stage": "report" if workflow_failed else "completed",
+            "execution_status": "failed" if workflow_failed else "completed",
             "stage_errors": stage_errors,
+            "error_details": error_details,
             "application_error": application_error,
         }
     except Exception as exc:
         message = str(exc) or type(exc).__name__
         return {
-            "report": state.get("report"),
+            **_failure_update(
+                state, stage="report", message=message, exc=exc
+            ),
+            # 报告子图调用或契约校验失败时，不保留可能来自旧状态的报告对象。
+            "report": None,
             "report_assembly_error": state.get("report_assembly_error", ""),
             "report_generation_error": state.get("report_generation_error", ""),
             "report_merge_error": state.get("report_merge_error", ""),
             "report_rendering_error": state.get("report_rendering_error", ""),
             "report_markdown": state.get("report_markdown", ""),
-            "current_stage": "report",
-            "execution_status": "failed",
-            "stage_errors": _stage_errors(state, "report", message),
-            "application_error": f"Report stage failed: {message}",
         }
 
 
 def _terminal_execution_status(state: Mapping[str, Any]) -> str:
-    """Normalize the lifecycle value at the public terminal boundary.
+    """在公开输出边界规范化终态，避免把不一致的 State 报告为成功。
 
-    A finalizer must never report ``running``. Error details take precedence
-    over a stale lifecycle marker because nodes merge partial State updates.
-    Approval rejection is a business outcome, not an execution failure.
+    用户拒绝审批属于业务终态；除此之外，任何错误字段都优先于可能陈旧的
+    execution_status。终结节点不得向调用方返回 running 这种非终态状态。
     """
     if state.get("approval_status") == "rejected":
         return "rejected"
-    if state.get("application_error") or state.get("stage_errors"):
+    if (
+        state.get("application_error")
+        or state.get("stage_errors")
+        or state.get("error_details")
+    ):
         return "failed"
 
     status = state.get("execution_status")
@@ -749,6 +866,8 @@ def finalize_application(state: ApplicationState) -> dict[str, Any]:
         "degraded_research_areas": list(state.get("degraded_research_areas") or []),
         "research_degradation_reasons": dict(state.get("research_degradation_reasons") or {}),
         "stage_errors": dict(state.get("stage_errors") or {}),
+        # 将可序列化的结构化错误作为稳定公开诊断契约输出。
+        "error_details": list(state.get("error_details") or []),
         "execution_status": _terminal_execution_status(state),
         "report_assembly_error": state.get("report_assembly_error", ""),
         "report_generation_error": state.get("report_generation_error", ""),
