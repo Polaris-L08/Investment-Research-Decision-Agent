@@ -197,7 +197,8 @@ def generate_report_narrative(
     """Generate human-readable report narrative from an InvestmentReport."""
 
     structured_report_llm = llm.with_structured_output(
-        ReportNarrativeOutput
+        ReportNarrativeOutput,
+        method="function_calling",
     )
 
     report = state["report"]

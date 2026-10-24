@@ -48,7 +48,10 @@ class RiskOutputState(TypedDict):
 def analyze_risk(state: RiskGraphState) -> dict:
     """Analyze investment risks from existing research and valuation."""
 
-    structured_risk_llm = llm.with_structured_output(RiskAnalysis)
+    structured_risk_llm = llm.with_structured_output(
+        RiskAnalysis,
+        method="function_calling",
+    )
 
     prompt = f"""
 You are an investment risk analysis agent.

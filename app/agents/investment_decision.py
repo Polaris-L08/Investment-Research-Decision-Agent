@@ -53,7 +53,10 @@ def make_investment_decision(
 ) -> dict:
     """Generate a structured investment decision from existing analysis."""
 
-    structured_llm = llm.with_structured_output(InvestmentDecision)
+    structured_llm = llm.with_structured_output(
+        InvestmentDecision,
+        method="function_calling",
+    )
 
     prompt = f"""
 You are an investment decision analysis agent.
