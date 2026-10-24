@@ -559,6 +559,11 @@ def test_output_contract_excludes_internal_state_fields(
         "research_errors",
         "planning_error",
         "supervisor_error",
+        # 这三个字段由 Research Supervisor 提供给父级 Application Graph，
+        # 属于子图的公开输出契约，而不是仅供 Supervisor 内部使用的状态。
+        "valuation_inputs",
+        "valuation_assumptions",
+        "valuation_research_error",
     }
 
     assert set(result).issubset(expected_public_fields)

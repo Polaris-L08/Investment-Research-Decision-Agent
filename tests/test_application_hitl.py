@@ -118,5 +118,5 @@ def test_application_graph_invalid_decision_skips_research(monkeypatch):
 
     assert result["approval_status"] == "invalid"
     assert result["execution_status"] == "failed"
-    assert "Approval failed" in result["application_error"]
+    assert "approval failed" in result["application_error"]
     assert research_calls == []

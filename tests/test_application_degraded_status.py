@@ -79,9 +79,12 @@ def test_public_output_preserves_aggregate_degradation_status():
 
 def test_report_markdown_discloses_degraded_research_input():
     from app.application.graph import run_report_stage
+    from test_report_generation import build_test_report
 
+    # 本测试验证降级提示的披露，不测试报告契约失败；因此提供有效的结构化报告，
+    # 避免 report=None 触发 Lesson 7 新增的“成功输出必须包含报告主体”校验。
     raw = {
-        "report": None,
+        "report": build_test_report(),
         "report_assembly_error": "",
         "report_generation_error": "",
         "report_merge_error": "",
@@ -89,9 +92,20 @@ def test_report_markdown_discloses_degraded_research_input():
         "report_markdown": "# Investment Report\nNormal narrative.",
     }
     state = {
+        "ticker": "AAPL",
+        "company_research": None,
+        "financial_research": None,
+        "market_research": None,
+        "industry_macro_research": None,
+        "valuation": None,
+        "risk_analysis": None,
+        "investment_decision": None,
         "degraded_research_areas": ["company"],
-        "research_degradation_reasons": {"company": "LLM synthesis failed; provider data retained."},
+        "research_degradation_reasons": {
+            "company": "LLM synthesis failed; provider data retained."
+        },
         "stage_errors": {},
+        "error_details": [],
     }
     with patch("app.application.graph.report_graph.invoke", return_value=raw):
         result = run_report_stage(state)
