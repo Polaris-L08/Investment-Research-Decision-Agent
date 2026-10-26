@@ -79,11 +79,6 @@ class InvestmentDecision(BaseModel):
         description="Important factors that could improve the investment outcome.",
     )
 
-    key_risks: list[str] = Field(
-        min_length=1,
-        description="Important risks that could impair the investment thesis.",
-    )
-
     invalidation_conditions: list[str] = Field(
         min_length=1,
         description="Conditions that would invalidate the investment thesis.",

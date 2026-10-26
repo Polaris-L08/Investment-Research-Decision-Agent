@@ -77,13 +77,6 @@ def _validate_cross_domain_contract(
             "InvestmentDecision expected_upside."
         )
 
-    if risk_analysis.key_risks != investment_decision.key_risks:
-        raise ValueError(
-            "RiskAnalysis key_risks must match "
-            "InvestmentDecision key_risks."
-        )
-
-
 def build_investment_report(
     company_research: CompanyResearchResult,
     financial_research: FinancialResearchResult,

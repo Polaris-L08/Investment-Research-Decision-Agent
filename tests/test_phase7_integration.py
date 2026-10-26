@@ -165,10 +165,6 @@ def make_investment_decision() -> InvestmentDecision:
             "Continued AI infrastructure investment",
             "Strong demand for accelerated computing",
         ],
-        key_risks=[
-            "Valuation Multiple Compression",
-            "Competitive Pressure",
-        ],
         invalidation_conditions=[
             "Material deterioration in growth expectations",
             "Sustained loss of competitive position",
@@ -330,7 +326,8 @@ def test_phase7_risk_to_decision_contract():
     )
     assert decision.conviction == InvestmentConviction.MEDIUM
 
-    assert decision.key_risks == risk_analysis.key_risks
+    assert not hasattr(decision, "key_risks")
+    assert risk_analysis.key_risks
     assert decision.investment_thesis
     assert decision.supporting_evidence
 
@@ -436,7 +433,8 @@ def test_phase7_full_data_contract_chain():
     assert decision.target_price == valuation.target_price
     assert decision.expected_upside == valuation.expected_upside
 
-    assert decision.key_risks == produced_risk.key_risks
+    assert not hasattr(decision, "key_risks")
+    assert produced_risk.key_risks
 
     assert decision.investment_thesis
     assert decision.supporting_evidence

@@ -77,10 +77,6 @@ def build_test_report() -> InvestmentReport:
             "Earnings growth",
             "Product expansion",
         ],
-        key_risks=[
-            "Competitive pressure",
-            "Regulatory uncertainty",
-        ],
         invalidation_conditions=[
             "Material deterioration in earnings growth",
         ],
@@ -237,9 +233,10 @@ def test_merge_report_narrative_preserves_critical_investment_facts():
         == report.investment_decision.conviction
     )
     assert (
-        merged_report.investment_decision.key_risks
-        == report.investment_decision.key_risks
+        merged_report.risk_analysis.key_risks
+        == report.risk_analysis.key_risks
     )
+    assert not hasattr(merged_report.investment_decision, "key_risks")
 
 
 def test_merge_report_narrative_does_not_mutate_original_report():

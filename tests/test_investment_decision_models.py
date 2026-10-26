@@ -26,10 +26,6 @@ def make_valid_decision() -> InvestmentDecision:
             "Continued AI infrastructure investment",
             "Strong demand for accelerated computing",
         ],
-        key_risks=[
-            "Competitive pressure",
-            "Valuation multiple compression",
-        ],
         invalidation_conditions=[
             "Material deterioration in growth expectations",
             "Sustained loss of competitive position",
@@ -86,7 +82,6 @@ def test_expected_upside_must_match_prices():
             conviction=InvestmentConviction.HIGH,
             investment_thesis="Valid investment thesis.",
             key_catalysts=["Catalyst"],
-            key_risks=["Risk"],
             invalidation_conditions=["Invalidation condition"],
             supporting_evidence=["Evidence"],
         )
@@ -104,7 +99,6 @@ def test_negative_target_price_is_rejected():
             conviction=InvestmentConviction.HIGH,
             investment_thesis="Valid investment thesis.",
             key_catalysts=["Catalyst"],
-            key_risks=["Risk"],
             invalidation_conditions=["Invalidation condition"],
             supporting_evidence=["Evidence"],
         )
@@ -122,7 +116,6 @@ def test_zero_current_price_is_rejected():
             conviction=InvestmentConviction.HIGH,
             investment_thesis="Valid investment thesis.",
             key_catalysts=["Catalyst"],
-            key_risks=["Risk"],
             invalidation_conditions=["Invalidation condition"],
             supporting_evidence=["Evidence"],
         )
@@ -140,7 +133,6 @@ def test_empty_ticker_is_rejected():
             conviction=InvestmentConviction.HIGH,
             investment_thesis="Valid investment thesis.",
             key_catalysts=["Catalyst"],
-            key_risks=["Risk"],
             invalidation_conditions=["Invalidation condition"],
             supporting_evidence=["Evidence"],
         )
@@ -158,25 +150,6 @@ def test_empty_investment_thesis_is_rejected():
             conviction=InvestmentConviction.HIGH,
             investment_thesis="",
             key_catalysts=["Catalyst"],
-            key_risks=["Risk"],
-            invalidation_conditions=["Invalidation condition"],
-            supporting_evidence=["Evidence"],
-        )
-
-
-def test_empty_key_risks_are_rejected():
-    with pytest.raises(ValidationError):
-        InvestmentDecision(
-            ticker="NVDA",
-            recommendation=InvestmentRecommendation.BUY,
-            investment_horizon=InvestmentHorizon.MEDIUM_TERM,
-            current_price=180.0,
-            target_price=216.0,
-            expected_upside=0.20,
-            conviction=InvestmentConviction.HIGH,
-            investment_thesis="Valid investment thesis.",
-            key_catalysts=["Catalyst"],
-            key_risks=[],
             invalidation_conditions=["Invalidation condition"],
             supporting_evidence=["Evidence"],
         )
@@ -194,13 +167,12 @@ def test_empty_supporting_evidence_is_rejected():
             conviction=InvestmentConviction.HIGH,
             investment_thesis="Valid investment thesis.",
             key_catalysts=["Catalyst"],
-            key_risks=["Risk"],
             invalidation_conditions=["Invalidation condition"],
             supporting_evidence=[],
         )
 
 
-def test_extra_fields_are_rejected():
+def test_key_risks_is_not_part_of_investment_decision_contract():
     with pytest.raises(ValidationError):
         InvestmentDecision(
             ticker="NVDA",
@@ -212,8 +184,7 @@ def test_extra_fields_are_rejected():
             conviction=InvestmentConviction.HIGH,
             investment_thesis="Valid investment thesis.",
             key_catalysts=["Catalyst"],
-            key_risks=["Risk"],
             invalidation_conditions=["Invalidation condition"],
             supporting_evidence=["Evidence"],
-            unexpected_field="not allowed",
+            key_risks=["Risk belongs to RiskAnalysis"],
         )

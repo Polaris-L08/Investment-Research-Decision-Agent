@@ -117,7 +117,9 @@ Decision requirements:
    current price and target price.
 8. Summarize the investment thesis using the supplied evidence.
 9. Identify the key catalysts supported by the research.
-10. Identify the key risks supported by the risk analysis.
+10. Evaluate how the supplied risks affect the recommendation and thesis.
+    Do not generate a separate key_risks list; RiskAnalysis is the single
+    source of truth for the report's key risk list.
 11. Identify conditions that would invalidate the investment thesis.
 12. Provide supporting evidence from the supplied research,
     valuation, and risk analysis.

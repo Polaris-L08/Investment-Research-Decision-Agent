@@ -170,10 +170,6 @@ def make_investment_decision() -> InvestmentDecision:
             "Continued AI infrastructure investment",
             "Strong demand for accelerated computing",
         ],
-        key_risks=[
-            "Valuation Multiple Compression",
-            "Competitive Pressure",
-        ],
         invalidation_conditions=[
             "Material deterioration in growth expectations",
             "Sustained loss of competitive position",
@@ -269,7 +265,7 @@ def test_investment_decision_preserves_thesis_and_evidence():
 
     assert decision.investment_thesis
     assert decision.key_catalysts
-    assert decision.key_risks
+    assert not hasattr(decision, "key_risks")
     assert decision.invalidation_conditions
     assert decision.supporting_evidence
 

@@ -138,13 +138,7 @@ def make_risk_analysis(
 
 def make_investment_decision(
     ticker: str = "NVDA",
-    key_risks: list[str] | None = None,
 ) -> InvestmentDecision:
-    if key_risks is None:
-        key_risks = [
-            "Valuation Multiple Compression",
-        ]
-
     return InvestmentDecision(
         ticker=ticker,
         recommendation=InvestmentRecommendation.BUY,
@@ -160,7 +154,6 @@ def make_investment_decision(
         key_catalysts=[
             "Continued AI infrastructure investment",
         ],
-        key_risks=key_risks,
         invalidation_conditions=[
             "Material deterioration in growth expectations",
         ],
@@ -240,6 +233,7 @@ def test_build_investment_report_preserves_phase7_facts():
     assert report.risk_analysis.key_risks == [
         "Valuation Multiple Compression",
     ]
+    assert not hasattr(report.investment_decision, "key_risks")
 
 
 def test_build_investment_report_rejects_ticker_mismatch():
@@ -263,7 +257,6 @@ def test_build_investment_report_rejects_valuation_decision_mismatch():
         conviction=InvestmentConviction.MEDIUM,
         investment_thesis="Test thesis.",
         key_catalysts=["Test catalyst."],
-        key_risks=["Valuation Multiple Compression"],
         invalidation_conditions=["Test invalidation."],
         supporting_evidence=["Test evidence."],
     )
@@ -275,15 +268,14 @@ def test_build_investment_report_rejects_valuation_decision_mismatch():
         build_investment_report(**inputs)
 
 
-def test_build_investment_report_rejects_risk_decision_mismatch():
+def test_build_investment_report_uses_risk_analysis_as_risk_source():
     inputs = build_inputs()
+    inputs["risk_analysis"] = make_risk_analysis()
 
-    inputs["investment_decision"] = make_investment_decision(
-        key_risks=["Different risk"],
-    )
+    report = build_investment_report(**inputs)
 
-    with pytest.raises(
-        ValueError,
-        match="key_risks",
-    ):
-        build_investment_report(**inputs)
+    assert report.risk_analysis.key_risks == [
+        "Valuation Multiple Compression",
+    ]
+    assert "Valuation Multiple Compression" in report.risk_summary
+    assert not hasattr(report.investment_decision, "key_risks")
